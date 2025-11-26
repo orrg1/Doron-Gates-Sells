@@ -3,7 +3,8 @@ import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, Arro
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 // --- הגדרות API של GEMINI ---
-const apiKey = ""; // הסביבה תספק את המפתח בזמן ריצה
+// שים לב: עליך להדביק כאן את המפתח שלך כדי שה-AI יעבוד
+const apiKey = ""; 
 
 // פונקציית עזר לניתוח שורה בודדת ב-CSV
 const parseCSVLine = (line) => {
@@ -327,7 +328,7 @@ const AIReportModal = ({ isOpen, onClose, isLoading, report }) => {
 };
 
 const App = () => {
-  // אתחול המצב מ-localStorage אם קיים, אחרת מערך ריק
+  // 1. טעינת נתונים מ-LocalStorage בעלייה הראשונה
   const [rawData, setRawData] = useState(() => {
     const savedData = localStorage.getItem('dashboardData');
     return savedData ? JSON.parse(savedData) : [];
@@ -348,13 +349,38 @@ const App = () => {
   const [selectedProduct, setSelectedProduct] = useState([]); 
   const [selectedSku, setSelectedSku] = useState(''); 
   
-  const [pieMetric, setPieMetric] = useState('quantity'); // Default to Quantity
+  const [pieMetric, setPieMetric] = useState('quantity'); 
 
-  // שמירת נתונים ב-localStorage בכל שינוי
+  // 2. אפקט מרכזי שמגיב לשינויים בנתונים: שומר ומעדכן תאריכים
   useEffect(() => {
-    localStorage.setItem('dashboardData', JSON.stringify(rawData));
+    // שמירה בזיכרון
+    if (rawData.length > 0) {
+        localStorage.setItem('dashboardData', JSON.stringify(rawData));
+        
+        // חישוב תאריכים ועדכון מסננים
+        const dates = [...new Set(rawData.map(d => d.date).filter(Boolean))];
+        const sortedDates = dates.sort((a, b) => getComparableDateValue(a) - getComparableDateValue(b));
+        setAvailableDates(sortedDates);
+        
+        // עדכון ברירת מחדל של הפילטר רק אם הוא ריק
+        if (sortedDates.length > 0 && (!dateFilter.start || !dateFilter.end)) {
+            setDateFilter({ start: sortedDates[0], end: sortedDates[sortedDates.length - 1] });
+        }
+    } else {
+        // אם אין נתונים (ניקוי או טעינה ראשונה ריקה), נטען נתוני דוגמה
+        const savedData = localStorage.getItem('dashboardData');
+        if (!savedData) {
+            try {
+              const parsed = parseCSV(MOCK_CSV);
+              processData(parsed, false);
+            } catch (e) {
+              console.error("Error parsing initial data", e);
+            }
+        }
+    }
   }, [rawData]);
 
+  // טעינת ספריית XLSX
   useEffect(() => {
     const script = document.createElement('script');
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
@@ -363,27 +389,6 @@ const App = () => {
     document.body.appendChild(script);
     if (window.XLSX) setXlsxLoaded(true);
   }, []);
-
-  // טעינה ראשונית של MOCK_CSV רק אם ה-localStorage ריק
-  useEffect(() => {
-    if (rawData.length === 0) {
-        try {
-          const parsed = parseCSV(MOCK_CSV);
-          processData(parsed, false); // טעינה ראשונית - החלפה
-        } catch (e) {
-          console.error("Error parsing initial data", e);
-        }
-    } else {
-        // אם יש נתונים ב-storage, רק נעדכן את הפילטרים (תאריכים)
-        const dates = [...new Set(rawData.map(d => d.date).filter(Boolean))];
-        const sortedDates = dates.sort((a, b) => getComparableDateValue(a) - getComparableDateValue(b));
-        setAvailableDates(sortedDates);
-        if (sortedDates.length > 0) {
-            // אנחנו לא דורסים את הבחירה של המשתמש אם כבר בחר, אבל כאן זה טעינה ראשונית של האפליקציה
-            setDateFilter({ start: sortedDates[0] || '', end: sortedDates[sortedDates.length - 1] || '' });
-        }
-    }
-  }, []); // רוץ פעם אחת בטעינה
 
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
@@ -400,7 +405,7 @@ const App = () => {
           const firstSheetName = workbook.SheetNames[0];
           const worksheet = workbook.Sheets[firstSheetName];
           const jsonData = window.XLSX.utils.sheet_to_json(worksheet, { defval: "" });
-          processData(jsonData, true); // טעינת קובץ - הוספה
+          processData(jsonData, true); // הוספה לקיים
         } catch (error) {
           console.error("Error parsing Excel file", error);
           alert("שגיאה בקריאת קובץ האקסל");
@@ -413,34 +418,30 @@ const App = () => {
       reader.onload = (e) => {
         const text = e.target.result;
         const parsed = parseCSV(text);
-        processData(parsed, true); // טעינת קובץ - הוספה
+        processData(parsed, true); // הוספה לקיים
         setLoading(false);
       };
       reader.readAsText(file);
     }
   };
 
-  // עיבוד נתונים משודרג שתומך במספר שמות לעמודות ומיזוג
   const processData = (parsedRows, shouldAppend = false) => {
     const cleanData = parsedRows.map((row, index) => {
-      // בדיקת שמות עמודות אפשריים לסכום
       const rawTotal = 
         row['סה"כ סכום'] || 
         row['סה""כ סכום'] || 
         row['סה״כ סכום'] || 
-        row['הכנסה בשקלים'] || // שם חדש
+        row['הכנסה בשקלים'] || 
         row['סה"כ'] || 
         '0';
       
       const total = parseFloat(rawTotal.toString().replace(/[^\d.-]/g, ''));
       const quantity = parseFloat(row['כמות'] || '0');
 
-      // מיפוי גמיש לשדות
-      const date = row['תאריך'] || row['חודש']; // תמיכה גם ב"חודש"
-      const sku = row['מקט מוצר'] || row['מק\'ט'] || row['מקט']; // תמיכה בגרסאות מק"ט
-      const description = row['תיאור מוצר'] || row['תאור מוצר'] || row['תיאור']; // תמיכה ב"תאור"
+      const date = row['תאריך'] || row['חודש']; 
+      const sku = row['מקט מוצר'] || row['מק\'ט'] || row['מקט'];
+      const description = row['תיאור מוצר'] || row['תאור מוצר'] || row['תיאור'];
 
-      // יצירת מזהה ייחודי כדי לאפשר מיזוג
       const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${index}`;
 
       return {
@@ -452,30 +453,20 @@ const App = () => {
         total: isNaN(total) ? 0 : total,
         unit: row['יחידה'] || row['יח\'']
       };
-    }).filter(item => item.description); // סינון שורות ריקות
+    }).filter(item => item.description);
     
-    // מיזוג נתונים אם צריך
-    const updatedData = shouldAppend ? [...rawData, ...cleanData] : cleanData;
-
-    // עדכון טווח התאריכים
-    const dates = [...new Set(updatedData.map(d => d.date).filter(Boolean))];
-    const sortedDates = dates.sort((a, b) => getComparableDateValue(a) - getComparableDateValue(b));
-    
-    setAvailableDates(sortedDates);
-    if (sortedDates.length > 0) {
-      setDateFilter({ start: sortedDates[0] || '', end: sortedDates[sortedDates.length - 1] || '' });
-    }
-    
-    setRawData(updatedData);
+    // עדכון הסטייט יגרור אוטומטית שמירה ב-useEffect
+    setRawData(prev => shouldAppend ? [...prev, ...cleanData] : cleanData);
   };
 
   const clearData = () => {
     if (window.confirm("האם אתה בטוח שברצונך למחוק את כל הנתונים?")) {
         setRawData([]);
         setAvailableDates([]);
+        setDateFilter({ start: '', end: '' });
         setSelectedProduct([]);
         setSelectedSku('');
-        localStorage.removeItem('dashboardData'); // ניקוי מהזיכרון הקבוע
+        localStorage.removeItem('dashboardData');
     }
   };
 
@@ -698,15 +689,10 @@ const App = () => {
           </div>
           
           <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
-             {/* AI Button */}
-             <button
-                onClick={generateAIInsight}
-                className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-lg shadow-md hover:shadow-lg transition-all transform hover:-translate-y-0.5 text-sm font-bold whitespace-nowrap"
-             >
+             <button onClick={generateAIInsight} className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-lg shadow-md hover:shadow-lg transition-all transform hover:-translate-y-0.5 text-sm font-bold whitespace-nowrap">
                <Sparkles className="w-4 h-4 text-yellow-300" />
                <span>צור דוח תובנות AI</span>
              </button>
-
              <div className="w-px h-6 bg-slate-200 hidden sm:block mx-1"></div>
              
              {/* Clear Button */}
