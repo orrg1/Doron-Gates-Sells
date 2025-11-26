@@ -3,7 +3,7 @@ import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, Arro
 import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 // --- הגדרות API של GEMINI ---
-const apiKey = "AIzaSyBliujKxcsP_R_nPl0dVRdffZHa3wCiodA"; // המערכת תספק את המפתח באופן אוטומטי
+const apiKey = ""; // הסביבה תספק את המפתח בזמן ריצה
 
 // פונקציית עזר לניתוח שורה בודדת ב-CSV
 const parseCSVLine = (line) => {
@@ -327,7 +327,12 @@ const AIReportModal = ({ isOpen, onClose, isLoading, report }) => {
 };
 
 const App = () => {
-  const [rawData, setRawData] = useState([]);
+  // אתחול המצב מ-localStorage אם קיים, אחרת מערך ריק
+  const [rawData, setRawData] = useState(() => {
+    const savedData = localStorage.getItem('dashboardData');
+    return savedData ? JSON.parse(savedData) : [];
+  });
+
   const [searchTerm, setSearchTerm] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: 'date', direction: 'desc' });
   const [loading, setLoading] = useState(false);
@@ -345,6 +350,11 @@ const App = () => {
   
   const [pieMetric, setPieMetric] = useState('quantity'); // Default to Quantity
 
+  // שמירת נתונים ב-localStorage בכל שינוי
+  useEffect(() => {
+    localStorage.setItem('dashboardData', JSON.stringify(rawData));
+  }, [rawData]);
+
   useEffect(() => {
     const script = document.createElement('script');
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
@@ -354,14 +364,26 @@ const App = () => {
     if (window.XLSX) setXlsxLoaded(true);
   }, []);
 
+  // טעינה ראשונית של MOCK_CSV רק אם ה-localStorage ריק
   useEffect(() => {
-    try {
-      const parsed = parseCSV(MOCK_CSV);
-      processData(parsed, false); // טעינה ראשונית - החלפה
-    } catch (e) {
-      console.error("Error parsing initial data", e);
+    if (rawData.length === 0) {
+        try {
+          const parsed = parseCSV(MOCK_CSV);
+          processData(parsed, false); // טעינה ראשונית - החלפה
+        } catch (e) {
+          console.error("Error parsing initial data", e);
+        }
+    } else {
+        // אם יש נתונים ב-storage, רק נעדכן את הפילטרים (תאריכים)
+        const dates = [...new Set(rawData.map(d => d.date).filter(Boolean))];
+        const sortedDates = dates.sort((a, b) => getComparableDateValue(a) - getComparableDateValue(b));
+        setAvailableDates(sortedDates);
+        if (sortedDates.length > 0) {
+            // אנחנו לא דורסים את הבחירה של המשתמש אם כבר בחר, אבל כאן זה טעינה ראשונית של האפליקציה
+            setDateFilter({ start: sortedDates[0] || '', end: sortedDates[sortedDates.length - 1] || '' });
+        }
     }
-  }, []);
+  }, []); // רוץ פעם אחת בטעינה
 
   const handleFileUpload = (event) => {
     const file = event.target.files[0];
@@ -453,6 +475,7 @@ const App = () => {
         setAvailableDates([]);
         setSelectedProduct([]);
         setSelectedSku('');
+        localStorage.removeItem('dashboardData'); // ניקוי מהזיכרון הקבוע
     }
   };
 
@@ -675,10 +698,15 @@ const App = () => {
           </div>
           
           <div className="flex flex-col sm:flex-row items-center gap-3 w-full md:w-auto">
-             <button onClick={generateAIInsight} className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-lg shadow-md hover:shadow-lg transition-all transform hover:-translate-y-0.5 text-sm font-bold whitespace-nowrap">
+             {/* AI Button */}
+             <button
+                onClick={generateAIInsight}
+                className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-indigo-600 to-purple-600 hover:from-indigo-700 hover:to-purple-700 text-white rounded-lg shadow-md hover:shadow-lg transition-all transform hover:-translate-y-0.5 text-sm font-bold whitespace-nowrap"
+             >
                <Sparkles className="w-4 h-4 text-yellow-300" />
                <span>צור דוח תובנות AI</span>
              </button>
+
              <div className="w-px h-6 bg-slate-200 hidden sm:block mx-1"></div>
              
              {/* Clear Button */}
@@ -711,13 +739,16 @@ const App = () => {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        
+        {/* Advanced Filters Bar */}
         <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex flex-col md:flex-row gap-4 items-center">
           <div className="flex items-center gap-2 text-slate-500 font-medium text-sm whitespace-nowrap">
             <Filter className="w-4 h-4" />
             סינון מתקדם:
           </div>
+
           <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 w-full">
-            {/* Product Filter Multi-Select - Limited to 5 */}
+            {/* Product Filter Multi-Select */}
             <Autocomplete 
               options={uniqueProducts}
               value={selectedProduct}
@@ -727,6 +758,7 @@ const App = () => {
               multiple={true}
               maxSelections={5}
             />
+
             {/* SKU Filter Single-Select */}
             <Autocomplete 
               options={uniqueSkus}
@@ -736,17 +768,40 @@ const App = () => {
               icon={Tag}
             />
           </div>
+
           {(selectedProduct.length > 0 || selectedSku || searchTerm) && (
-            <button onClick={resetAllFilters} className="px-4 py-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg text-sm font-medium transition-colors whitespace-nowrap">
+            <button 
+              onClick={resetAllFilters}
+              className="px-4 py-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg text-sm font-medium transition-colors whitespace-nowrap"
+            >
               נקה סינון
             </button>
           )}
         </div>
 
+        {/* KPI Cards */}
         <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6">
-          <Card title="סה״כ הכנסות" value={formatCurrency(stats.totalRevenue)} subtext={selectedProduct.length > 0 ? 'עבור המוצרים שנבחרו' : selectedSku ? 'עבור המק״ט הנבחר' : `סה״כ בתקופה הנבחרת`} icon={DollarSign} color="bg-blue-500" />
-          <Card title="ממוצע הכנסה חודשי" value={formatCurrency(stats.avgRevenue)} subtext={`לפי ${stats.monthsCount} חודשים בטווח`} icon={Activity} color="bg-amber-500" />
-          <Card title="סה״כ פריטים" value={stats.totalQuantity.toLocaleString()} subtext="יחידות סה״כ בסינון הנוכחי" icon={Package} color="bg-emerald-500" />
+          <Card 
+            title="סה״כ הכנסות" 
+            value={formatCurrency(stats.totalRevenue)} 
+            subtext={selectedProduct.length > 0 ? 'עבור המוצרים שנבחרו' : selectedSku ? 'עבור המק״ט הנבחר' : `סה״כ בתקופה הנבחרת`}
+            icon={DollarSign}
+            color="bg-blue-500"
+          />
+          <Card 
+            title="ממוצע הכנסה חודשי" 
+            value={formatCurrency(stats.avgRevenue)} 
+            subtext={`לפי ${stats.monthsCount} חודשים בטווח`}
+            icon={Activity}
+            color="bg-amber-500"
+          />
+          <Card 
+            title="סה״כ פריטים" 
+            value={stats.totalQuantity.toLocaleString()} 
+            subtext="יחידות סה״כ בסינון הנוכחי"
+            icon={Package}
+            color="bg-emerald-500"
+          />
           
           <Card 
             title="ממוצע כמות חודשי" 
@@ -756,20 +811,39 @@ const App = () => {
             color="bg-cyan-500" 
           />
           
-          <Card title="מוצרים ייחודיים" value={stats.uniqueProducts} subtext="סוגים בסינון הנוכחי" icon={Filter} color="bg-purple-500" />
+          <Card 
+            title="מוצרים ייחודיים" 
+            value={stats.uniqueProducts} 
+            subtext="סוגים בסינון הנוכחי"
+            icon={Filter}
+            color="bg-purple-500"
+          />
         </div>
 
+        {/* Charts Row */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Monthly Sales & Quantity Chart */}
           <div className="bg-white p-6 rounded-xl border border-slate-100 shadow-sm">
-            <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><Calendar className="w-5 h-5 text-blue-500" />מכירות וכמות לפי חודש</h3>
+            <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
+              <Calendar className="w-5 h-5 text-blue-500" />
+              מכירות וכמות לפי חודש
+            </h3>
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
                 <BarChart data={monthlyData}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                   <XAxis dataKey="name" stroke="#64748b" />
+                  {/* ציר שמאלי - כסף */}
                   <YAxis yAxisId="left" stroke="#3b82f6" tickFormatter={(val) => `₪${val/1000}k`} />
+                  {/* ציר ימני - כמות */}
                   <YAxis yAxisId="right" orientation="right" stroke="#10b981" />
-                  <RechartsTooltip formatter={(value, name) => { if (name.includes('מכירות')) return formatCurrency(value); return value.toLocaleString(); }} contentStyle={{ backgroundColor: '#fff', borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
+                  <RechartsTooltip 
+                    formatter={(value, name) => {
+                      if (name.includes('מכירות')) return formatCurrency(value);
+                      return value.toLocaleString();
+                    }}
+                    contentStyle={{ backgroundColor: '#fff', borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                  />
                   <Legend />
                   <Bar yAxisId="left" dataKey="sales" name="מכירות (₪)" fill="#3b82f6" radius={[4, 4, 0, 0]} />
                   <Bar yAxisId="right" dataKey="quantity" name="כמות (יח')" fill="#10b981" radius={[4, 4, 0, 0]} />
@@ -777,13 +851,16 @@ const App = () => {
               </ResponsiveContainer>
             </div>
           </div>
-          
+
+          {/* Top Products Pie Chart */}
           <div className="bg-white p-6 rounded-xl border border-slate-100 shadow-sm flex flex-col">
             <div className="flex justify-between items-start mb-6">
                 <h3 className="text-lg font-bold flex items-center gap-2">
                     <TrendingUp className="w-5 h-5 text-emerald-500" />
                     {selectedProduct.length > 0 ? 'התפלגות מוצרים נבחרים' : '5 המוצרים המובילים'}
                 </h3>
+                
+                {/* Toggle Buttons for Pie Chart */}
                 <div className="flex bg-slate-100 rounded-lg p-1">
                     <button 
                         onClick={() => setPieMetric('revenue')}
@@ -799,6 +876,7 @@ const App = () => {
                     </button>
                 </div>
             </div>
+
             <div className="h-64 flex items-center justify-center flex-1">
               {topProducts.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
@@ -812,50 +890,99 @@ const App = () => {
                         paddingAngle={5} 
                         dataKey="value"
                     >
-                      {topProducts.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
+                      {topProducts.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                      ))}
                     </Pie>
                     {/* שימוש ב-Tooltip המותאם אישית */}
                     <RechartsTooltip content={<CustomPieTooltip />} />
                     <Legend layout="vertical" align="right" verticalAlign="middle" wrapperStyle={{ fontSize: '11px' }} />
                   </PieChart>
                 </ResponsiveContainer>
-              ) : <p className="text-slate-400">אין נתונים להצגה בטווח הנבחר</p>}
+              ) : (
+                <p className="text-slate-400">אין נתונים להצגה בטווח הנבחר</p>
+              )}
             </div>
           </div>
         </div>
 
+        {/* Data Table Section */}
         <div className="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
           <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row justify-between items-center gap-4">
             <div className="flex items-center gap-2">
               <h3 className="text-lg font-bold">פירוט עסקאות</h3>
-              {filteredData.length < rawData.length && <span className="bg-amber-100 text-amber-700 text-xs px-2 py-1 rounded-full font-medium">מציג נתונים מסוננים</span>}
+              {filteredData.length < rawData.length && (
+                <span className="bg-amber-100 text-amber-700 text-xs px-2 py-1 rounded-full font-medium">
+                  מציג נתונים מסוננים
+                </span>
+              )}
             </div>
+            
             <div className="relative w-full sm:w-72">
               <Search className="absolute right-3 top-2.5 w-4 h-4 text-slate-400" />
-              <input type="text" placeholder="חיפוש חופשי בטבלה..." className="w-full pl-4 pr-10 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+              <input 
+                type="text" 
+                placeholder="חיפוש חופשי בטבלה..." 
+                className="w-full pl-4 pr-10 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
             </div>
           </div>
+          
           <div className="overflow-x-auto">
             <table className="w-full text-sm text-right">
               <thead className="bg-slate-50 text-slate-500 font-medium">
                 <tr>
-                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('date')}><div className="flex items-center gap-1">תאריך{sortConfig.key === 'date' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}</div></th>
+                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('date')}>
+                    <div className="flex items-center gap-1">
+                      תאריך
+                      {sortConfig.key === 'date' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}
+                    </div>
+                  </th>
                   <th className="px-6 py-3">מק״ט</th>
-                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('description')}><div className="flex items-center gap-1">תיאור מוצר{sortConfig.key === 'description' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}</div></th>
-                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('quantity')}><div className="flex items-center gap-1">כמות{sortConfig.key === 'quantity' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}</div></th>
-                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('total')}><div className="flex items-center gap-1">סה״כ סכום{sortConfig.key === 'total' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}</div></th>
+                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('description')}>
+                    <div className="flex items-center gap-1">
+                      תיאור מוצר
+                      {sortConfig.key === 'description' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}
+                    </div>
+                  </th>
+                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('quantity')}>
+                     <div className="flex items-center gap-1">
+                      כמות
+                      {sortConfig.key === 'quantity' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}
+                    </div>
+                  </th>
+                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('total')}>
+                     <div className="flex items-center gap-1">
+                      סה״כ סכום
+                      {sortConfig.key === 'total' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}
+                    </div>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredData.length > 0 ? filteredData.map((row) => (
+                {filteredData.length > 0 ? (
+                  filteredData.map((row) => (
                     <tr key={row.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-6 py-4 text-slate-500 whitespace-nowrap">{row.date}</td>
                       <td className="px-6 py-4 font-mono text-xs text-slate-500">{row.sku}</td>
                       <td className="px-6 py-4 font-medium text-slate-800">{row.description}</td>
-                      <td className="px-6 py-4 text-slate-600"><span className="bg-slate-100 px-2 py-1 rounded text-xs font-bold">{row.quantity} {row.unit}</span></td>
+                      <td className="px-6 py-4 text-slate-600">
+                        <span className="bg-slate-100 px-2 py-1 rounded text-xs font-bold">
+                          {row.quantity} {row.unit}
+                        </span>
+                      </td>
                       <td className="px-6 py-4 font-bold text-slate-800">{formatCurrency(row.total)}</td>
                     </tr>
-                  )) : <tr><td colSpan="5" className="px-6 py-12 text-center text-slate-400">לא נמצאו נתונים התואמים לטווח התאריכים או לחיפוש</td></tr>}
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan="5" className="px-6 py-12 text-center text-slate-400">
+                      לא נמצאו נתונים התואמים לטווח התאריכים או לחיפוש
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -864,6 +991,7 @@ const App = () => {
             <span>סודר לפי: {sortConfig.key === 'total' ? 'סכום' : sortConfig.key === 'quantity' ? 'כמות' : sortConfig.key === 'date' ? 'תאריך' : 'תיאור'}</span>
           </div>
         </div>
+
       </main>
     </div>
   );
