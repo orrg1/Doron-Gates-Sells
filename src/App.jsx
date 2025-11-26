@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, ArrowUpDown, ArrowUp, ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot, Loader2, FileText, Check, Trash2 } from 'lucide-react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 // --- הגדרות API של GEMINI ---
 // שים לב: עליך להדביק כאן את המפתח שלך כדי שה-AI יעבוד
@@ -530,6 +530,7 @@ const App = () => {
     const avgRevenue = monthsCount > 0 ? totalRevenue / monthsCount : 0;
     const avgQuantity = monthsCount > 0 ? totalQuantity / monthsCount : 0;
 
+    // הכנת נתונים לגרף החודשי
     const monthsMap = {};
     
     data.forEach(item => {
@@ -540,14 +541,43 @@ const App = () => {
       }
       monthsMap[monthStr].sales += item.total;
       monthsMap[monthStr].quantity += item.quantity;
+
+      // אם נבחרו מוצרים ספציפיים, נוסיף פירוט לכל מוצר
+      if (selectedProduct.length > 0) {
+        // מפתח דינמי להכנסה
+        if (!monthsMap[monthStr][item.description]) {
+            monthsMap[monthStr][item.description] = 0;
+        }
+        monthsMap[monthStr][item.description] += item.total;
+
+        // מפתח דינמי לכמות (עם סיומת מיוחדת כדי להבדיל)
+        const quantityKey = `${item.description}_quantity`;
+        if (!monthsMap[monthStr][quantityKey]) {
+            monthsMap[monthStr][quantityKey] = 0;
+        }
+        monthsMap[monthStr][quantityKey] += item.quantity;
+      }
     });
     
-    const monthlyChartData = Object.keys(monthsMap).map(key => ({
-      name: key,
-      sales: monthsMap[key].sales,
-      quantity: monthsMap[key].quantity,
-      order: HebrewMonths[key] || 99
-    })).sort((a, b) => a.order - b.order);
+    const monthlyChartData = Object.keys(monthsMap).map(key => {
+        const monthEntry = {
+            name: key,
+            sales: monthsMap[key].sales,
+            quantity: monthsMap[key].quantity,
+            order: HebrewMonths[key] || 99
+        };
+        
+        // אם יש מוצרים נבחרים, נעתיק את המידע שלהם לרשומה של החודש
+        if (selectedProduct.length > 0) {
+            selectedProduct.forEach(prod => {
+                // אם בחודש מסוים אין מכירות למוצר, נשים 0 כדי שהגרף יהיה רציף
+                monthEntry[prod] = monthsMap[key][prod] || 0;
+                monthEntry[`${prod}_quantity`] = monthsMap[key][`${prod}_quantity`] || 0;
+            });
+        }
+        
+        return monthEntry;
+    }).sort((a, b) => a.order - b.order);
 
     const productMap = {};
     data.forEach(item => {
@@ -816,24 +846,73 @@ const App = () => {
             </h3>
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={monthlyData}>
+                {/* שימוש ב-ComposedChart כדי לשלב עמודות וקו */}
+                <ComposedChart data={monthlyData}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                   <XAxis dataKey="name" stroke="#64748b" />
-                  {/* ציר שמאלי - כסף */}
+                  
+                  {/* ציר שמאלי - כסף (עמודות) */}
                   <YAxis yAxisId="left" stroke="#3b82f6" tickFormatter={(val) => `₪${val/1000}k`} />
-                  {/* ציר ימני - כמות */}
+                  
+                  {/* ציר ימני - כמות (קו) */}
                   <YAxis yAxisId="right" orientation="right" stroke="#10b981" />
+                  
                   <RechartsTooltip 
                     formatter={(value, name) => {
-                      if (name.includes('מכירות')) return formatCurrency(value);
-                      return value.toLocaleString();
+                      if (name.includes('כמות')) return value.toLocaleString();
+                      return formatCurrency(value);
                     }}
                     contentStyle={{ backgroundColor: '#fff', borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
                   />
                   <Legend />
-                  <Bar yAxisId="left" dataKey="sales" name="מכירות (₪)" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-                  <Bar yAxisId="right" dataKey="quantity" name="כמות (יח')" fill="#10b981" radius={[4, 4, 0, 0]} />
-                </BarChart>
+
+                  {/* אם יש מוצרים נבחרים - נציג עמודה נפרדת לכל מוצר (Stacked) */}
+                  {selectedProduct.length > 0 ? (
+                    <>
+                        {/* עמודות הכנסה */}
+                        {selectedProduct.map((prod, index) => (
+                          <Bar 
+                            key={prod}
+                            yAxisId="left" 
+                            dataKey={prod} // שם המוצר הוא המפתח
+                            name={prod} 
+                            stackId="a" // אותו ID גורם להם להערם זה על זה
+                            fill={COLORS[index % COLORS.length]} 
+                            radius={index === selectedProduct.length - 1 ? [4, 4, 0, 0] : [0, 0, 0, 0]}
+                          />
+                        ))}
+                        
+                        {/* קווי כמות - קו לכל מוצר */}
+                        {selectedProduct.map((prod, index) => (
+                          <Line 
+                            key={`${prod}_quantity`}
+                            yAxisId="right" 
+                            type="monotone" 
+                            dataKey={`${prod}_quantity`} 
+                            name={`${prod} (כמות)`} 
+                            stroke={COLORS[index % COLORS.length]} 
+                            strokeWidth={2}
+                            strokeDasharray="5 5" // קו מקווקו להבדלה
+                            dot={{ r: 3, fill: COLORS[index % COLORS.length] }}
+                          />
+                        ))}
+                    </>
+                  ) : (
+                    <>
+                        {/* ברירת מחדל - עמודה אחת לסה"כ מכירות וקו אחד לסה"כ כמות */}
+                        <Bar yAxisId="left" dataKey="sales" name="מכירות (₪)" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                        <Line 
+                            yAxisId="right" 
+                            type="monotone" 
+                            dataKey="quantity" 
+                            name="סה״כ כמות (יח')" 
+                            stroke="#10b981" 
+                            strokeWidth={3}
+                            dot={{ r: 4, fill: "#10b981" }}
+                        />
+                    </>
+                  )}
+                </ComposedChart>
               </ResponsiveContainer>
             </div>
           </div>
