@@ -495,10 +495,7 @@ const App = () => {
       const total = parseFloat(rawTotal.toString().replace(/[^\d.-]/g, ''));
       const quantity = parseFloat(row['כמות'] || '0');
 
-      // מיפוי ונרמול תאריך
-      let dateVal = row['תאריך'] || row['חודש']; 
-      const date = normalizeDate(dateVal);
-
+      const date = row['תאריך'] || row['חודש']; 
       const sku = row['מקט מוצר'] || row['מק\'ט'] || row['מקט'];
       const description = row['תיאור מוצר'] || row['תאור מוצר'] || row['תיאור'];
 
@@ -513,7 +510,7 @@ const App = () => {
         total: isNaN(total) ? 0 : total,
         unit: row['יחידה'] || row['יח\'']
       };
-    }).filter(item => item.description); // חייב שיהיה תיאור מוצר
+    }).filter(item => item.description);
     
     setRawData(prev => shouldAppend ? [...prev, ...cleanData] : cleanData);
   };
@@ -850,7 +847,7 @@ const App = () => {
         </div>
 
         {/* KPI Cards */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6">
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
           <Card 
             title="סה״כ הכנסות" 
             value={formatCurrency(stats.totalRevenue)} 
@@ -879,14 +876,6 @@ const App = () => {
             subtext={selectedProduct.length > 0 ? "פירוט ממוצע ליחידה לחודש" : "יחידות בממוצע לחודש"} 
             icon={Layers} 
             color="bg-cyan-500" 
-          />
-          
-          <Card 
-            title="מוצרים ייחודיים" 
-            value={stats.uniqueProducts} 
-            subtext="סוגים בסינון הנוכחי"
-            icon={Filter}
-            color="bg-purple-500"
           />
         </div>
 
