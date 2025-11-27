@@ -3,8 +3,56 @@ import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, Arro
 import { ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 // --- הגדרות API של GEMINI ---
-// שים לב: עליך להדביק כאן את המפתח שלך כדי שה-AI יעבוד
-const apiKey = ""; 
+const apiKey = ""; // הדבק כאן את המפתח שלך
+
+// --- עזרי תאריך ---
+const HebrewMonthsMap = {
+  0: 'ינו', 1: 'פבר', 2: 'מרץ', 3: 'אפר', 4: 'מאי', 5: 'יונ',
+  6: 'יול', 7: 'אוג', 8: 'ספט', 9: 'אוק', 10: 'נוב', 11: 'דצמ'
+};
+
+const HebrewMonthsReverse = {
+  'ינו': 1, 'פבר': 2, 'מרץ': 3, 'אפר': 4, 'מאי': 5, 'יונ': 6,
+  'יול': 7, 'אוג': 8, 'ספט': 9, 'אוק': 10, 'נוב': 11, 'דצמ': 12
+};
+
+// המרת מספר אקסל לתאריך JS
+const excelDateToJSDate = (serial) => {
+   // Excel base date correction
+   const utc_days  = Math.floor(serial - 25569);
+   const utc_value = utc_days * 86400;                                        
+   const date_info = new Date(utc_value * 1000);
+   return date_info;
+}
+
+// פונקציה שמפרמטת כל סוג תאריך לפורמט האחיד "יול-25"
+const normalizeDate = (val) => {
+  if (!val) return '';
+  
+  // אם זה כבר בפורמט הנכון (טקסט עם מקף)
+  if (typeof val === 'string' && val.includes('-') && isNaN(parseFloat(val))) {
+    return val; 
+  }
+
+  let dateObj = null;
+
+  // בדיקה אם זה מספר אקסל
+  const numericVal = parseFloat(val);
+  if (!isNaN(numericVal) && numericVal > 30000 && numericVal < 60000) {
+    dateObj = excelDateToJSDate(numericVal);
+  } else {
+    // נסיון המרה סטנדרטי
+    dateObj = new Date(val);
+  }
+
+  if (dateObj && !isNaN(dateObj.getTime())) {
+    const month = HebrewMonthsMap[dateObj.getMonth()];
+    const year = dateObj.getFullYear().toString().slice(-2);
+    return `${month}-${year}`;
+  }
+
+  return val.toString(); // החזרת המקור אם נכשל
+};
 
 // פונקציית עזר לניתוח שורה בודדת ב-CSV
 const parseCSVLine = (line) => {
@@ -32,41 +80,68 @@ const parseCSVLine = (line) => {
   return row;
 };
 
-// פונקציית ניתוח CSV ראשית
+// פונקציית ניתוח CSV חכמה
 const parseCSV = (text) => {
-  const lines = text.split('\n').filter(l => l.trim());
-  if (lines.length === 0) return [];
-
-  const headers = parseCSVLine(lines[0]); 
+  const lines = text.split('\n');
   
-  return lines.slice(1).map(line => {
+  // 1. חיפוש שורת הכותרות
+  let headerRowIndex = -1;
+  let headers = [];
+
+  const knownHeaders = ['תאריך', 'חודש', 'מקט', 'מק"ט', "מק'ט", 'תיאור', 'תאור', 'כמות', 'סכום', 'הכנסה', 'מחיר', 'יחידה', "יח'"];
+
+  // סריקת 30 השורות הראשונות למציאת הכותרות
+  for (let i = 0; i < Math.min(lines.length, 30); i++) {
+    const line = lines[i];
+    if (!knownHeaders.some(k => line.includes(k))) continue;
+
+    const parsedLine = parseCSVLine(line);
+    const cleanLine = parsedLine.map(cell => cell.replace(/^"|"$/g, '').replace(/""/g, '"').trim());
+    
+    const matchCount = cleanLine.filter(cell => 
+      knownHeaders.some(k => cell.includes(k))
+    ).length;
+
+    if (matchCount >= 2) {
+      headerRowIndex = i;
+      headers = cleanLine;
+      break;
+    }
+  }
+
+  if (headerRowIndex === -1) {
+    // Fallback
+    const firstNonEmpty = lines.findIndex(l => l.trim());
+    if (firstNonEmpty === -1) return [];
+    headerRowIndex = firstNonEmpty;
+    headers = parseCSVLine(lines[firstNonEmpty]).map(c => c.replace(/^"|"$/g, '').replace(/""/g, '"').trim());
+  }
+
+  // 2. ניתוח הנתונים
+  const result = [];
+  for (let i = headerRowIndex + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+
     const values = parseCSVLine(line);
     const row = {};
+    let hasData = false;
+
     headers.forEach((header, index) => {
-      const cleanHeader = header.replace(/^"|"$/g, '').replace(/""/g, '"').trim();
+      if (!header) return; // דילוג על עמודות ריקות
+      
       if (index < values.length) {
-        row[cleanHeader] = values[index];
+        const val = values[index];
+        row[header] = val;
+        if (val && val.trim()) hasData = true;
       }
     });
-    return row;
-  });
-};
 
-const MOCK_CSV = `תאריך,מקט מוצר,תיאור מוצר,כמות,יחידה,"סה""כ סכום",מטבע
-יול-25,000,מוצר כללי,1164,יח',226754.43,"ש""ח"
-יול-25,005,משלוח אוריאן,9,יח',910.29,"ש""ח"
-יול-25,005DF00014,דגל 400 לציר קפיצים,8,יח',404,"ש""ח"
-יול-25,005DF00016,דגל 350 לציר קפיצים,16,יח',672,"ש""ח"
-יול-25,01251-000,גלאי כביש MD2010,3,יח',900.08,"ש""ח"
-אוג-25,IL00038,תושבת לזרוע,3,יח',40,"ש""ח"
-ספט-25,IL00038,תושבת לזרוע,3,יח',58.64,"ש""ח"
-אוק-25,IL00038,תושבת לזרוע,2,יח',0,"ש""ח"
-ספט-25,IL00043,תושבת לזרוע עגולה 100 + ברגים,1,יח',0,"ש""ח"
-אוג-25,IL00043,תושבת לזרוע עגולה 100 + ברגים,3,יח',70,"ש""ח"
-אוג-25,P123025,תושבת למנורה,11,יח',0,"ש""ח"
-אוק-25,P123025,תושבת למנורה,1,יח',25,"ש""ח"
-אוג-25,I500044 10001,תושבת מפסקי גבול למנוע גלילה,1,יח',110.17,"ש""ח"
-ספט-25,I099714,תושבת עליונה לקפיץ GIOTTO / MOOVI,1,יח',100,"ש""ח"`;
+    if (hasData) result.push(row);
+  }
+  
+  return result;
+};
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#84cc16', '#f43f5e', '#06b6d4'];
 
@@ -83,18 +158,13 @@ const Card = ({ title, value, subtext, icon: Icon, color }) => (
   </div>
 );
 
-const HebrewMonths = {
-  'ינו': 1, 'פבר': 2, 'מרץ': 3, 'אפר': 4, 'מאי': 5, 'יונ': 6,
-  'יול': 7, 'אוג': 8, 'ספט': 9, 'אוק': 10, 'נוב': 11, 'דצמ': 12
-};
-
 const getComparableDateValue = (dateStr) => {
   if (!dateStr || typeof dateStr !== 'string') return 0;
   const parts = dateStr.split('-');
   if (parts.length < 2) return 0;
   
   const [monthStr, yearStr] = parts;
-  const month = HebrewMonths[monthStr] || 0;
+  const month = HebrewMonthsReverse[monthStr] || 0;
   const year = parseInt(yearStr) + 2000;
   
   return (year * 100) + month;
@@ -106,7 +176,7 @@ const getMonthsDifference = (startStr, endStr) => {
   const parseDate = (d) => {
     const parts = d.split('-');
     return { 
-      m: HebrewMonths[parts[0]] || 1, 
+      m: HebrewMonthsReverse[parts[0]] || 1, 
       y: parseInt(parts[1]) + 2000 
     };
   };
@@ -328,7 +398,7 @@ const AIReportModal = ({ isOpen, onClose, isLoading, report }) => {
 };
 
 const App = () => {
-  // 1. טעינת נתונים מ-LocalStorage בעלייה הראשונה
+  // טעינה מ-localStorage
   const [rawData, setRawData] = useState(() => {
     const savedData = localStorage.getItem('dashboardData');
     return savedData ? JSON.parse(savedData) : [];
@@ -351,36 +421,22 @@ const App = () => {
   
   const [pieMetric, setPieMetric] = useState('quantity'); 
 
-  // 2. אפקט מרכזי שמגיב לשינויים בנתונים: שומר ומעדכן תאריכים
+  // אפקט מרכזי: שומר ב-localStorage ומחשב תאריכים
   useEffect(() => {
-    // שמירה בזיכרון
     if (rawData.length > 0) {
         localStorage.setItem('dashboardData', JSON.stringify(rawData));
         
-        // חישוב תאריכים ועדכון מסננים
         const dates = [...new Set(rawData.map(d => d.date).filter(Boolean))];
         const sortedDates = dates.sort((a, b) => getComparableDateValue(a) - getComparableDateValue(b));
         setAvailableDates(sortedDates);
         
-        // עדכון ברירת מחדל של הפילטר רק אם הוא ריק
+        // אתחול טווח תאריכים רק אם לא נבחר כלום ורק בטעינה הראשונית של הנתונים
         if (sortedDates.length > 0 && (!dateFilter.start || !dateFilter.end)) {
             setDateFilter({ start: sortedDates[0], end: sortedDates[sortedDates.length - 1] });
-        }
-    } else {
-        // אם אין נתונים (ניקוי או טעינה ראשונה ריקה), נטען נתוני דוגמה
-        const savedData = localStorage.getItem('dashboardData');
-        if (!savedData) {
-            try {
-              const parsed = parseCSV(MOCK_CSV);
-              processData(parsed, false);
-            } catch (e) {
-              console.error("Error parsing initial data", e);
-            }
         }
     }
   }, [rawData]);
 
-  // טעינת ספריית XLSX
   useEffect(() => {
     const script = document.createElement('script');
     script.src = "https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js";
@@ -405,7 +461,7 @@ const App = () => {
           const firstSheetName = workbook.SheetNames[0];
           const worksheet = workbook.Sheets[firstSheetName];
           const jsonData = window.XLSX.utils.sheet_to_json(worksheet, { defval: "" });
-          processData(jsonData, true); // הוספה לקיים
+          processData(jsonData, true); 
         } catch (error) {
           console.error("Error parsing Excel file", error);
           alert("שגיאה בקריאת קובץ האקסל");
@@ -418,7 +474,7 @@ const App = () => {
       reader.onload = (e) => {
         const text = e.target.result;
         const parsed = parseCSV(text);
-        processData(parsed, true); // הוספה לקיים
+        processData(parsed, true); 
         setLoading(false);
       };
       reader.readAsText(file);
@@ -432,13 +488,17 @@ const App = () => {
         row['סה""כ סכום'] || 
         row['סה״כ סכום'] || 
         row['הכנסה בשקלים'] || 
+        row['הכנסה'] ||
         row['סה"כ'] || 
         '0';
       
       const total = parseFloat(rawTotal.toString().replace(/[^\d.-]/g, ''));
       const quantity = parseFloat(row['כמות'] || '0');
 
-      const date = row['תאריך'] || row['חודש']; 
+      // מיפוי ונרמול תאריך
+      let dateVal = row['תאריך'] || row['חודש']; 
+      const date = normalizeDate(dateVal);
+
       const sku = row['מקט מוצר'] || row['מק\'ט'] || row['מקט'];
       const description = row['תיאור מוצר'] || row['תאור מוצר'] || row['תיאור'];
 
@@ -453,9 +513,8 @@ const App = () => {
         total: isNaN(total) ? 0 : total,
         unit: row['יחידה'] || row['יח\'']
       };
-    }).filter(item => item.description);
+    }).filter(item => item.description); // חייב שיהיה תיאור מוצר
     
-    // עדכון הסטייט יגרור אוטומטית שמירה ב-useEffect
     setRawData(prev => shouldAppend ? [...prev, ...cleanData] : cleanData);
   };
 
@@ -542,15 +601,12 @@ const App = () => {
       monthsMap[monthStr].sales += item.total;
       monthsMap[monthStr].quantity += item.quantity;
 
-      // אם נבחרו מוצרים ספציפיים, נוסיף פירוט לכל מוצר
       if (selectedProduct.length > 0) {
-        // מפתח דינמי להכנסה
         if (!monthsMap[monthStr][item.description]) {
             monthsMap[monthStr][item.description] = 0;
         }
         monthsMap[monthStr][item.description] += item.total;
 
-        // מפתח דינמי לכמות (עם סיומת מיוחדת כדי להבדיל)
         const quantityKey = `${item.description}_quantity`;
         if (!monthsMap[monthStr][quantityKey]) {
             monthsMap[monthStr][quantityKey] = 0;
@@ -564,13 +620,11 @@ const App = () => {
             name: key,
             sales: monthsMap[key].sales,
             quantity: monthsMap[key].quantity,
-            order: HebrewMonths[key] || 99
+            order: HebrewMonthsReverse[key] || 99
         };
         
-        // אם יש מוצרים נבחרים, נעתיק את המידע שלהם לרשומה של החודש
         if (selectedProduct.length > 0) {
             selectedProduct.forEach(prod => {
-                // אם בחודש מסוים אין מכירות למוצר, נשים 0 כדי שהגרף יהיה רציף
                 monthEntry[prod] = monthsMap[key][prod] || 0;
                 monthEntry[`${prod}_quantity`] = monthsMap[key][`${prod}_quantity`] || 0;
             });
