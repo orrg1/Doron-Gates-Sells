@@ -3,7 +3,8 @@ import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, Arro
 import { ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 // --- הגדרות API של GEMINI ---
-const apiKey = "AIzaSyBliujKxcsP_R_nPl0dVRdffZHa3wCiodA"; // הדבק כאן את המפתח שלך
+// שים לב: עליך להדביק כאן את המפתח שלך כדי שה-AI יעבוד
+const apiKey = "AIzaSyBliujKxcsP_R_nPl0dVRdffZHa3wCiodA"; 
 
 // --- עזרי תאריך וכלליים ---
 const HebrewMonthsMap = {
@@ -648,20 +649,26 @@ const App = () => {
     const monthsMap = {};
     filteredData.forEach(item => {
         if (!item.date) return;
-        const [monthStr] = item.date.split('-');
-        if (!monthsMap[monthStr]) monthsMap[monthStr] = { total: 0, quantity: 0 };
-        monthsMap[monthStr].total += item.total;
-        monthsMap[monthStr].quantity += item.quantity;
+        // שימוש בתאריך המלא כמפתח (כולל שנה)
+        const monthKey = item.date; 
+        if (!monthsMap[monthKey]) monthsMap[monthKey] = { total: 0, quantity: 0 };
+        monthsMap[monthKey].total += item.total;
+        monthsMap[monthKey].quantity += item.quantity;
         
         if (activeTab === 'sales' && selectedProduct.length > 0) {
-            if (!monthsMap[monthStr][item.description]) monthsMap[monthStr][item.description] = 0;
-            monthsMap[monthStr][item.description] += item.total;
+            if (!monthsMap[monthKey][item.description]) monthsMap[monthKey][item.description] = 0;
+            monthsMap[monthKey][item.description] += item.total;
             const qKey = `${item.description}_quantity`;
-            if (!monthsMap[monthStr][qKey]) monthsMap[monthStr][qKey] = 0;
-            monthsMap[monthStr][qKey] += item.quantity;
+            if (!monthsMap[monthKey][qKey]) monthsMap[monthKey][qKey] = 0;
+            monthsMap[monthKey][qKey] += item.quantity;
         }
     });
-    const monthly = Object.keys(monthsMap).map(key => ({ name: key, ...monthsMap[key], order: HebrewMonthsReverse[key] || 99 })).sort((a, b) => a.order - b.order);
+    
+    // מיון כרונולוגי לפי הערך ההשוואתי
+    const monthly = Object.keys(monthsMap).map(key => ({ 
+        name: key, 
+        ...monthsMap[key] 
+    })).sort((a, b) => getComparableDateValue(a.name) - getComparableDateValue(b.name));
 
     const entityMap = {};
     const keyField = activeTab === 'sales' ? 'description' : 'supplier';
