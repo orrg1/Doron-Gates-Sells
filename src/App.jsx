@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, ArrowUpDown, ArrowUp, ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot, Loader2, FileText, Check, Trash2, Truck, Wallet, LayoutDashboard, FileSpreadsheet, AlertTriangle } from 'lucide-react';
+import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, ArrowUpDown, ArrowUp, ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot, Loader2, FileText, Check, Trash2, Truck, Wallet, LayoutDashboard, FileSpreadsheet, AlertTriangle, ChevronLeft, ChevronRight } from 'lucide-react';
 import { ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 // --- הגדרות API של GEMINI ---
@@ -362,23 +362,31 @@ const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899'
 const App = () => {
   // נתונים
   const [salesData, setSalesData] = useState(() => {
-    const saved = localStorage.getItem('dashboardSalesData');
-    return saved ? JSON.parse(saved) : [];
+    try {
+        const saved = localStorage.getItem('dashboardSalesData');
+        return saved ? JSON.parse(saved) : [];
+    } catch (e) { return []; }
   });
   
   const [suppliersData, setSuppliersData] = useState(() => {
-    const saved = localStorage.getItem('dashboardSuppliersData');
-    return saved ? JSON.parse(saved) : [];
+    try {
+        const saved = localStorage.getItem('dashboardSuppliersData');
+        return saved ? JSON.parse(saved) : [];
+    } catch (e) { return []; }
   });
 
-  // שמות קבצים - כעת מערכים
+  // שמות קבצים
   const [salesFileNames, setSalesFileNames] = useState(() => {
-    const saved = localStorage.getItem('salesFileNames');
-    return saved ? JSON.parse(saved) : [];
+    try {
+        const saved = localStorage.getItem('salesFileNames');
+        return saved ? JSON.parse(saved) : [];
+    } catch (e) { return []; }
   });
   const [suppliersFileNames, setSuppliersFileNames] = useState(() => {
-    const saved = localStorage.getItem('suppliersFileNames');
-    return saved ? JSON.parse(saved) : [];
+    try {
+        const saved = localStorage.getItem('suppliersFileNames');
+        return saved ? JSON.parse(saved) : [];
+    } catch (e) { return []; }
   });
 
   const [activeTab, setActiveTab] = useState('sales'); 
@@ -390,9 +398,14 @@ const App = () => {
   const [aiLoading, setAiLoading] = useState(false);
   const [aiReport, setAiReport] = useState('');
   const [clearModalOpen, setClearModalOpen] = useState(false);
+  const [storageWarning, setStorageWarning] = useState(false);
   
   const [availableDates, setAvailableDates] = useState([]);
   const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
+  
+  // Pagination
+  const [currentPage, setCurrentPage] = useState(1);
+  const itemsPerPage = 50;
   
   // Filters
   const [selectedProduct, setSelectedProduct] = useState([]); 
@@ -401,15 +414,25 @@ const App = () => {
 
   const [pieMetric, setPieMetric] = useState('total');
 
-  // שמירה ל-LocalStorage
+  // שמירה בטוחה ל-LocalStorage
+  const saveToStorage = (key, data) => {
+    try {
+        localStorage.setItem(key, JSON.stringify(data));
+        setStorageWarning(false);
+    } catch (e) {
+        console.error("Quota exceeded", e);
+        setStorageWarning(true);
+    }
+  };
+
   useEffect(() => {
-    localStorage.setItem('dashboardSalesData', JSON.stringify(salesData));
-    localStorage.setItem('salesFileNames', JSON.stringify(salesFileNames));
+    saveToStorage('dashboardSalesData', salesData);
+    saveToStorage('salesFileNames', salesFileNames);
   }, [salesData, salesFileNames]);
 
   useEffect(() => {
-    localStorage.setItem('dashboardSuppliersData', JSON.stringify(suppliersData));
-    localStorage.setItem('suppliersFileNames', JSON.stringify(suppliersFileNames));
+    saveToStorage('dashboardSuppliersData', suppliersData);
+    saveToStorage('suppliersFileNames', suppliersFileNames);
   }, [suppliersData, suppliersFileNames]);
 
   const activeData = useMemo(() => {
@@ -427,6 +450,7 @@ const App = () => {
     if (sortedDates.length > 0 && (!dateFilter.start || !dateFilter.end)) {
         setDateFilter({ start: sortedDates[0], end: sortedDates[sortedDates.length - 1] });
     }
+    setCurrentPage(1); // Reset pagination on data change
   }, [activeData]);
 
   useEffect(() => {
@@ -438,7 +462,6 @@ const App = () => {
     if (window.XLSX) setXlsxLoaded(true);
   }, []);
 
-  // פונקציית קריאת קובץ בודד כ-Promise
   const readFile = (file) => {
     return new Promise((resolve) => {
         if (file.name.match(/\.xlsx?$/) && window.XLSX) {
@@ -449,7 +472,6 @@ const App = () => {
                     const firstSheetName = workbook.SheetNames[0];
                     const jsonData = window.XLSX.utils.sheet_to_json(workbook.Sheets[firstSheetName], { defval: "" });
                     
-                    // זיהוי סוג לפי מפתחות JSON
                     const keys = Object.keys(jsonData[0] || {});
                     let type = 'sales';
                     if (keys.some(k => k.includes('ספק') || k.includes('Supplier') || k.includes('הוצאה'))) type = 'suppliers';
@@ -481,13 +503,11 @@ const App = () => {
     const newSalesFiles = [];
     const newSuppliersFiles = [];
 
-    // קריאת כל הקבצים במקביל
     const results = await Promise.all(files.map(file => readFile(file)));
 
     results.forEach(({ data, type, fileName, error }) => {
         if (error || data.length === 0) return;
 
-        // עיבוד הנתונים של הקובץ הנוכחי
         const processed = data.map((row, index) => {
             const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${index}-${fileName}`;
             
@@ -520,7 +540,6 @@ const App = () => {
         }
     });
 
-    // עדכון ה-State באופן מרוכז
     if (newSalesData.length > 0) {
         setSalesData(prev => [...prev, ...newSalesData]);
         setSalesFileNames(prev => [...new Set([...prev, ...newSalesFiles])]);
@@ -534,7 +553,6 @@ const App = () => {
     }
 
     setLoading(false);
-    // איפוס ה-input כדי לאפשר העלאה חוזרת של אותו קובץ
     event.target.value = '';
   };
 
@@ -599,6 +617,19 @@ const App = () => {
     });
   }, [activeData, searchTerm, sortConfig, dateFilter, selectedProduct, selectedSku, selectedSupplier, activeTab]);
 
+  // Pagination Logic
+  const paginatedData = useMemo(() => {
+    const startIndex = (currentPage - 1) * itemsPerPage;
+    return filteredData.slice(startIndex, startIndex + itemsPerPage);
+  }, [filteredData, currentPage]);
+
+  const totalPages = Math.ceil(filteredData.length / itemsPerPage);
+
+  useEffect(() => {
+      setCurrentPage(1);
+  }, [activeTab, searchTerm, dateFilter, selectedProduct, selectedSku, selectedSupplier]);
+
+
   const stats = useMemo(() => {
     const totalAmount = filteredData.reduce((acc, curr) => acc + curr.total, 0);
     const totalQuantity = filteredData.reduce((acc, curr) => acc + curr.quantity, 0);
@@ -641,7 +672,6 @@ const App = () => {
         entityMap[name].quantity += item.quantity;
     });
     
-    // For suppliers tab, ignore 'pieMetric' and always use 'total' (money)
     const valueKey = (activeTab === 'suppliers' || pieMetric === 'total') ? 'total' : 'quantity';
     
     let pie = Object.keys(entityMap).map(key => ({
@@ -702,18 +732,6 @@ const App = () => {
     return null;
   }, [activeTab, selectedProduct, chartData.pie]);
 
-  const removeFile = (fileNameToRemove) => {
-    if (activeTab === 'sales') {
-        setSalesFileNames(prev => prev.filter(f => f !== fileNameToRemove));
-        // כאן באופן אידיאלי היינו מסננים את הדאטה, אך המזהה הייחודי שלנו לא מכיל את שם הקובץ כרגע באופן שניתן לשחזור וודאי
-        // כדי לפשט, נשאיר את הדאטה כפי שהיא, או שנצטרך להוסיף את שם הקובץ לכל רשומה בדאטה (עשיתי זאת ב-processData החדש)
-        setSalesData(prev => prev.filter(item => !item.id.includes(fileNameToRemove)));
-    } else {
-        setSuppliersFileNames(prev => prev.filter(f => f !== fileNameToRemove));
-        setSuppliersData(prev => prev.filter(item => !item.id.includes(fileNameToRemove)));
-    }
-  };
-
   return (
     <div className="flex min-h-screen bg-slate-50 font-sans text-slate-800" dir="rtl">
       
@@ -741,7 +759,6 @@ const App = () => {
                 <label className={`flex items-center justify-center lg:justify-start gap-3 p-3 rounded-xl cursor-pointer transition-colors ${loading ? 'bg-slate-800 opacity-50' : 'bg-slate-800 hover:bg-slate-700'} text-slate-300`}>
                     {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Upload className="w-5 h-5" />}
                     <span className="hidden lg:block text-sm">טען קבצים</span>
-                    {/* הוספת multiple כדי לאפשר בחירת מספר קבצים */}
                     <input type="file" accept=".csv, .xlsx, .xls" multiple onChange={handleFileUpload} className="hidden" disabled={loading} />
                 </label>
                 {activeData.length > 0 && (
@@ -750,6 +767,7 @@ const App = () => {
                         <span className="hidden lg:block text-sm">נקה הכל</span>
                     </button>
                 )}
+                {storageWarning && <p className="text-xs text-red-400 text-center">שים לב: שטח הזיכרון מלא. חלק מהנתונים לא יישמרו.</p>}
             </div>
         </div>
       </div>
@@ -768,7 +786,6 @@ const App = () => {
                             <span key={idx} className="flex items-center gap-1 bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-xs border border-slate-200">
                                 <FileSpreadsheet className="w-3 h-3 text-green-600" />
                                 <span className="max-w-[150px] truncate" title={name}>{name}</span>
-                                {/* אפשרות להסיר קובץ ספציפי אם רוצים בעתיד */}
                             </span>
                         ))
                     ) : (
@@ -865,7 +882,6 @@ const App = () => {
 
             {/* Charts */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                {/* Main Chart - Increased Height */}
                 <div className="bg-white p-6 rounded-xl border border-slate-100 shadow-sm min-h-[450px]">
                     <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
                         <Calendar className="w-5 h-5 text-blue-500" />
@@ -905,7 +921,6 @@ const App = () => {
                     </div>
                 </div>
 
-                {/* Pie Chart - Increased Height */}
                 <div className="bg-white p-6 rounded-xl border border-slate-100 shadow-sm flex flex-col min-h-[450px]">
                     <div className="flex justify-between items-start mb-6">
                         <h3 className="text-lg font-bold flex items-center gap-2">
@@ -936,7 +951,7 @@ const App = () => {
                 </div>
             </div>
 
-            {/* Table */}
+            {/* Table - with Pagination */}
             <div className="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
                 <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row justify-between items-center gap-4">
                     <h3 className="text-lg font-bold flex items-center gap-2"><FileText className="w-5 h-5 text-slate-400" /> פירוט עסקאות</h3>
@@ -959,7 +974,7 @@ const App = () => {
                             </tr>
                         </thead>
                         <tbody className="divide-y divide-slate-100">
-                            {filteredData.length > 0 ? filteredData.map((row) => (
+                            {paginatedData.length > 0 ? paginatedData.map((row) => (
                                 <tr key={row.id} className="hover:bg-slate-50 transition-colors">
                                     <td className="px-6 py-4 text-slate-500 whitespace-nowrap">{row.date}</td>
                                     {activeTab === 'sales' && <td className="px-6 py-4 font-mono text-xs text-slate-500">{row.sku}</td>}
@@ -971,8 +986,28 @@ const App = () => {
                         </tbody>
                     </table>
                 </div>
-                <div className="bg-slate-50 px-6 py-4 border-t border-slate-100 text-xs text-slate-500 flex justify-between">
-                    <span>מציג {filteredData.length} רשומות</span>
+                
+                {/* Pagination Controls */}
+                <div className="bg-slate-50 px-6 py-4 border-t border-slate-100 text-xs text-slate-500 flex justify-between items-center">
+                    <span>מציג {filteredData.length > 0 ? (currentPage - 1) * itemsPerPage + 1 : 0} - {Math.min(currentPage * itemsPerPage, filteredData.length)} מתוך {filteredData.length} רשומות</span>
+                    
+                    <div className="flex items-center gap-2">
+                        <button 
+                            onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
+                            disabled={currentPage === 1}
+                            className={`p-1 rounded hover:bg-slate-200 transition-colors ${currentPage === 1 ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        >
+                            <ChevronRight className="w-4 h-4" />
+                        </button>
+                        <span>עמוד {currentPage} מתוך {totalPages || 1}</span>
+                        <button 
+                            onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
+                            disabled={currentPage === totalPages || totalPages === 0}
+                            className={`p-1 rounded hover:bg-slate-200 transition-colors ${currentPage === totalPages || totalPages === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
+                        >
+                            <ChevronLeft className="w-4 h-4" />
+                        </button>
+                    </div>
                 </div>
             </div>
         </main>
