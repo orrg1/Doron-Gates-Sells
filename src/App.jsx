@@ -1,9 +1,58 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
 import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, ArrowUpDown, ArrowUp, ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot, Loader2, FileText, Check, Trash2 } from 'lucide-react';
-import { BarChart, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
 
 // --- הגדרות API של GEMINI ---
-const apiKey = "AIzaSyBliujKxcsP_R_nPl0dVRdffZHa3wCiodA"; // המערכת תספק את המפתח באופן אוטומטי
+const apiKey = "AIzaSyBliujKxcsP_R_nPl0dVRdffZHa3wCiodA"; // הדבק כאן את המפתח שלך
+
+// --- עזרי תאריך ---
+const HebrewMonthsMap = {
+  0: 'ינו', 1: 'פבר', 2: 'מרץ', 3: 'אפר', 4: 'מאי', 5: 'יונ',
+  6: 'יול', 7: 'אוג', 8: 'ספט', 9: 'אוק', 10: 'נוב', 11: 'דצמ'
+};
+
+const HebrewMonthsReverse = {
+  'ינו': 1, 'פבר': 2, 'מרץ': 3, 'אפר': 4, 'מאי': 5, 'יונ': 6,
+  'יול': 7, 'אוג': 8, 'ספט': 9, 'אוק': 10, 'נוב': 11, 'דצמ': 12
+};
+
+// המרת מספר אקסל לתאריך JS
+const excelDateToJSDate = (serial) => {
+   // Excel base date correction
+   const utc_days  = Math.floor(serial - 25569);
+   const utc_value = utc_days * 86400;                                        
+   const date_info = new Date(utc_value * 1000);
+   return date_info;
+}
+
+// פונקציה שמפרמטת כל סוג תאריך לפורמט האחיד "יול-25"
+const normalizeDate = (val) => {
+  if (!val) return '';
+  
+  // אם זה כבר בפורמט הנכון (טקסט עם מקף)
+  if (typeof val === 'string' && val.includes('-') && isNaN(parseFloat(val))) {
+    return val; 
+  }
+
+  let dateObj = null;
+
+  // בדיקה אם זה מספר אקסל
+  const numericVal = parseFloat(val);
+  if (!isNaN(numericVal) && numericVal > 30000 && numericVal < 60000) {
+    dateObj = excelDateToJSDate(numericVal);
+  } else {
+    // נסיון המרה סטנדרטי
+    dateObj = new Date(val);
+  }
+
+  if (dateObj && !isNaN(dateObj.getTime())) {
+    const month = HebrewMonthsMap[dateObj.getMonth()];
+    const year = dateObj.getFullYear().toString().slice(-2);
+    return `${month}-${year}`;
+  }
+
+  return val.toString(); // החזרת המקור אם נכשל
+};
 
 // פונקציית עזר לניתוח שורה בודדת ב-CSV
 const parseCSVLine = (line) => {
@@ -31,41 +80,68 @@ const parseCSVLine = (line) => {
   return row;
 };
 
-// פונקציית ניתוח CSV ראשית
+// פונקציית ניתוח CSV חכמה
 const parseCSV = (text) => {
-  const lines = text.split('\n').filter(l => l.trim());
-  if (lines.length === 0) return [];
-
-  const headers = parseCSVLine(lines[0]); 
+  const lines = text.split('\n');
   
-  return lines.slice(1).map(line => {
+  // 1. חיפוש שורת הכותרות
+  let headerRowIndex = -1;
+  let headers = [];
+
+  const knownHeaders = ['תאריך', 'חודש', 'מקט', 'מק"ט', "מק'ט", 'תיאור', 'תאור', 'כמות', 'סכום', 'הכנסה', 'מחיר', 'יחידה', "יח'"];
+
+  // סריקת 30 השורות הראשונות למציאת הכותרות
+  for (let i = 0; i < Math.min(lines.length, 30); i++) {
+    const line = lines[i];
+    if (!knownHeaders.some(k => line.includes(k))) continue;
+
+    const parsedLine = parseCSVLine(line);
+    const cleanLine = parsedLine.map(cell => cell.replace(/^"|"$/g, '').replace(/""/g, '"').trim());
+    
+    const matchCount = cleanLine.filter(cell => 
+      knownHeaders.some(k => cell.includes(k))
+    ).length;
+
+    if (matchCount >= 2) {
+      headerRowIndex = i;
+      headers = cleanLine;
+      break;
+    }
+  }
+
+  if (headerRowIndex === -1) {
+    // Fallback
+    const firstNonEmpty = lines.findIndex(l => l.trim());
+    if (firstNonEmpty === -1) return [];
+    headerRowIndex = firstNonEmpty;
+    headers = parseCSVLine(lines[firstNonEmpty]).map(c => c.replace(/^"|"$/g, '').replace(/""/g, '"').trim());
+  }
+
+  // 2. ניתוח הנתונים
+  const result = [];
+  for (let i = headerRowIndex + 1; i < lines.length; i++) {
+    const line = lines[i];
+    if (!line.trim()) continue;
+
     const values = parseCSVLine(line);
     const row = {};
+    let hasData = false;
+
     headers.forEach((header, index) => {
-      const cleanHeader = header.replace(/^"|"$/g, '').replace(/""/g, '"').trim();
+      if (!header) return; // דילוג על עמודות ריקות
+      
       if (index < values.length) {
-        row[cleanHeader] = values[index];
+        const val = values[index];
+        row[header] = val;
+        if (val && val.trim()) hasData = true;
       }
     });
-    return row;
-  });
-};
 
-const MOCK_CSV = `תאריך,מקט מוצר,תיאור מוצר,כמות,יחידה,"סה""כ סכום",מטבע
-יול-25,000,מוצר כללי,1164,יח',226754.43,"ש""ח"
-יול-25,005,משלוח אוריאן,9,יח',910.29,"ש""ח"
-יול-25,005DF00014,דגל 400 לציר קפיצים,8,יח',404,"ש""ח"
-יול-25,005DF00016,דגל 350 לציר קפיצים,16,יח',672,"ש""ח"
-יול-25,01251-000,גלאי כביש MD2010,3,יח',900.08,"ש""ח"
-אוג-25,IL00038,תושבת לזרוע,3,יח',40,"ש""ח"
-ספט-25,IL00038,תושבת לזרוע,3,יח',58.64,"ש""ח"
-אוק-25,IL00038,תושבת לזרוע,2,יח',0,"ש""ח"
-ספט-25,IL00043,תושבת לזרוע עגולה 100 + ברגים,1,יח',0,"ש""ח"
-אוג-25,IL00043,תושבת לזרוע עגולה 100 + ברגים,3,יח',70,"ש""ח"
-אוג-25,P123025,תושבת למנורה,11,יח',0,"ש""ח"
-אוק-25,P123025,תושבת למנורה,1,יח',25,"ש""ח"
-אוג-25,I500044 10001,תושבת מפסקי גבול למנוע גלילה,1,יח',110.17,"ש""ח"
-ספט-25,I099714,תושבת עליונה לקפיץ GIOTTO / MOOVI,1,יח',100,"ש""ח"`;
+    if (hasData) result.push(row);
+  }
+  
+  return result;
+};
 
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#84cc16', '#f43f5e', '#06b6d4'];
 
@@ -82,18 +158,13 @@ const Card = ({ title, value, subtext, icon: Icon, color }) => (
   </div>
 );
 
-const HebrewMonths = {
-  'ינו': 1, 'פבר': 2, 'מרץ': 3, 'אפר': 4, 'מאי': 5, 'יונ': 6,
-  'יול': 7, 'אוג': 8, 'ספט': 9, 'אוק': 10, 'נוב': 11, 'דצמ': 12
-};
-
 const getComparableDateValue = (dateStr) => {
   if (!dateStr || typeof dateStr !== 'string') return 0;
   const parts = dateStr.split('-');
   if (parts.length < 2) return 0;
   
   const [monthStr, yearStr] = parts;
-  const month = HebrewMonths[monthStr] || 0;
+  const month = HebrewMonthsReverse[monthStr] || 0;
   const year = parseInt(yearStr) + 2000;
   
   return (year * 100) + month;
@@ -105,7 +176,7 @@ const getMonthsDifference = (startStr, endStr) => {
   const parseDate = (d) => {
     const parts = d.split('-');
     return { 
-      m: HebrewMonths[parts[0]] || 1, 
+      m: HebrewMonthsReverse[parts[0]] || 1, 
       y: parseInt(parts[1]) + 2000 
     };
   };
@@ -327,7 +398,12 @@ const AIReportModal = ({ isOpen, onClose, isLoading, report }) => {
 };
 
 const App = () => {
-  const [rawData, setRawData] = useState([]);
+  // טעינה מ-localStorage
+  const [rawData, setRawData] = useState(() => {
+    const savedData = localStorage.getItem('dashboardData');
+    return savedData ? JSON.parse(savedData) : [];
+  });
+
   const [searchTerm, setSearchTerm] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: 'date', direction: 'desc' });
   const [loading, setLoading] = useState(false);
@@ -343,7 +419,23 @@ const App = () => {
   const [selectedProduct, setSelectedProduct] = useState([]); 
   const [selectedSku, setSelectedSku] = useState(''); 
   
-  const [pieMetric, setPieMetric] = useState('quantity'); // Default to Quantity
+  const [pieMetric, setPieMetric] = useState('quantity'); 
+
+  // אפקט מרכזי: שומר ב-localStorage ומחשב תאריכים
+  useEffect(() => {
+    if (rawData.length > 0) {
+        localStorage.setItem('dashboardData', JSON.stringify(rawData));
+        
+        const dates = [...new Set(rawData.map(d => d.date).filter(Boolean))];
+        const sortedDates = dates.sort((a, b) => getComparableDateValue(a) - getComparableDateValue(b));
+        setAvailableDates(sortedDates);
+        
+        // אתחול טווח תאריכים רק אם לא נבחר כלום ורק בטעינה הראשונית של הנתונים
+        if (sortedDates.length > 0 && (!dateFilter.start || !dateFilter.end)) {
+            setDateFilter({ start: sortedDates[0], end: sortedDates[sortedDates.length - 1] });
+        }
+    }
+  }, [rawData]);
 
   useEffect(() => {
     const script = document.createElement('script');
@@ -352,15 +444,6 @@ const App = () => {
     script.onload = () => setXlsxLoaded(true);
     document.body.appendChild(script);
     if (window.XLSX) setXlsxLoaded(true);
-  }, []);
-
-  useEffect(() => {
-    try {
-      const parsed = parseCSV(MOCK_CSV);
-      processData(parsed, false); // טעינה ראשונית - החלפה
-    } catch (e) {
-      console.error("Error parsing initial data", e);
-    }
   }, []);
 
   const handleFileUpload = (event) => {
@@ -378,7 +461,7 @@ const App = () => {
           const firstSheetName = workbook.SheetNames[0];
           const worksheet = workbook.Sheets[firstSheetName];
           const jsonData = window.XLSX.utils.sheet_to_json(worksheet, { defval: "" });
-          processData(jsonData, true); // טעינת קובץ - הוספה
+          processData(jsonData, true); 
         } catch (error) {
           console.error("Error parsing Excel file", error);
           alert("שגיאה בקריאת קובץ האקסל");
@@ -391,34 +474,31 @@ const App = () => {
       reader.onload = (e) => {
         const text = e.target.result;
         const parsed = parseCSV(text);
-        processData(parsed, true); // טעינת קובץ - הוספה
+        processData(parsed, true); 
         setLoading(false);
       };
       reader.readAsText(file);
     }
   };
 
-  // עיבוד נתונים משודרג שתומך במספר שמות לעמודות ומיזוג
   const processData = (parsedRows, shouldAppend = false) => {
     const cleanData = parsedRows.map((row, index) => {
-      // בדיקת שמות עמודות אפשריים לסכום
       const rawTotal = 
         row['סה"כ סכום'] || 
         row['סה""כ סכום'] || 
         row['סה״כ סכום'] || 
-        row['הכנסה בשקלים'] || // שם חדש
+        row['הכנסה בשקלים'] || 
+        row['הכנסה'] ||
         row['סה"כ'] || 
         '0';
       
       const total = parseFloat(rawTotal.toString().replace(/[^\d.-]/g, ''));
       const quantity = parseFloat(row['כמות'] || '0');
 
-      // מיפוי גמיש לשדות
-      const date = row['תאריך'] || row['חודש']; // תמיכה גם ב"חודש"
-      const sku = row['מקט מוצר'] || row['מק\'ט'] || row['מקט']; // תמיכה בגרסאות מק"ט
-      const description = row['תיאור מוצר'] || row['תאור מוצר'] || row['תיאור']; // תמיכה ב"תאור"
+      const date = row['תאריך'] || row['חודש']; 
+      const sku = row['מקט מוצר'] || row['מק\'ט'] || row['מקט'];
+      const description = row['תיאור מוצר'] || row['תאור מוצר'] || row['תיאור'];
 
-      // יצירת מזהה ייחודי כדי לאפשר מיזוג
       const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${index}`;
 
       return {
@@ -430,29 +510,19 @@ const App = () => {
         total: isNaN(total) ? 0 : total,
         unit: row['יחידה'] || row['יח\'']
       };
-    }).filter(item => item.description); // סינון שורות ריקות
+    }).filter(item => item.description);
     
-    // מיזוג נתונים אם צריך
-    const updatedData = shouldAppend ? [...rawData, ...cleanData] : cleanData;
-
-    // עדכון טווח התאריכים
-    const dates = [...new Set(updatedData.map(d => d.date).filter(Boolean))];
-    const sortedDates = dates.sort((a, b) => getComparableDateValue(a) - getComparableDateValue(b));
-    
-    setAvailableDates(sortedDates);
-    if (sortedDates.length > 0) {
-      setDateFilter({ start: sortedDates[0] || '', end: sortedDates[sortedDates.length - 1] || '' });
-    }
-    
-    setRawData(updatedData);
+    setRawData(prev => shouldAppend ? [...prev, ...cleanData] : cleanData);
   };
 
   const clearData = () => {
     if (window.confirm("האם אתה בטוח שברצונך למחוק את כל הנתונים?")) {
         setRawData([]);
         setAvailableDates([]);
+        setDateFilter({ start: '', end: '' });
         setSelectedProduct([]);
         setSelectedSku('');
+        localStorage.removeItem('dashboardData');
     }
   };
 
@@ -516,6 +586,7 @@ const App = () => {
     const avgRevenue = monthsCount > 0 ? totalRevenue / monthsCount : 0;
     const avgQuantity = monthsCount > 0 ? totalQuantity / monthsCount : 0;
 
+    // הכנת נתונים לגרף החודשי
     const monthsMap = {};
     
     data.forEach(item => {
@@ -526,14 +597,38 @@ const App = () => {
       }
       monthsMap[monthStr].sales += item.total;
       monthsMap[monthStr].quantity += item.quantity;
+
+      if (selectedProduct.length > 0) {
+        if (!monthsMap[monthStr][item.description]) {
+            monthsMap[monthStr][item.description] = 0;
+        }
+        monthsMap[monthStr][item.description] += item.total;
+
+        const quantityKey = `${item.description}_quantity`;
+        if (!monthsMap[monthStr][quantityKey]) {
+            monthsMap[monthStr][quantityKey] = 0;
+        }
+        monthsMap[monthStr][quantityKey] += item.quantity;
+      }
     });
     
-    const monthlyChartData = Object.keys(monthsMap).map(key => ({
-      name: key,
-      sales: monthsMap[key].sales,
-      quantity: monthsMap[key].quantity,
-      order: HebrewMonths[key] || 99
-    })).sort((a, b) => a.order - b.order);
+    const monthlyChartData = Object.keys(monthsMap).map(key => {
+        const monthEntry = {
+            name: key,
+            sales: monthsMap[key].sales,
+            quantity: monthsMap[key].quantity,
+            order: HebrewMonthsReverse[key] || 99
+        };
+        
+        if (selectedProduct.length > 0) {
+            selectedProduct.forEach(prod => {
+                monthEntry[prod] = monthsMap[key][prod] || 0;
+                monthEntry[`${prod}_quantity`] = monthsMap[key][`${prod}_quantity`] || 0;
+            });
+        }
+        
+        return monthEntry;
+    }).sort((a, b) => a.order - b.order);
 
     const productMap = {};
     data.forEach(item => {
@@ -711,13 +806,16 @@ const App = () => {
       </header>
 
       <main className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8 space-y-6">
+        
+        {/* Advanced Filters Bar */}
         <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex flex-col md:flex-row gap-4 items-center">
           <div className="flex items-center gap-2 text-slate-500 font-medium text-sm whitespace-nowrap">
             <Filter className="w-4 h-4" />
             סינון מתקדם:
           </div>
+
           <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 w-full">
-            {/* Product Filter Multi-Select - Limited to 5 */}
+            {/* Product Filter Multi-Select */}
             <Autocomplete 
               options={uniqueProducts}
               value={selectedProduct}
@@ -727,6 +825,7 @@ const App = () => {
               multiple={true}
               maxSelections={5}
             />
+
             {/* SKU Filter Single-Select */}
             <Autocomplete 
               options={uniqueSkus}
@@ -736,17 +835,40 @@ const App = () => {
               icon={Tag}
             />
           </div>
+
           {(selectedProduct.length > 0 || selectedSku || searchTerm) && (
-            <button onClick={resetAllFilters} className="px-4 py-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg text-sm font-medium transition-colors whitespace-nowrap">
+            <button 
+              onClick={resetAllFilters}
+              className="px-4 py-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg text-sm font-medium transition-colors whitespace-nowrap"
+            >
               נקה סינון
             </button>
           )}
         </div>
 
-        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5 gap-6">
-          <Card title="סה״כ הכנסות" value={formatCurrency(stats.totalRevenue)} subtext={selectedProduct.length > 0 ? 'עבור המוצרים שנבחרו' : selectedSku ? 'עבור המק״ט הנבחר' : `סה״כ בתקופה הנבחרת`} icon={DollarSign} color="bg-blue-500" />
-          <Card title="ממוצע הכנסה חודשי" value={formatCurrency(stats.avgRevenue)} subtext={`לפי ${stats.monthsCount} חודשים בטווח`} icon={Activity} color="bg-amber-500" />
-          <Card title="סה״כ פריטים" value={stats.totalQuantity.toLocaleString()} subtext="יחידות סה״כ בסינון הנוכחי" icon={Package} color="bg-emerald-500" />
+        {/* KPI Cards */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-4 gap-6">
+          <Card 
+            title="סה״כ הכנסות" 
+            value={formatCurrency(stats.totalRevenue)} 
+            subtext={selectedProduct.length > 0 ? 'עבור המוצרים שנבחרו' : selectedSku ? 'עבור המק״ט הנבחר' : `סה״כ בתקופה הנבחרת`}
+            icon={DollarSign}
+            color="bg-blue-500"
+          />
+          <Card 
+            title="ממוצע הכנסה חודשי" 
+            value={formatCurrency(stats.avgRevenue)} 
+            subtext={`לפי ${stats.monthsCount} חודשים בטווח`}
+            icon={Activity}
+            color="bg-amber-500"
+          />
+          <Card 
+            title="סה״כ פריטים" 
+            value={stats.totalQuantity.toLocaleString()} 
+            subtext="יחידות סה״כ בסינון הנוכחי"
+            icon={Package}
+            color="bg-emerald-500"
+          />
           
           <Card 
             title="ממוצע כמות חודשי" 
@@ -755,35 +877,98 @@ const App = () => {
             icon={Layers} 
             color="bg-cyan-500" 
           />
-          
-          <Card title="מוצרים ייחודיים" value={stats.uniqueProducts} subtext="סוגים בסינון הנוכחי" icon={Filter} color="bg-purple-500" />
         </div>
 
+        {/* Charts Row */}
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+          {/* Monthly Sales & Quantity Chart */}
           <div className="bg-white p-6 rounded-xl border border-slate-100 shadow-sm">
-            <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><Calendar className="w-5 h-5 text-blue-500" />מכירות וכמות לפי חודש</h3>
+            <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
+              <Calendar className="w-5 h-5 text-blue-500" />
+              מכירות וכמות לפי חודש
+            </h3>
             <div className="h-64">
               <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={monthlyData}>
+                {/* שימוש ב-ComposedChart כדי לשלב עמודות וקו */}
+                <ComposedChart data={monthlyData}>
                   <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                   <XAxis dataKey="name" stroke="#64748b" />
+                  
+                  {/* ציר שמאלי - כסף (עמודות) */}
                   <YAxis yAxisId="left" stroke="#3b82f6" tickFormatter={(val) => `₪${val/1000}k`} />
+                  
+                  {/* ציר ימני - כמות (קו) */}
                   <YAxis yAxisId="right" orientation="right" stroke="#10b981" />
-                  <RechartsTooltip formatter={(value, name) => { if (name.includes('מכירות')) return formatCurrency(value); return value.toLocaleString(); }} contentStyle={{ backgroundColor: '#fff', borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }} />
+                  
+                  <RechartsTooltip 
+                    formatter={(value, name) => {
+                      if (name.includes('כמות')) return value.toLocaleString();
+                      return formatCurrency(value);
+                    }}
+                    contentStyle={{ backgroundColor: '#fff', borderRadius: '8px', border: 'none', boxShadow: '0 4px 6px -1px rgb(0 0 0 / 0.1)' }}
+                  />
                   <Legend />
-                  <Bar yAxisId="left" dataKey="sales" name="מכירות (₪)" fill="#3b82f6" radius={[4, 4, 0, 0]} />
-                  <Bar yAxisId="right" dataKey="quantity" name="כמות (יח')" fill="#10b981" radius={[4, 4, 0, 0]} />
-                </BarChart>
+
+                  {/* אם יש מוצרים נבחרים - נציג עמודה נפרדת לכל מוצר (Stacked) */}
+                  {selectedProduct.length > 0 ? (
+                    <>
+                        {/* עמודות הכנסה */}
+                        {selectedProduct.map((prod, index) => (
+                          <Bar 
+                            key={prod}
+                            yAxisId="left" 
+                            dataKey={prod} // שם המוצר הוא המפתח
+                            name={prod} 
+                            stackId="a" // אותו ID גורם להם להערם זה על זה
+                            fill={COLORS[index % COLORS.length]} 
+                            radius={index === selectedProduct.length - 1 ? [4, 4, 0, 0] : [0, 0, 0, 0]}
+                          />
+                        ))}
+                        
+                        {/* קווי כמות - קו לכל מוצר */}
+                        {selectedProduct.map((prod, index) => (
+                          <Line 
+                            key={`${prod}_quantity`}
+                            yAxisId="right" 
+                            type="monotone" 
+                            dataKey={`${prod}_quantity`} 
+                            name={`${prod} (כמות)`} 
+                            stroke={COLORS[index % COLORS.length]} 
+                            strokeWidth={2}
+                            strokeDasharray="5 5" // קו מקווקו להבדלה
+                            dot={{ r: 3, fill: COLORS[index % COLORS.length] }}
+                          />
+                        ))}
+                    </>
+                  ) : (
+                    <>
+                        {/* ברירת מחדל - עמודה אחת לסה"כ מכירות וקו אחד לסה"כ כמות */}
+                        <Bar yAxisId="left" dataKey="sales" name="מכירות (₪)" fill="#3b82f6" radius={[4, 4, 0, 0]} />
+                        <Line 
+                            yAxisId="right" 
+                            type="monotone" 
+                            dataKey="quantity" 
+                            name="סה״כ כמות (יח')" 
+                            stroke="#10b981" 
+                            strokeWidth={3}
+                            dot={{ r: 4, fill: "#10b981" }}
+                        />
+                    </>
+                  )}
+                </ComposedChart>
               </ResponsiveContainer>
             </div>
           </div>
-          
+
+          {/* Top Products Pie Chart */}
           <div className="bg-white p-6 rounded-xl border border-slate-100 shadow-sm flex flex-col">
             <div className="flex justify-between items-start mb-6">
                 <h3 className="text-lg font-bold flex items-center gap-2">
                     <TrendingUp className="w-5 h-5 text-emerald-500" />
                     {selectedProduct.length > 0 ? 'התפלגות מוצרים נבחרים' : '5 המוצרים המובילים'}
                 </h3>
+                
+                {/* Toggle Buttons for Pie Chart */}
                 <div className="flex bg-slate-100 rounded-lg p-1">
                     <button 
                         onClick={() => setPieMetric('revenue')}
@@ -799,6 +984,7 @@ const App = () => {
                     </button>
                 </div>
             </div>
+
             <div className="h-64 flex items-center justify-center flex-1">
               {topProducts.length > 0 ? (
                 <ResponsiveContainer width="100%" height="100%">
@@ -812,50 +998,99 @@ const App = () => {
                         paddingAngle={5} 
                         dataKey="value"
                     >
-                      {topProducts.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
+                      {topProducts.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />
+                      ))}
                     </Pie>
                     {/* שימוש ב-Tooltip המותאם אישית */}
                     <RechartsTooltip content={<CustomPieTooltip />} />
                     <Legend layout="vertical" align="right" verticalAlign="middle" wrapperStyle={{ fontSize: '11px' }} />
                   </PieChart>
                 </ResponsiveContainer>
-              ) : <p className="text-slate-400">אין נתונים להצגה בטווח הנבחר</p>}
+              ) : (
+                <p className="text-slate-400">אין נתונים להצגה בטווח הנבחר</p>
+              )}
             </div>
           </div>
         </div>
 
+        {/* Data Table Section */}
         <div className="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
           <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row justify-between items-center gap-4">
             <div className="flex items-center gap-2">
               <h3 className="text-lg font-bold">פירוט עסקאות</h3>
-              {filteredData.length < rawData.length && <span className="bg-amber-100 text-amber-700 text-xs px-2 py-1 rounded-full font-medium">מציג נתונים מסוננים</span>}
+              {filteredData.length < rawData.length && (
+                <span className="bg-amber-100 text-amber-700 text-xs px-2 py-1 rounded-full font-medium">
+                  מציג נתונים מסוננים
+                </span>
+              )}
             </div>
+            
             <div className="relative w-full sm:w-72">
               <Search className="absolute right-3 top-2.5 w-4 h-4 text-slate-400" />
-              <input type="text" placeholder="חיפוש חופשי בטבלה..." className="w-full pl-4 pr-10 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+              <input 
+                type="text" 
+                placeholder="חיפוש חופשי בטבלה..." 
+                className="w-full pl-4 pr-10 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                value={searchTerm}
+                onChange={(e) => setSearchTerm(e.target.value)}
+              />
             </div>
           </div>
+          
           <div className="overflow-x-auto">
             <table className="w-full text-sm text-right">
               <thead className="bg-slate-50 text-slate-500 font-medium">
                 <tr>
-                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('date')}><div className="flex items-center gap-1">תאריך{sortConfig.key === 'date' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}</div></th>
+                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('date')}>
+                    <div className="flex items-center gap-1">
+                      תאריך
+                      {sortConfig.key === 'date' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}
+                    </div>
+                  </th>
                   <th className="px-6 py-3">מק״ט</th>
-                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('description')}><div className="flex items-center gap-1">תיאור מוצר{sortConfig.key === 'description' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}</div></th>
-                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('quantity')}><div className="flex items-center gap-1">כמות{sortConfig.key === 'quantity' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}</div></th>
-                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('total')}><div className="flex items-center gap-1">סה״כ סכום{sortConfig.key === 'total' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}</div></th>
+                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('description')}>
+                    <div className="flex items-center gap-1">
+                      תיאור מוצר
+                      {sortConfig.key === 'description' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}
+                    </div>
+                  </th>
+                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('quantity')}>
+                     <div className="flex items-center gap-1">
+                      כמות
+                      {sortConfig.key === 'quantity' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}
+                    </div>
+                  </th>
+                  <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('total')}>
+                     <div className="flex items-center gap-1">
+                      סה״כ סכום
+                      {sortConfig.key === 'total' && (sortConfig.direction === 'asc' ? <ArrowUp className="w-3 h-3"/> : <ArrowDown className="w-3 h-3"/>)}
+                    </div>
+                  </th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-slate-100">
-                {filteredData.length > 0 ? filteredData.map((row) => (
+                {filteredData.length > 0 ? (
+                  filteredData.map((row) => (
                     <tr key={row.id} className="hover:bg-slate-50 transition-colors">
                       <td className="px-6 py-4 text-slate-500 whitespace-nowrap">{row.date}</td>
                       <td className="px-6 py-4 font-mono text-xs text-slate-500">{row.sku}</td>
                       <td className="px-6 py-4 font-medium text-slate-800">{row.description}</td>
-                      <td className="px-6 py-4 text-slate-600"><span className="bg-slate-100 px-2 py-1 rounded text-xs font-bold">{row.quantity} {row.unit}</span></td>
+                      <td className="px-6 py-4 text-slate-600">
+                        <span className="bg-slate-100 px-2 py-1 rounded text-xs font-bold">
+                          {row.quantity} {row.unit}
+                        </span>
+                      </td>
                       <td className="px-6 py-4 font-bold text-slate-800">{formatCurrency(row.total)}</td>
                     </tr>
-                  )) : <tr><td colSpan="5" className="px-6 py-12 text-center text-slate-400">לא נמצאו נתונים התואמים לטווח התאריכים או לחיפוש</td></tr>}
+                  ))
+                ) : (
+                  <tr>
+                    <td colSpan="5" className="px-6 py-12 text-center text-slate-400">
+                      לא נמצאו נתונים התואמים לטווח התאריכים או לחיפוש
+                    </td>
+                  </tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -864,6 +1099,7 @@ const App = () => {
             <span>סודר לפי: {sortConfig.key === 'total' ? 'סכום' : sortConfig.key === 'quantity' ? 'כמות' : sortConfig.key === 'date' ? 'תאריך' : 'תיאור'}</span>
           </div>
         </div>
+
       </main>
     </div>
   );
