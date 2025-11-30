@@ -1,9 +1,9 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, ArrowUpDown, ArrowUp, ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot, Loader2, FileText, Check, Trash2, Truck, Wallet, LayoutDashboard, FileSpreadsheet, AlertTriangle, ChevronLeft, ChevronRight, PieChart as PieChartIcon, BarChart3, Download, MousePointerClick, Clock, MessageSquare, Send } from 'lucide-react';
+import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, ArrowUpDown, ArrowUp, ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot, Loader2, FileText, Check, Trash2, Truck, Wallet, LayoutDashboard, FileSpreadsheet, AlertTriangle, ChevronLeft, ChevronRight, PieChart as PieChartIcon, BarChart3, Download, MousePointerClick, Clock, MessageSquare, Send, Moon, Sun } from 'lucide-react';
 import { ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, Area } from 'recharts';
 
 // --- הגדרות API של GEMINI ---
-const apiKey = "AIzaSyBSYZT8KQLVJT1Jh4NJTl18A6lt7TkTlIQ"; // הדבק כאן את המפתח שלך
+const apiKey = ""; // הדבק כאן את המפתח שלך
 
 // --- עזרי תאריך וכלליים ---
 const HebrewMonthsMap = {
@@ -17,6 +17,7 @@ const HebrewMonthsReverse = {
 };
 
 const formatCurrency = (val) => {
+  if (isNaN(val)) return "₪0";
   return new Intl.NumberFormat('he-IL', { style: 'currency', currency: 'ILS', maximumFractionDigits: 0 }).format(val);
 };
 
@@ -42,7 +43,7 @@ const normalizeDate = (val) => {
     const year = dateObj.getFullYear().toString().slice(-2);
     return `${month}-${year}`;
   }
-  return val.toString();
+  return String(val);
 };
 
 const getComparableDateValue = (dateStr) => {
@@ -68,43 +69,44 @@ const getMonthsDifference = (startStr, endStr) => {
 
 // --- רכיבי UI ---
 
-const Card = ({ title, value, subtext, icon: Icon, color, trend }) => (
-  <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 flex items-center justify-between hover:shadow-md transition-shadow h-full relative overflow-hidden">
+const Card = ({ title, value, subtext, icon: Icon, color, trend, isDarkMode }) => (
+  <div className={`p-6 rounded-xl shadow-sm border flex items-center justify-between hover:shadow-md transition-all duration-300 h-full relative overflow-hidden group ${isDarkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-slate-100 text-slate-800'}`}>
+    <div className={`absolute top-0 right-0 w-1 h-full ${color.replace('bg-', 'bg-').replace('text-', '')}`}></div>
     <div className="flex-1 min-w-0 z-10">
-      <p className="text-sm font-medium text-slate-500 mb-1">{title}</p>
-      <div className="text-2xl font-bold text-slate-800">{value}</div>
+      <p className={`text-sm font-medium mb-1 ${isDarkMode ? 'text-slate-400' : 'text-slate-500'}`}>{title}</p>
+      <div className="text-2xl font-bold tracking-tight">{value}</div>
       <div className="flex items-center gap-2 mt-2">
-          {trend !== undefined && trend !== null && (
-              <span className={`text-xs font-bold flex items-center px-1.5 py-0.5 rounded ${trend >= 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+          {trend !== undefined && trend !== null && !isNaN(trend) && (
+              <span className={`text-xs font-bold flex items-center px-2 py-0.5 rounded-full ${trend >= 0 ? (isDarkMode ? 'bg-green-900/30 text-green-400' : 'bg-green-100 text-green-700') : (isDarkMode ? 'bg-red-900/30 text-red-400' : 'bg-red-100 text-red-700')}`}>
                   {trend >= 0 ? <TrendingUp className="w-3 h-3 ml-1" /> : <ArrowDown className="w-3 h-3 ml-1" />}
                   {Math.abs(trend).toFixed(1)}%
               </span>
           )}
-          {subtext && <p className="text-xs text-slate-400 truncate" title={subtext}>{subtext}</p>}
+          {subtext && <p className={`text-xs truncate ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`} title={subtext}>{subtext}</p>}
       </div>
     </div>
-    <div className={`p-3 rounded-full ${color} shrink-0 ml-4 self-start`}>
-      <Icon className="w-6 h-6 text-white" />
+    <div className={`p-3 rounded-xl shrink-0 ml-4 self-start shadow-inner ${isDarkMode ? 'bg-slate-700' : 'bg-slate-50'} group-hover:scale-110 transition-transform`}>
+      <Icon className={`w-6 h-6 ${color.replace('bg-', 'text-').replace('500', '600')}`} />
     </div>
   </div>
 );
 
-const CustomPieTooltip = ({ active, payload }) => {
+const CustomPieTooltip = ({ active, payload, isDarkMode }) => {
   if (active && payload && payload.length) {
     const data = payload[0].payload;
     return (
-      <div className="bg-white p-3 border border-slate-200 shadow-lg rounded-lg text-right z-50">
-        <p className="font-bold text-slate-800 mb-2 border-b border-slate-100 pb-1">{data.name}</p>
+      <div className={`p-3 border shadow-xl rounded-lg text-right z-50 ${isDarkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-slate-200 text-slate-800'}`}>
+        <p className={`font-bold mb-2 border-b pb-1 ${isDarkMode ? 'border-slate-700' : 'border-slate-100'}`}>{data.name}</p>
         <div className="space-y-1 text-sm">
           {data.quantity !== undefined && (
              <div className="flex justify-between gap-4">
-                <span className="text-slate-500">כמות:</span>
-                <span className="font-medium text-blue-600">{data.quantity}</span>
+                <span className={isDarkMode ? 'text-slate-400' : 'text-slate-500'}>כמות:</span>
+                <span className="font-medium text-blue-500">{data.quantity}</span>
              </div>
           )}
           <div className="flex justify-between gap-4">
-            <span className="text-slate-500">סכום:</span>
-            <span className="font-medium text-emerald-600">{formatCurrency(data.total)}</span>
+            <span className={isDarkMode ? 'text-slate-400' : 'text-slate-500'}>סכום:</span>
+            <span className="font-medium text-emerald-500">{formatCurrency(data.total)}</span>
           </div>
         </div>
       </div>
@@ -113,7 +115,7 @@ const CustomPieTooltip = ({ active, payload }) => {
   return null;
 };
 
-const Autocomplete = ({ options, value, onChange, placeholder, icon: Icon, multiple = false, maxSelections = Infinity }) => {
+const Autocomplete = ({ options, value, onChange, placeholder, icon: Icon, multiple = false, maxSelections = Infinity, isDarkMode }) => {
   const [isOpen, setIsOpen] = useState(false);
   const [searchTerm, setSearchTerm] = useState('');
   const wrapperRef = useRef(null);
@@ -167,20 +169,20 @@ const Autocomplete = ({ options, value, onChange, placeholder, icon: Icon, multi
   return (
     <div className="relative w-full" ref={wrapperRef}>
       <div 
-        className={`relative flex items-center flex-wrap gap-2 w-full pl-8 pr-10 py-2 bg-slate-50 border ${isLimitReached && !isOpen ? 'border-orange-200 bg-orange-50' : 'border-slate-200'} rounded-lg focus-within:ring-2 focus-within:ring-blue-500 focus-within:border-transparent ${multiple ? 'min-h-[42px]' : ''}`}
+        className={`relative flex items-center flex-wrap gap-2 w-full pl-8 pr-10 py-2.5 border rounded-xl focus-within:ring-2 focus-within:ring-indigo-500/50 focus-within:border-indigo-500 transition-all ${isDarkMode ? 'bg-slate-800 border-slate-700 text-white' : 'bg-white border-slate-200 text-slate-800'} ${isLimitReached && !isOpen ? (isDarkMode ? 'border-orange-500/50 bg-orange-900/10' : 'border-orange-200 bg-orange-50') : ''}`}
         onClick={() => document.getElementById(`input-${placeholder}`)?.focus()}
       >
-        {Icon && <Icon className="absolute right-3 top-2.5 w-4 h-4 text-slate-400 pointer-events-none z-10" />}
+        {Icon && <Icon className={`absolute right-3 top-3 w-4 h-4 pointer-events-none z-10 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`} />}
         {multiple && Array.isArray(value) && value.map(val => (
-            <span key={val} className="flex items-center gap-1 bg-blue-100 text-blue-800 text-xs px-2 py-1 rounded-full animate-in fade-in zoom-in duration-200 border border-blue-200 shadow-sm">
-                <span className="max-w-[150px] truncate" title={val}>{val}</span>
+            <span key={val} className={`flex items-center gap-1 text-xs px-2 py-1 rounded-full animate-in fade-in zoom-in duration-200 border shadow-sm ${isDarkMode ? 'bg-indigo-900/50 text-indigo-200 border-indigo-800' : 'bg-indigo-50 text-indigo-700 border-indigo-100'}`}>
+                <span className="max-w-[120px] truncate" title={val}>{val}</span>
                 <X className="w-3 h-3 cursor-pointer hover:text-red-500 transition-colors" onClick={(e) => removeTag(val, e)} />
             </span>
         ))}
         <input
           id={`input-${placeholder}`}
           type="text"
-          className="flex-1 bg-transparent border-none focus:ring-0 text-sm text-slate-700 placeholder-slate-400 min-w-[80px]"
+          className={`flex-1 bg-transparent border-none focus:ring-0 text-sm min-w-[80px] ${isDarkMode ? 'text-white placeholder-slate-500' : 'text-slate-700 placeholder-slate-400'}`}
           placeholder={multiple && value.length > 0 ? (isLimitReached ? "מקסימום נבחר" : "") : placeholder}
           value={searchTerm}
           disabled={isLimitReached}
@@ -194,46 +196,85 @@ const Autocomplete = ({ options, value, onChange, placeholder, icon: Icon, multi
         {(searchTerm || (!multiple && value) || (multiple && value.length > 0)) ? (
           <button 
             onClick={(e) => { e.stopPropagation(); setSearchTerm(''); onChange(multiple ? [] : ''); if (!multiple) setIsOpen(false); }}
-            className="absolute left-2 top-2.5 text-slate-400 hover:text-red-500 transition-colors"
+            className="absolute left-2 top-3 text-slate-400 hover:text-red-500 transition-colors"
           >
             <X className="w-4 h-4" />
           </button>
         ) : (
-          <ChevronDown className="absolute left-2 top-2.5 w-4 h-4 text-slate-300 pointer-events-none" />
+          <ChevronDown className={`absolute left-2 top-3 w-4 h-4 pointer-events-none ${isDarkMode ? 'text-slate-600' : 'text-slate-300'}`} />
         )}
       </div>
       {isOpen && !isLimitReached && (
-        <div className="absolute z-50 w-full mt-1 bg-white border border-slate-200 rounded-lg shadow-xl max-h-60 overflow-y-auto text-right">
+        <div className={`absolute z-50 w-full mt-2 border rounded-xl shadow-xl max-h-60 overflow-y-auto text-right overflow-hidden ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
           {filteredOptions.length > 0 ? (
-            filteredOptions.map((opt, idx) => (
-              <div
-                key={idx}
-                className={`px-4 py-2 cursor-pointer text-sm transition-colors flex items-center justify-between ${ (multiple ? value.includes(opt) : value === opt) ? 'bg-blue-50 text-blue-700 font-medium' : 'text-slate-700 hover:bg-slate-50' }`}
-                onClick={() => handleSelect(opt)}
-              >
-                <span>{opt}</span>
-                {(multiple ? value.includes(opt) : value === opt) && <Check className="w-4 h-4 text-blue-600" />}
-              </div>
-            ))
-          ) : <div className="px-4 py-3 text-sm text-slate-400 text-center">לא נמצאו תוצאות</div>}
+            filteredOptions.map((opt, idx) => {
+              const isSelected = multiple ? value.includes(opt) : value === opt;
+              return (
+                <div
+                  key={idx}
+                  className={`px-4 py-2.5 cursor-pointer text-sm transition-colors flex items-center justify-between border-b last:border-0 ${isDarkMode ? 'border-slate-700/50 hover:bg-slate-700' : 'border-slate-50 hover:bg-slate-50'} ${
+                    isSelected ? (isDarkMode ? 'bg-indigo-900/30 text-indigo-300' : 'bg-indigo-50 text-indigo-700 font-medium') : (isDarkMode ? 'text-slate-300' : 'text-slate-700')
+                  }`}
+                  onClick={() => handleSelect(opt)}
+                >
+                  <span>{opt}</span>
+                  {isSelected && <Check className="w-4 h-4 text-indigo-500" />}
+                </div>
+              );
+            })
+          ) : <div className={`px-4 py-3 text-sm text-center ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>לא נמצאו תוצאות</div>}
         </div>
       )}
     </div>
   );
 };
 
+// Clear Data Confirmation Modal
+const ClearDataModal = ({ isOpen, onClose, onConfirm, type, isDarkMode }) => {
+    if (!isOpen) return null;
+    return (
+        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm">
+            <div className={`rounded-2xl shadow-2xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-200 ${isDarkMode ? 'bg-slate-800' : 'bg-white'}`}>
+                <div className="p-8 flex flex-col items-center text-center">
+                    <div className={`p-4 rounded-full mb-6 ${isDarkMode ? 'bg-red-900/20' : 'bg-red-50'}`}>
+                        <AlertTriangle className="w-10 h-10 text-red-500" />
+                    </div>
+                    <h3 className={`text-2xl font-bold mb-3 ${isDarkMode ? 'text-white' : 'text-slate-800'}`}>מחיקת נתונים</h3>
+                    <p className={`mb-8 leading-relaxed ${isDarkMode ? 'text-slate-400' : 'text-slate-600'}`}>
+                        האם אתה בטוח שברצונך למחוק את כל נתוני ה<strong>{type === 'sales' ? 'מכירות' : (type === 'suppliers' ? 'רכש וספקים' : 'מערכת')}</strong>?<br/>
+                        <span className="text-xs opacity-70">פעולה זו אינה הפיכה והנתונים יימחקו מהזיכרון.</span>
+                    </p>
+                    <div className="flex gap-4 w-full">
+                        <button onClick={onClose} className={`flex-1 px-4 py-3 font-medium rounded-xl transition-colors ${isDarkMode ? 'bg-slate-700 text-slate-300 hover:bg-slate-600' : 'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>
+                            ביטול
+                        </button>
+                        <button onClick={() => { onConfirm(); onClose(); }} className="flex-1 px-4 py-3 bg-red-600 text-white font-medium rounded-xl hover:bg-red-700 transition-colors shadow-lg shadow-red-600/20">
+                            מחק הכל
+                        </button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    );
+};
+
 // AI Report Modal
 const AIReportModal = ({ isOpen, onClose, isLoading, report }) => {
   if (!isOpen) return null;
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
       <div className="bg-white rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col overflow-hidden animate-in fade-in zoom-in duration-200">
         <div className="p-6 border-b border-slate-100 flex justify-between items-center bg-gradient-to-l from-indigo-50 to-white">
           <div className="flex items-center gap-3">
-            <div className="bg-indigo-100 p-2 rounded-lg"><Sparkles className="w-6 h-6 text-indigo-600" /></div>
+            <div className="bg-indigo-100 p-2 rounded-lg">
+              <Sparkles className="w-6 h-6 text-indigo-600" />
+            </div>
             <h2 className="text-xl font-bold text-slate-800">דוח תובנות חכם</h2>
           </div>
-          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors"><X className="w-5 h-5 text-slate-500" /></button>
+          <button onClick={onClose} className="p-2 hover:bg-slate-100 rounded-full transition-colors">
+            <X className="w-5 h-5 text-slate-500" />
+          </button>
         </div>
         <div className="p-6 overflow-y-auto flex-1 text-right" dir="rtl">
           {isLoading ? (
@@ -243,12 +284,19 @@ const AIReportModal = ({ isOpen, onClose, isLoading, report }) => {
             </div>
           ) : (
             <div className="prose prose-slate max-w-none">
-              <div className="whitespace-pre-wrap text-slate-700 leading-relaxed font-medium">{report || "לא הצלחנו להפיק דוח כרגע. אנא נסה שוב."}</div>
+              <div className="whitespace-pre-wrap text-slate-700 leading-relaxed font-medium">
+                {report || "לא הצלחנו להפיק דוח כרגע. אנא נסה שוב."}
+              </div>
             </div>
           )}
         </div>
         <div className="p-4 border-t border-slate-100 bg-slate-50 flex justify-end">
-          <button onClick={onClose} className="px-6 py-2 bg-white border border-slate-200 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors shadow-sm">סגור</button>
+          <button 
+            onClick={onClose}
+            className="px-6 py-2 bg-white border border-slate-200 text-slate-700 font-medium rounded-lg hover:bg-slate-50 transition-colors shadow-sm"
+          >
+            סגור
+          </button>
         </div>
       </div>
     </div>
@@ -256,7 +304,7 @@ const AIReportModal = ({ isOpen, onClose, isLoading, report }) => {
 };
 
 // Chat Component
-const AIChatWindow = ({ isOpen, onClose, onSend, messages, isThinking }) => {
+const AIChatWindow = ({ isOpen, onClose, onSend, messages, isThinking, isDarkMode }) => {
     const messagesEndRef = useRef(null);
     const [input, setInput] = useState('');
 
@@ -278,33 +326,36 @@ const AIChatWindow = ({ isOpen, onClose, onSend, messages, isThinking }) => {
     if (!isOpen) return null;
 
     return (
-        <div className="fixed bottom-20 left-6 z-50 w-96 h-[500px] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden animate-in slide-in-from-bottom-10 fade-in duration-300">
+        <div className={`fixed bottom-24 left-6 z-50 w-96 h-[550px] rounded-2xl shadow-2xl border flex flex-col overflow-hidden animate-in slide-in-from-bottom-10 fade-in duration-300 ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
             {/* Header */}
-            <div className="p-4 bg-gradient-to-r from-indigo-600 to-violet-600 text-white flex justify-between items-center">
-                <div className="flex items-center gap-2">
-                    <Bot className="w-6 h-6 text-yellow-300" />
-                    <h3 className="font-bold">צ׳אט עם הנתונים</h3>
+            <div className="p-4 bg-gradient-to-r from-indigo-600 to-violet-600 text-white flex justify-between items-center shadow-md">
+                <div className="flex items-center gap-3">
+                    <div className="bg-white/20 p-1.5 rounded-lg backdrop-blur-sm"><Bot className="w-5 h-5 text-white" /></div>
+                    <div>
+                        <h3 className="font-bold text-sm">העוזר החכם</h3>
+                        <p className="text-[10px] opacity-80">שאל כל דבר על הנתונים שלך</p>
+                    </div>
                 </div>
-                <button onClick={onClose} className="hover:bg-white/20 rounded-full p-1 transition-colors">
-                    <X className="w-5 h-5" />
+                <button onClick={onClose} className="hover:bg-white/20 rounded-full p-1.5 transition-colors">
+                    <X className="w-4 h-4" />
                 </button>
             </div>
 
             {/* Messages */}
-            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
+            <div className={`flex-1 overflow-y-auto p-4 space-y-4 ${isDarkMode ? 'bg-slate-900' : 'bg-slate-50'}`}>
                 {messages.length === 0 && (
-                    <div className="text-center text-slate-400 text-sm mt-10">
-                        <Sparkles className="w-8 h-8 mx-auto mb-2 opacity-50" />
-                        <p>שאל כל דבר על הנתונים שלך!</p>
-                        <p className="text-xs mt-1">"מי הספק הכי יקר?" "איזה מוצר נמכר הכי הרבה?"</p>
+                    <div className={`text-center text-sm mt-20 ${isDarkMode ? 'text-slate-500' : 'text-slate-400'}`}>
+                        <Sparkles className="w-10 h-10 mx-auto mb-3 opacity-30" />
+                        <p className="font-medium">היי! אני כאן כדי לעזור.</p>
+                        <p className="text-xs mt-2 opacity-70">נסה לשאול: "מה המגמה החודש?"<br/>או "מי הספק הכי גדול?"</p>
                     </div>
                 )}
                 {messages.map((msg, idx) => (
                     <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-start' : 'justify-end'}`}>
-                        <div className={`max-w-[80%] p-3 rounded-2xl text-sm shadow-sm ${
+                        <div className={`max-w-[85%] p-3 rounded-2xl text-sm shadow-sm leading-relaxed ${
                             msg.role === 'user' 
-                            ? 'bg-white border border-slate-100 text-slate-800 rounded-br-none' 
-                            : 'bg-indigo-600 text-white rounded-bl-none'
+                            ? (isDarkMode ? 'bg-slate-700 text-white rounded-br-none border border-slate-600' : 'bg-white border border-slate-100 text-slate-800 rounded-br-none') 
+                            : 'bg-gradient-to-br from-indigo-600 to-violet-600 text-white rounded-bl-none'
                         }`}>
                             {msg.content}
                         </div>
@@ -312,7 +363,7 @@ const AIChatWindow = ({ isOpen, onClose, onSend, messages, isThinking }) => {
                 ))}
                 {isThinking && (
                     <div className="flex justify-end">
-                        <div className="bg-indigo-50 p-3 rounded-2xl rounded-bl-none flex gap-1">
+                        <div className={`p-3 rounded-2xl rounded-bl-none flex gap-1.5 ${isDarkMode ? 'bg-slate-800' : 'bg-indigo-50'}`}>
                             <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
                             <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
                             <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
@@ -323,51 +374,22 @@ const AIChatWindow = ({ isOpen, onClose, onSend, messages, isThinking }) => {
             </div>
 
             {/* Input */}
-            <form onSubmit={handleSubmit} className="p-3 border-t border-slate-100 bg-white flex gap-2">
+            <form onSubmit={handleSubmit} className={`p-3 border-t flex gap-2 ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-100'}`}>
                 <input 
                     type="text" 
                     value={input}
                     onChange={(e) => setInput(e.target.value)}
                     placeholder="הקלד שאלה..." 
-                    className="flex-1 bg-slate-50 border border-slate-200 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                    className={`flex-1 border rounded-full px-4 py-2.5 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500 transition-all ${isDarkMode ? 'bg-slate-700 border-slate-600 text-white placeholder-slate-400' : 'bg-slate-50 border-slate-200 text-slate-900'}`}
                 />
                 <button 
                     type="submit" 
                     disabled={isThinking || !input.trim()}
-                    className={`p-2 rounded-full text-white transition-all ${isThinking || !input.trim() ? 'bg-slate-300' : 'bg-indigo-600 hover:bg-indigo-700 shadow-md'}`}
+                    className={`p-2.5 rounded-full text-white transition-all transform active:scale-95 ${isThinking || !input.trim() ? 'bg-slate-400 cursor-not-allowed' : 'bg-indigo-600 hover:bg-indigo-700 shadow-md hover:shadow-lg'}`}
                 >
                     <Send className="w-4 h-4" />
                 </button>
             </form>
-        </div>
-    );
-};
-
-// Clear Data Confirmation Modal
-const ClearDataModal = ({ isOpen, onClose, onConfirm, type }) => {
-    if (!isOpen) return null;
-    return (
-        <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm">
-            <div className="bg-white rounded-xl shadow-xl w-full max-w-md overflow-hidden animate-in fade-in zoom-in duration-200">
-                <div className="p-6 flex flex-col items-center text-center">
-                    <div className="bg-red-100 p-3 rounded-full mb-4">
-                        <AlertTriangle className="w-8 h-8 text-red-600" />
-                    </div>
-                    <h3 className="text-xl font-bold text-slate-800 mb-2">מחיקת נתונים</h3>
-                    <p className="text-slate-600 mb-6">
-                        האם אתה בטוח שברצונך למחוק את כל נתוני ה<strong>{type === 'sales' ? 'מכירות' : (type === 'suppliers' ? 'רכש וספקים' : 'מערכת')}</strong>?<br/>
-                        פעולה זו אינה הפיכה.
-                    </p>
-                    <div className="flex gap-3 w-full">
-                        <button onClick={onClose} className="flex-1 px-4 py-2 bg-slate-100 text-slate-700 font-medium rounded-lg hover:bg-slate-200 transition-colors">
-                            ביטול
-                        </button>
-                        <button onClick={() => { onConfirm(); onClose(); }} className="flex-1 px-4 py-2 bg-red-600 text-white font-medium rounded-lg hover:bg-red-700 transition-colors">
-                            מחק הכל
-                        </button>
-                    </div>
-                </div>
-            </div>
         </div>
     );
 };
@@ -456,6 +478,20 @@ const parseCSV = (text) => {
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#84cc16', '#f43f5e', '#06b6d4'];
 
 const App = () => {
+  // State for Dark Mode
+  const [isDarkMode, setIsDarkMode] = useState(() => {
+      if (typeof window !== 'undefined') {
+          return localStorage.getItem('theme') === 'dark';
+      }
+      return false;
+  });
+
+  const toggleTheme = () => {
+      const newMode = !isDarkMode;
+      setIsDarkMode(newMode);
+      localStorage.setItem('theme', newMode ? 'dark' : 'light');
+  };
+
   // נתונים
   const [salesData, setSalesData] = useState(() => {
     try { const saved = localStorage.getItem('dashboardSalesData'); return saved ? JSON.parse(saved) : []; } catch (e) { return []; }
@@ -475,17 +511,18 @@ const App = () => {
   const [sortConfig, setSortConfig] = useState({ key: 'total', direction: 'desc' });
   const [loading, setLoading] = useState(false);
   const [xlsxLoaded, setXlsxLoaded] = useState(false);
+  
+  // AI & Chat
   const [aiModalOpen, setAiModalOpen] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
   const [aiReport, setAiReport] = useState('');
-  const [clearModalOpen, setClearModalOpen] = useState(false);
-  const [storageWarning, setStorageWarning] = useState(false);
-  
-  // Chat State
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState([]);
   const [isChatThinking, setIsChatThinking] = useState(false);
 
+  const [clearModalOpen, setClearModalOpen] = useState(false);
+  const [storageWarning, setStorageWarning] = useState(false);
+  
   const [availableDates, setAvailableDates] = useState([]);
   const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
   
@@ -637,10 +674,32 @@ const App = () => {
     if (filteredData.length === 0 || !window.XLSX) return;
     
     const exportData = filteredData.map(item => {
-        const base = { 'תאריך': item.date, 'סכום': item.total, 'כמות': item.quantity, 'יחידה': item.unit };
-        if (activeTab === 'sales') return { ...base, 'מוצר': item.description, 'מק"ט': item.sku };
-        return { ...base, 'ספק': item.supplier };
+        const base = {
+            'תאריך': item.date,
+            'סכום': item.total,
+            'כמות': item.quantity,
+            'יחידה': item.unit
+        };
+        if (activeTab === 'sales') {
+            return { ...base, 'מוצר': item.description, 'מק"ט': item.sku };
+        } else {
+            return { ...base, 'ספק': item.supplier };
+        }
     });
+
+    if (activeTab === 'summary') {
+        const summaryExport = summaryData.chart.map(item => ({
+            'תאריך': item.name,
+            'הכנסות': item.income,
+            'הוצאות': item.expenses,
+            'רווח נקי': item.profit
+        }));
+        const ws = window.XLSX.utils.json_to_sheet(summaryExport);
+        const wb = window.XLSX.utils.book_new();
+        window.XLSX.utils.book_append_sheet(wb, ws, "Summary");
+        window.XLSX.writeFile(wb, `financial_summary_export.xlsx`);
+        return;
+    }
 
     const ws = window.XLSX.utils.json_to_sheet(exportData);
     const wb = window.XLSX.utils.book_new();
@@ -772,6 +831,7 @@ const App = () => {
         if (!monthsMap[monthKey]) monthsMap[monthKey] = { total: 0, quantity: 0 };
         monthsMap[monthKey].total += item.total;
         monthsMap[monthKey].quantity += item.quantity;
+        
         if (activeTab === 'sales' && selectedProduct.length > 0) {
             if (!monthsMap[monthKey][item.description]) monthsMap[monthKey][item.description] = 0;
             monthsMap[monthKey][item.description] += item.total;
@@ -829,7 +889,7 @@ const App = () => {
     }
 
     try {
-      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+      const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
       });
@@ -838,12 +898,10 @@ const App = () => {
     } catch (e) { setAiReport("שגיאת תקשורת."); } finally { setAiLoading(false); }
   };
 
-  // Handle Chat Messages
   const handleChatSend = async (text) => {
       setChatMessages(prev => [...prev, { role: 'user', content: text }]);
       setIsChatThinking(true);
       
-      // Context building for Chat
       let contextData = '';
       if (activeTab === 'summary' && summaryData) {
           contextData = `נתונים פיננסיים: הכנסות ${formatCurrency(summaryData.totalIncome)}, הוצאות ${formatCurrency(summaryData.totalExpenses)}, רווח ${formatCurrency(summaryData.totalProfit)}.`;
@@ -861,7 +919,7 @@ const App = () => {
       `;
 
       try {
-        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`, {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
         });
@@ -897,7 +955,7 @@ const App = () => {
       
       if (monthsBack === 'year') {
           const lastDateParts = end.split('-'); 
-          const year = lastDateParts[1];
+          const year = lastDateParts[1]; 
           const startOfYear = sorted.find(d => d.endsWith(year));
           if (startOfYear) start = startOfYear;
       } else if (monthsBack) {
@@ -920,11 +978,12 @@ const App = () => {
   };
 
   return (
-    <div className="flex min-h-screen bg-slate-50 font-sans text-slate-800" dir="rtl">
-      <AIReportModal isOpen={aiModalOpen} onClose={() => setAiModalOpen(false)} isLoading={aiLoading} report={aiReport} />
-      <ClearDataModal isOpen={clearModalOpen} onClose={() => setClearModalOpen(false)} onConfirm={handleClearData} type={activeTab} />
+    <div className={`flex min-h-screen font-sans transition-colors duration-300 ${isDarkMode ? 'bg-slate-900 text-white' : 'bg-slate-50 text-slate-800'}`} dir="rtl">
       
-      {/* Chat Button and Window */}
+      <AIReportModal isOpen={aiModalOpen} onClose={() => setAiModalOpen(false)} isLoading={aiLoading} report={aiReport} />
+      <ClearDataModal isOpen={clearModalOpen} onClose={() => setClearModalOpen(false)} onConfirm={handleClearData} type={activeTab} isDarkMode={isDarkMode} />
+      
+      {/* Chat Button */}
       <div className="fixed bottom-6 left-6 z-40">
           {!chatOpen && (
               <button 
@@ -940,31 +999,33 @@ const App = () => {
             onSend={handleChatSend} 
             messages={chatMessages} 
             isThinking={isChatThinking} 
+            isDarkMode={isDarkMode}
           />
       </div>
 
-      <div className="w-20 lg:w-64 bg-slate-900 text-white flex flex-col flex-shrink-0 transition-all duration-300">
-        <div className="p-4 lg:p-6 flex items-center justify-center lg:justify-start gap-3 border-b border-slate-700">
-            <div className="bg-blue-600 p-2 rounded-lg"><LayoutDashboard className="w-6 h-6" /></div>
-            <span className="text-xl font-bold hidden lg:block">BizData</span>
+      {/* Sidebar */}
+      <div className={`w-20 lg:w-64 flex flex-col flex-shrink-0 transition-all duration-300 border-l ${isDarkMode ? 'bg-slate-950 border-slate-800' : 'bg-slate-900 text-white border-slate-700'}`}>
+        <div className={`p-4 lg:p-6 flex items-center justify-center lg:justify-start gap-3 border-b ${isDarkMode ? 'border-slate-800' : 'border-slate-700'}`}>
+            <div className="bg-blue-600 p-2 rounded-lg"><LayoutDashboard className="w-6 h-6 text-white" /></div>
+            <span className={`text-xl font-bold hidden lg:block ${isDarkMode ? 'text-white' : 'text-white'}`}>BizData</span>
         </div>
         <nav className="flex-1 p-4 space-y-2">
-            <button onClick={() => { setActiveTab('sales'); resetAllFilters(); }} className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors ${activeTab === 'sales' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
+            <button onClick={() => { setActiveTab('sales'); resetAllFilters(); }} className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors ${activeTab === 'sales' ? 'bg-blue-600 text-white shadow-lg' : 'text-slate-400 hover:bg-white/10 hover:text-white'}`}>
                 <TrendingUp className="w-5 h-5" />
                 <span className="hidden lg:block font-medium">מכירות</span>
             </button>
-            <button onClick={() => { setActiveTab('suppliers'); resetAllFilters(); }} className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors ${activeTab === 'suppliers' ? 'bg-emerald-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
+            <button onClick={() => { setActiveTab('suppliers'); resetAllFilters(); }} className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors ${activeTab === 'suppliers' ? 'bg-emerald-600 text-white shadow-lg' : 'text-slate-400 hover:bg-white/10 hover:text-white'}`}>
                 <Truck className="w-5 h-5" />
                 <span className="hidden lg:block font-medium">רכש וספקים</span>
             </button>
-             <button onClick={() => { setActiveTab('summary'); resetAllFilters(); }} className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors ${activeTab === 'summary' ? 'bg-violet-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
+             <button onClick={() => { setActiveTab('summary'); resetAllFilters(); }} className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors ${activeTab === 'summary' ? 'bg-violet-600 text-white shadow-lg' : 'text-slate-400 hover:bg-white/10 hover:text-white'}`}>
                 <BarChart3 className="w-5 h-5" />
                 <span className="hidden lg:block font-medium">סיכום פיננסי</span>
             </button>
         </nav>
-        <div className="p-4 border-t border-slate-700">
+        <div className={`p-4 border-t ${isDarkMode ? 'border-slate-800' : 'border-slate-700'}`}>
             <div className="flex flex-col gap-4">
-                <label className={`flex items-center justify-center lg:justify-start gap-3 p-3 rounded-xl cursor-pointer transition-colors ${loading ? 'bg-slate-800 opacity-50' : 'bg-slate-800 hover:bg-slate-700'} text-slate-300`}>
+                <label className={`flex items-center justify-center lg:justify-start gap-3 p-3 rounded-xl cursor-pointer transition-colors ${loading ? 'opacity-50' : 'hover:bg-white/10'} ${isDarkMode ? 'bg-slate-900 text-slate-300' : 'bg-slate-800 text-slate-300'}`}>
                     {loading ? <Loader2 className="w-5 h-5 animate-spin" /> : <Upload className="w-5 h-5" />}
                     <span className="hidden lg:block text-sm">טען קבצים</span>
                     <input type="file" accept=".csv, .xlsx, .xls" multiple onChange={handleFileUpload} className="hidden" disabled={loading} />
@@ -980,32 +1041,46 @@ const App = () => {
         </div>
       </div>
 
+      {/* Main Content */}
       <div className="flex-1 flex flex-col h-screen overflow-hidden">
-        <header className="bg-white border-b border-slate-200 px-8 py-5 flex justify-between items-center shadow-sm z-10">
+        <header className={`px-8 py-5 flex justify-between items-center shadow-sm z-10 border-b transition-colors ${isDarkMode ? 'bg-slate-900 border-slate-800' : 'bg-white border-slate-200'}`}>
             <div className="flex flex-col gap-1">
-                <h1 className="text-2xl font-bold text-slate-800">
+                <h1 className={`text-2xl font-bold ${isDarkMode ? 'text-white' : 'text-slate-800'}`}>
                     {activeTab === 'sales' ? 'דשבורד מכירות' : activeTab === 'suppliers' ? 'דשבורד רכש וספקים' : 'סיכום רווח והפסד'}
                 </h1>
+                {activeTab !== 'summary' && (
+                    <div className="flex flex-wrap items-center gap-2 text-sm">
+                        {activeFileNames.length > 0 ? activeFileNames.map((n, i) => (
+                            <span key={i} className={`px-2 py-0.5 rounded text-xs border flex items-center gap-1 ${isDarkMode ? 'bg-slate-800 border-slate-700 text-slate-300' : 'bg-slate-100 border-slate-200 text-slate-700'}`}>
+                                <FileSpreadsheet className="w-3 h-3 text-green-500"/>
+                                <span className="max-w-[150px] truncate" title={n}>{n}</span>
+                            </span>
+                        )) : <span className="text-slate-400 italic">אין קבצים</span>}
+                    </div>
+                )}
             </div>
             <div className="flex items-center gap-4">
                 {availableDates.length > 0 && (
                     <div className="flex items-center gap-2">
-                         <div className="hidden md:flex bg-white border border-slate-200 rounded-lg p-1 text-xs shadow-sm">
-                            <button onClick={() => setQuickDate(3)} className="px-3 py-1 hover:bg-slate-50 rounded transition-colors text-slate-600 font-medium">3 חודשים</button>
-                            <div className="w-px bg-slate-200 my-1"></div>
-                            <button onClick={() => setQuickDate('year')} className="px-3 py-1 hover:bg-slate-50 rounded transition-colors text-slate-600 font-medium">השנה</button>
-                            <div className="w-px bg-slate-200 my-1"></div>
-                            <button onClick={() => setQuickDate(null)} className="px-3 py-1 hover:bg-slate-50 rounded transition-colors text-slate-600 font-medium">הכל</button>
+                         <div className={`hidden md:flex border rounded-lg p-1 text-xs shadow-sm ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`}>
+                            <button onClick={() => setQuickDate(3)} className={`px-3 py-1 rounded transition-colors font-medium ${isDarkMode ? 'text-slate-300 hover:bg-slate-700' : 'text-slate-600 hover:bg-slate-50'}`}>3 חודשים</button>
+                            <div className={`w-px my-1 ${isDarkMode ? 'bg-slate-700' : 'bg-slate-200'}`}></div>
+                            <button onClick={() => setQuickDate('year')} className={`px-3 py-1 rounded transition-colors font-medium ${isDarkMode ? 'text-slate-300 hover:bg-slate-700' : 'text-slate-600 hover:bg-slate-50'}`}>השנה</button>
+                            <div className={`w-px my-1 ${isDarkMode ? 'bg-slate-700' : 'bg-slate-200'}`}></div>
+                            <button onClick={() => setQuickDate(null)} className={`px-3 py-1 rounded transition-colors font-medium ${isDarkMode ? 'text-slate-300 hover:bg-slate-700' : 'text-slate-600 hover:bg-slate-50'}`}>הכל</button>
                         </div>
 
-                        <div className="hidden md:flex items-center bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 text-sm">
+                        <div className={`hidden md:flex items-center px-3 py-1.5 rounded-lg border text-sm ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-slate-50 border-slate-200'}`}>
                             <span className="text-slate-500 ml-2"><Calendar className="w-4 h-4" /></span>
-                            <select value={dateFilter.start} onChange={(e) => setDateFilter(prev => ({ ...prev, start: e.target.value }))} className="bg-transparent font-bold cursor-pointer text-sm">{availableDates.map(d => <option key={`s${d}`} value={d}>{d}</option>)}</select>
+                            <select value={dateFilter.start} onChange={(e) => setDateFilter(prev => ({ ...prev, start: e.target.value }))} className={`bg-transparent font-bold cursor-pointer text-sm border-none focus:ring-0 ${isDarkMode ? 'text-white' : 'text-slate-700'}`}>{availableDates.map(d => <option key={`s${d}`} value={d} className={isDarkMode ? 'bg-slate-800' : ''}>{d}</option>)}</select>
                             <span className="mx-2 text-slate-400">-</span>
-                            <select value={dateFilter.end} onChange={(e) => setDateFilter(prev => ({ ...prev, end: e.target.value }))} className="bg-transparent font-bold cursor-pointer text-sm">{availableDates.map(d => <option key={`e${d}`} value={d}>{d}</option>)}</select>
+                            <select value={dateFilter.end} onChange={(e) => setDateFilter(prev => ({ ...prev, end: e.target.value }))} className={`bg-transparent font-bold cursor-pointer text-sm border-none focus:ring-0 ${isDarkMode ? 'text-white' : 'text-slate-700'}`}>{availableDates.map(d => <option key={`e${d}`} value={d} className={isDarkMode ? 'bg-slate-800' : ''}>{d}</option>)}</select>
                         </div>
                     </div>
                 )}
+                <button onClick={toggleTheme} className={`p-2 rounded-lg transition-colors ${isDarkMode ? 'bg-slate-800 text-yellow-400 hover:bg-slate-700' : 'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                    {isDarkMode ? <Sun className="w-5 h-5" /> : <Moon className="w-5 h-5" />}
+                </button>
                 <button onClick={generateAIInsight} className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white rounded-lg shadow-md text-sm font-bold hover:-translate-y-0.5 transition-all">
                     <Sparkles className="w-4 h-4 text-yellow-300" /> <span>תובנות AI</span>
                 </button>
@@ -1017,43 +1092,47 @@ const App = () => {
                  summaryData ? (
                     <div className="space-y-6">
                         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-                            <Card title="סה״כ הכנסות" value={formatCurrency(summaryData.totalIncome)} subtext="מסה״כ המכירות" icon={DollarSign} color="bg-blue-500" />
-                            <Card title="סה״כ הוצאות" value={formatCurrency(summaryData.totalExpenses)} subtext="מסה״כ הספקים" icon={Wallet} color="bg-red-500" />
-                            <Card title="רווח נקי" value={formatCurrency(summaryData.totalProfit)} subtext={`${summaryData.profitMargin.toFixed(1)}% אחוז רווח`} icon={Activity} color={summaryData.totalProfit >= 0 ? "bg-emerald-500" : "bg-red-600"} />
+                            <Card title="סה״כ הכנסות" value={formatCurrency(summaryData.totalIncome)} subtext="מסה״כ המכירות" icon={DollarSign} color="bg-blue-500" isDarkMode={isDarkMode} />
+                            <Card title="סה״כ הוצאות" value={formatCurrency(summaryData.totalExpenses)} subtext="מסה״כ הספקים" icon={Wallet} color="bg-red-500" isDarkMode={isDarkMode} />
+                            <Card title="רווח נקי" value={formatCurrency(summaryData.totalProfit)} subtext={`${summaryData.profitMargin.toFixed(1)}% אחוז רווח`} icon={Activity} color={summaryData.totalProfit >= 0 ? "bg-emerald-500" : "bg-red-600"} isDarkMode={isDarkMode} />
                         </div>
-                        <div className="bg-white p-6 rounded-xl border border-slate-100 shadow-sm h-[450px]">
-                            <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><BarChart3 className="w-5 h-5 text-violet-500" />הכנסות מול הוצאות ורווח</h3>
-                            <ResponsiveContainer width="100%" height="100%">
-                                <ComposedChart data={summaryData.chart}>
-                                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
-                                    <XAxis dataKey="name" />
-                                    <YAxis />
-                                    <RechartsTooltip formatter={(val) => formatCurrency(val)} />
-                                    <Legend />
-                                    <Bar dataKey="income" name="הכנסות" fill="#3b82f6" barSize={20} />
-                                    <Bar dataKey="expenses" name="הוצאות" fill="#ef4444" barSize={20} />
-                                    <Line type="monotone" dataKey="profit" name="רווח נקי" stroke="#10b981" strokeWidth={3} dot={{r:4}} />
-                                </ComposedChart>
-                            </ResponsiveContainer>
+                        <div className={`p-6 rounded-xl border shadow-sm h-[450px] ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-100'}`}>
+                            <h3 className={`text-lg font-bold mb-6 flex items-center gap-2 ${isDarkMode ? 'text-white' : 'text-slate-800'}`}><BarChart3 className="w-5 h-5 text-violet-500" />הכנסות מול הוצאות ורווח</h3>
+                            <div style={{ width: '100%', height: '100%' }}>
+                                <ResponsiveContainer width="100%" height="100%">
+                                    <ComposedChart data={summaryData.chart}>
+                                        <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDarkMode ? '#334155' : '#e2e8f0'} />
+                                        <XAxis dataKey="name" stroke="#64748b" />
+                                        <YAxis stroke="#64748b" />
+                                        <RechartsTooltip formatter={(val) => formatCurrency(val)} contentStyle={{ backgroundColor: isDarkMode ? '#1e293b' : '#fff', borderColor: isDarkMode ? '#334155' : '#e2e8f0', color: isDarkMode ? '#fff' : '#000' }} />
+                                        <Legend />
+                                        <Bar dataKey="income" name="הכנסות" fill="#3b82f6" barSize={20} radius={[4, 4, 0, 0]} />
+                                        <Bar dataKey="expenses" name="הוצאות" fill="#ef4444" barSize={20} radius={[4, 4, 0, 0]} />
+                                        <Line type="monotone" dataKey="profit" name="רווח נקי" stroke="#10b981" strokeWidth={3} dot={{r:4}} />
+                                    </ComposedChart>
+                                </ResponsiveContainer>
+                            </div>
                         </div>
                     </div>
                  ) : <div className="text-center py-20 text-slate-400">אין נתונים להצגת סיכום. נא לטעון קבצי מכירות וספקים.</div>
             ) : (
             <>
-            <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex flex-col lg:flex-row gap-4 items-center">
+            <div className={`p-4 rounded-xl shadow-sm border flex flex-col lg:flex-row gap-4 items-center ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-100'}`}>
                 <div className="flex items-center gap-2 text-slate-500 font-medium text-sm whitespace-nowrap min-w-fit"><Filter className="w-4 h-4" /> סינון:</div>
                 {activeTab === 'sales' ? (
                     <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 w-full">
-                        <Autocomplete options={uniqueItems.products} value={selectedProduct} onChange={(val) => { setSelectedProduct(val); setSelectedSku(''); }} placeholder="בחר מוצרים..." icon={Box} multiple={true} maxSelections={5} />
-                        <Autocomplete options={uniqueItems.skus} value={selectedSku} onChange={(val) => { setSelectedSku(val); setSelectedProduct([]); }} placeholder="בחר מק״ט..." icon={Tag} />
+                        <Autocomplete options={uniqueItems.products} value={selectedProduct} onChange={(val) => { setSelectedProduct(val); setSelectedSku(''); }} placeholder="בחר מוצרים..." icon={Box} multiple={true} maxSelections={5} isDarkMode={isDarkMode} />
+                        <Autocomplete options={uniqueItems.skus} value={selectedSku} onChange={(val) => { setSelectedSku(val); setSelectedProduct([]); }} placeholder="בחר מק״ט..." icon={Tag} isDarkMode={isDarkMode} />
                     </div>
                 ) : (
                     <div className="flex-1 w-full">
-                        <Autocomplete options={uniqueItems.suppliers} value={selectedSupplier} onChange={setSelectedSupplier} placeholder="בחר ספק..." icon={Truck} />
+                        <Autocomplete options={uniqueItems.suppliers} value={selectedSupplier} onChange={setSelectedSupplier} placeholder="בחר ספק..." icon={Truck} isDarkMode={isDarkMode} />
                     </div>
                 )}
                 {(selectedProduct.length > 0 || selectedSku || selectedSupplier || searchTerm) && (
-                    <button onClick={resetAllFilters} className="px-4 py-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg text-sm font-medium">נקה סינון</button>
+                    <button onClick={resetAllFilters} className="px-4 py-2 text-red-600 bg-red-50/10 hover:bg-red-100/20 rounded-lg text-sm font-medium transition-colors whitespace-nowrap">
+                        נקה סינון
+                    </button>
                 )}
             </div>
 
@@ -1065,29 +1144,34 @@ const App = () => {
                     icon={activeTab === 'sales' ? DollarSign : Wallet} 
                     color={activeTab === 'sales' ? 'bg-blue-500' : 'bg-red-500'} 
                     trend={stats.trend}
+                    isDarkMode={isDarkMode}
                 />
-                <Card title="ממוצע חודשי" value={formatCurrency(stats.avgAmount)} subtext={`לפי ${stats.monthsCount} חודשים`} icon={Activity} color="bg-amber-500" />
-                <Card title={activeTab === 'sales' ? 'כמות יחידות' : 'כמות שורות רכש'} value={stats.totalQuantity.toLocaleString()} subtext="סה״כ בסינון" icon={Package} color="bg-emerald-500" />
+                <Card title="ממוצע חודשי" value={formatCurrency(stats.avgAmount)} subtext={`לפי ${stats.monthsCount} חודשים`} icon={Activity} color="bg-amber-500" isDarkMode={isDarkMode} />
+                <Card title={activeTab === 'sales' ? 'כמות יחידות' : 'כמות שורות רכש'} value={stats.totalQuantity.toLocaleString()} subtext="סה״כ בסינון" icon={Package} color="bg-emerald-500" isDarkMode={isDarkMode} />
                 <Card title="ממוצע כמות" value={avgList ? (
                         <div className="flex flex-col gap-1 mt-1 max-h-[80px] overflow-y-auto custom-scrollbar pr-1">
                             {avgList.map(item => (
-                                <div key={item.name} className="flex justify-between text-xs border-b border-slate-50 pb-1"><span className="truncate w-20" title={item.name}>{item.name}</span><span className="font-bold">{Math.round(item.quantity / stats.monthsCount)}</span></div>
+                                <div key={item.name} className={`flex justify-between text-xs border-b pb-1 ${isDarkMode ? 'border-slate-700' : 'border-slate-50'}`}>
+                                    <span className="truncate w-20" title={item.name}>{item.name}</span>
+                                    <span className="font-bold">{Math.round(item.quantity / stats.monthsCount)}</span>
+                                </div>
                             ))}
                         </div>
-                    ) : Math.round(stats.avgQuantity).toLocaleString()} subtext={avgList ? 'פירוט לפי פריט' : 'ממוצע חודשי כללי'} icon={Layers} color="bg-cyan-500" />
+                    ) : Math.round(stats.avgQuantity).toLocaleString()} subtext={avgList ? 'פירוט לפי פריט' : 'ממוצע חודשי כללי'} icon={Layers} color="bg-cyan-500" isDarkMode={isDarkMode} />
             </div>
 
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-                <div className="bg-white p-6 rounded-xl border border-slate-100 shadow-sm min-h-[450px]">
-                    <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><Calendar className="w-5 h-5 text-blue-500" />{activeTab === 'sales' ? 'מכירות לפי חודש' : 'הוצאות לפי חודש'}</h3>
-                    <div className="h-96">
+                <div className={`p-6 rounded-xl border shadow-sm min-h-[450px] ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-100'}`}>
+                    <h3 className={`text-lg font-bold mb-6 flex items-center gap-2 ${isDarkMode ? 'text-white' : 'text-slate-800'}`}><Calendar className="w-5 h-5 text-blue-500" />{activeTab === 'sales' ? 'מכירות לפי חודש' : 'הוצאות לפי חודש'}</h3>
+                    <div style={{ width: '100%', height: '400px' }}>
+                        {chartData && chartData.monthly.length > 0 ? (
                         <ResponsiveContainer width="100%" height="100%">
                             <ComposedChart data={chartData.monthly} onClick={handleChartClick} style={{ cursor: 'pointer' }}>
-                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
+                                <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDarkMode ? '#334155' : '#e2e8f0'} />
                                 <XAxis dataKey="name" stroke="#64748b" />
                                 <YAxis yAxisId="left" stroke="#3b82f6" tickFormatter={(val) => `₪${val/1000}k`} />
                                 {activeTab === 'sales' && <YAxis yAxisId="right" orientation="right" stroke="#10b981" />}
-                                <RechartsTooltip formatter={(val, name) => name.includes('כמות') ? val : formatCurrency(val)} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }} />
+                                <RechartsTooltip formatter={(val, name) => name.includes('כמות') ? val : formatCurrency(val)} contentStyle={{ backgroundColor: isDarkMode ? '#1e293b' : '#fff', borderColor: isDarkMode ? '#334155' : '#e2e8f0', color: isDarkMode ? '#fff' : '#000' }} />
                                 <Legend />
                                 {activeTab === 'sales' && selectedProduct.length > 0 ? (
                                     selectedProduct.map((p, i) => (
@@ -1106,27 +1190,30 @@ const App = () => {
                                 )}
                             </ComposedChart>
                         </ResponsiveContainer>
+                        ) : (
+                            <div className="flex items-center justify-center h-full text-slate-400">אין נתונים להצגה</div>
+                        )}
                     </div>
                 </div>
 
-                <div className="bg-white p-6 rounded-xl border border-slate-100 shadow-sm flex flex-col min-h-[450px]">
+                <div className={`p-6 rounded-xl border shadow-sm flex flex-col min-h-[450px] ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-100'}`}>
                     <div className="flex justify-between items-start mb-6">
-                        <h3 className="text-lg font-bold flex items-center gap-2"><TrendingUp className="w-5 h-5 text-emerald-500" />{activeTab === 'sales' ? (selectedProduct.length > 0 ? 'התפלגות נבחרים' : 'מוצרים מובילים') : 'ספקים מובילים'}</h3>
+                        <h3 className={`text-lg font-bold flex items-center gap-2 ${isDarkMode ? 'text-white' : 'text-slate-800'}`}><TrendingUp className="w-5 h-5 text-emerald-500" />{activeTab === 'sales' ? (selectedProduct.length > 0 ? 'התפלגות נבחרים' : 'מוצרים מובילים') : 'ספקים מובילים'}</h3>
                         {activeTab === 'sales' && (
-                            <div className="flex bg-slate-100 rounded-lg p-1">
-                                <button onClick={() => setPieMetric('total')} className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${pieMetric === 'total' ? 'bg-white shadow text-blue-700' : 'text-slate-500'}`}>סכום</button>
-                                <button onClick={() => setPieMetric('quantity')} className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${pieMetric === 'quantity' ? 'bg-white shadow text-blue-700' : 'text-slate-500'}`}>כמות</button>
+                            <div className={`flex rounded-lg p-1 ${isDarkMode ? 'bg-slate-700' : 'bg-slate-100'}`}>
+                                <button onClick={() => setPieMetric('total')} className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${pieMetric === 'total' ? (isDarkMode ? 'bg-slate-600 text-white' : 'bg-white shadow text-blue-700') : 'text-slate-500'}`}>סכום</button>
+                                <button onClick={() => setPieMetric('quantity')} className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${pieMetric === 'quantity' ? (isDarkMode ? 'bg-slate-600 text-white' : 'bg-white shadow text-blue-700') : 'text-slate-500'}`}>כמות</button>
                             </div>
                         )}
                     </div>
                     <div className="h-96 flex items-center justify-center flex-1">
-                        {chartData.pie.length > 0 ? (
+                        {chartData && chartData.pie.length > 0 ? (
                             <ResponsiveContainer width="100%" height="100%">
                                 <PieChart>
                                     <Pie data={chartData.pie} cx="50%" cy="50%" innerRadius={80} outerRadius={110} paddingAngle={5} dataKey="value">
                                         {chartData.pie.map((entry, index) => <Cell key={`cell-${index}`} fill={COLORS[index % COLORS.length]} />)}
                                     </Pie>
-                                    <RechartsTooltip content={<CustomPieTooltip />} />
+                                    <RechartsTooltip content={<CustomPieTooltip isDarkMode={isDarkMode} />} />
                                     <Legend layout="vertical" align="right" verticalAlign="middle" wrapperStyle={{ fontSize: '11px', maxHeight: '300px', overflowY: 'auto' }} />
                                 </PieChart>
                             </ResponsiveContainer>
@@ -1135,10 +1222,10 @@ const App = () => {
                 </div>
             </div>
 
-            <div className="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
-                <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row justify-between items-center gap-4">
+            <div className={`rounded-xl border shadow-sm overflow-hidden ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-100'}`}>
+                <div className={`p-6 border-b flex flex-col sm:flex-row justify-between items-center gap-4 ${isDarkMode ? 'border-slate-700' : 'border-slate-100'}`}>
                     <div className="flex items-center gap-3">
-                        <h3 className="text-lg font-bold flex items-center gap-2"><FileText className="w-5 h-5 text-slate-400" /> פירוט עסקאות</h3>
+                        <h3 className={`text-lg font-bold flex items-center gap-2 ${isDarkMode ? 'text-white' : 'text-slate-800'}`}><FileText className="w-5 h-5 text-slate-400" /> פירוט עסקאות</h3>
                         {drillDownMonth && (
                              <span className="flex items-center gap-1 bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium animate-in fade-in slide-in-from-left-4">
                                 <MousePointerClick className="w-4 h-4" />
@@ -1148,47 +1235,53 @@ const App = () => {
                         )}
                     </div>
                     <div className="flex gap-3 items-center">
-                        <button onClick={handleExport} className="flex items-center gap-2 px-3 py-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-lg transition-colors text-sm font-medium border border-emerald-200">
+                        <button onClick={handleExport} className={`flex items-center gap-2 px-3 py-2 rounded-lg transition-colors text-sm font-medium border ${isDarkMode ? 'bg-emerald-900/20 border-emerald-800 text-emerald-400 hover:bg-emerald-900/40' : 'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border-emerald-200'}`}>
                             <Download className="w-4 h-4" /> ייצוא לאקסל
                         </button>
                         <div className="relative w-full sm:w-64">
                             <Search className="absolute right-3 top-2.5 w-4 h-4 text-slate-400" />
-                            <input type="text" placeholder="חיפוש בטבלה..." className="w-full pl-4 pr-10 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+                            <input 
+                                type="text" 
+                                placeholder="חיפוש בטבלה..." 
+                                className={`w-full pl-4 pr-10 py-2 border rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm ${isDarkMode ? 'bg-slate-700 border-slate-600 text-white placeholder-slate-400' : 'bg-slate-50 border-slate-200 text-slate-900'}`} 
+                                value={searchTerm} 
+                                onChange={(e) => setSearchTerm(e.target.value)} 
+                            />
                         </div>
                     </div>
                 </div>
                 <div className="overflow-x-auto">
-                    <table className="w-full text-sm text-right">
-                        <thead className="bg-slate-50 text-slate-500 font-medium">
+                    <table className={`w-full text-sm text-right ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+                        <thead className={`font-medium ${isDarkMode ? 'bg-slate-900/50 text-slate-400' : 'bg-slate-50 text-slate-500'}`}>
                             <tr>
-                                <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('date')}>תאריך</th>
+                                <th className="px-6 py-3 cursor-pointer hover:text-blue-500" onClick={() => requestSort('date')}>תאריך</th>
                                 {activeTab === 'sales' && <th className="px-6 py-3">מק״ט</th>}
-                                <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort(activeTab === 'sales' ? 'description' : 'supplier')}>
+                                <th className="px-6 py-3 cursor-pointer hover:text-blue-500" onClick={() => requestSort(activeTab === 'sales' ? 'description' : 'supplier')}>
                                     {activeTab === 'sales' ? 'מוצר' : 'ספק'}
                                 </th>
-                                <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('quantity')}>כמות</th>
-                                <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('total')}>סכום</th>
+                                <th className="px-6 py-3 cursor-pointer hover:text-blue-500" onClick={() => requestSort('quantity')}>כמות</th>
+                                <th className="px-6 py-3 cursor-pointer hover:text-blue-500" onClick={() => requestSort('total')}>סכום</th>
                             </tr>
                         </thead>
-                        <tbody className="divide-y divide-slate-100">
+                        <tbody className={`divide-y ${isDarkMode ? 'divide-slate-700' : 'divide-slate-100'}`}>
                             {paginatedData.length > 0 ? paginatedData.map((row) => (
-                                <tr key={row.id} className="hover:bg-slate-50 transition-colors">
-                                    <td className="px-6 py-4 text-slate-500 whitespace-nowrap">{row.date}</td>
-                                    {activeTab === 'sales' && <td className="px-6 py-4 font-mono text-xs text-slate-500">{row.sku}</td>}
-                                    <td className="px-6 py-4 font-medium text-slate-800">{activeTab === 'sales' ? row.description : row.supplier}</td>
-                                    <td className="px-6 py-4 text-slate-600"><span className="bg-slate-100 px-2 py-1 rounded text-xs font-bold">{row.quantity}</span></td>
-                                    <td className="px-6 py-4 font-bold text-slate-800">{formatCurrency(row.total)}</td>
+                                <tr key={row.id} className={`transition-colors ${isDarkMode ? 'hover:bg-slate-700/50' : 'hover:bg-slate-50'}`}>
+                                    <td className="px-6 py-4 whitespace-nowrap">{row.date}</td>
+                                    {activeTab === 'sales' && <td className="px-6 py-4 font-mono text-xs opacity-70">{row.sku}</td>}
+                                    <td className={`px-6 py-4 font-medium ${isDarkMode ? 'text-white' : 'text-slate-800'}`}>{activeTab === 'sales' ? row.description : row.supplier}</td>
+                                    <td className="px-6 py-4"><span className={`px-2 py-1 rounded text-xs font-bold ${isDarkMode ? 'bg-slate-700 text-slate-300' : 'bg-slate-100 text-slate-600'}`}>{row.quantity}</span></td>
+                                    <td className={`px-6 py-4 font-bold ${isDarkMode ? 'text-white' : 'text-slate-800'}`}>{formatCurrency(row.total)}</td>
                                 </tr>
-                            )) : <tr><td colSpan="5" className="px-6 py-12 text-center text-slate-400">לא נמצאו נתונים</td></tr>}
+                            )) : <tr><td colSpan="5" className="px-6 py-12 text-center opacity-50">לא נמצאו נתונים</td></tr>}
                         </tbody>
                     </table>
                 </div>
-                <div className="bg-slate-50 px-6 py-4 border-t border-slate-100 text-xs text-slate-500 flex justify-between items-center">
+                <div className={`px-6 py-4 border-t text-xs flex justify-between items-center ${isDarkMode ? 'bg-slate-900/30 border-slate-700 text-slate-400' : 'bg-slate-50 border-slate-100 text-slate-500'}`}>
                     <span>מציג {filteredData.length > 0 ? (currentPage - 1) * itemsPerPage + 1 : 0} - {Math.min(currentPage * itemsPerPage, filteredData.length)} מתוך {filteredData.length} רשומות</span>
                     <div className="flex items-center gap-2">
-                        <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className={`p-1 rounded hover:bg-slate-200 transition-colors ${currentPage === 1 ? 'opacity-50 cursor-not-allowed' : ''}`}><ChevronRight className="w-4 h-4" /></button>
+                        <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className={`p-1 rounded transition-colors ${isDarkMode ? 'hover:bg-slate-700' : 'hover:bg-slate-200'} ${currentPage === 1 ? 'opacity-50 cursor-not-allowed' : ''}`}><ChevronRight className="w-4 h-4" /></button>
                         <span>עמוד {currentPage} מתוך {totalPages || 1}</span>
-                        <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages || totalPages === 0} className={`p-1 rounded hover:bg-slate-200 transition-colors ${currentPage === totalPages || totalPages === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}><ChevronLeft className="w-4 h-4" /></button>
+                        <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages || totalPages === 0} className={`p-1 rounded transition-colors ${isDarkMode ? 'hover:bg-slate-700' : 'hover:bg-slate-200'} ${currentPage === totalPages || totalPages === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}><ChevronLeft className="w-4 h-4" /></button>
                     </div>
                 </div>
             </div>
