@@ -1,5 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, ArrowUpDown, ArrowUp, ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot, Loader2, FileText, Check, Trash2, Truck, Wallet, LayoutDashboard, FileSpreadsheet, AlertTriangle, ChevronLeft, ChevronRight, PieChart as PieChartIcon, BarChart3, Download, MousePointerClick } from 'lucide-react';
+import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, ArrowUpDown, ArrowUp, ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot, Loader2, FileText, Check, Trash2, Truck, Wallet, LayoutDashboard, FileSpreadsheet, AlertTriangle, ChevronLeft, ChevronRight, PieChart as PieChartIcon, BarChart3, Download, MousePointerClick, Clock, MessageSquare, Send } from 'lucide-react';
 import { ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, Area } from 'recharts';
 
 // --- הגדרות API של GEMINI ---
@@ -68,12 +68,20 @@ const getMonthsDifference = (startStr, endStr) => {
 
 // --- רכיבי UI ---
 
-const Card = ({ title, value, subtext, icon: Icon, color }) => (
-  <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 flex items-center justify-between hover:shadow-md transition-shadow h-full">
-    <div className="flex-1 min-w-0">
+const Card = ({ title, value, subtext, icon: Icon, color, trend }) => (
+  <div className="bg-white p-6 rounded-xl shadow-sm border border-slate-100 flex items-center justify-between hover:shadow-md transition-shadow h-full relative overflow-hidden">
+    <div className="flex-1 min-w-0 z-10">
       <p className="text-sm font-medium text-slate-500 mb-1">{title}</p>
       <div className="text-2xl font-bold text-slate-800">{value}</div>
-      {subtext && <p className="text-xs text-slate-400 mt-1">{subtext}</p>}
+      <div className="flex items-center gap-2 mt-2">
+          {trend !== undefined && trend !== null && (
+              <span className={`text-xs font-bold flex items-center px-1.5 py-0.5 rounded ${trend >= 0 ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'}`}>
+                  {trend >= 0 ? <TrendingUp className="w-3 h-3 ml-1" /> : <ArrowDown className="w-3 h-3 ml-1" />}
+                  {Math.abs(trend).toFixed(1)}%
+              </span>
+          )}
+          {subtext && <p className="text-xs text-slate-400 truncate" title={subtext}>{subtext}</p>}
+      </div>
     </div>
     <div className={`p-3 rounded-full ${color} shrink-0 ml-4 self-start`}>
       <Icon className="w-6 h-6 text-white" />
@@ -214,7 +222,7 @@ const Autocomplete = ({ options, value, onChange, placeholder, icon: Icon, multi
   );
 };
 
-// AI Modal
+// AI Report Modal
 const AIReportModal = ({ isOpen, onClose, isLoading, report }) => {
   if (!isOpen) return null;
   return (
@@ -245,6 +253,94 @@ const AIReportModal = ({ isOpen, onClose, isLoading, report }) => {
       </div>
     </div>
   );
+};
+
+// Chat Component
+const AIChatWindow = ({ isOpen, onClose, onSend, messages, isThinking }) => {
+    const messagesEndRef = useRef(null);
+    const [input, setInput] = useState('');
+
+    const scrollToBottom = () => {
+        messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
+    };
+
+    useEffect(() => {
+        if (isOpen) scrollToBottom();
+    }, [messages, isOpen]);
+
+    const handleSubmit = (e) => {
+        e.preventDefault();
+        if (!input.trim()) return;
+        onSend(input);
+        setInput('');
+    };
+
+    if (!isOpen) return null;
+
+    return (
+        <div className="fixed bottom-20 left-6 z-50 w-96 h-[500px] bg-white rounded-2xl shadow-2xl border border-slate-200 flex flex-col overflow-hidden animate-in slide-in-from-bottom-10 fade-in duration-300">
+            {/* Header */}
+            <div className="p-4 bg-gradient-to-r from-indigo-600 to-violet-600 text-white flex justify-between items-center">
+                <div className="flex items-center gap-2">
+                    <Bot className="w-6 h-6 text-yellow-300" />
+                    <h3 className="font-bold">צ׳אט עם הנתונים</h3>
+                </div>
+                <button onClick={onClose} className="hover:bg-white/20 rounded-full p-1 transition-colors">
+                    <X className="w-5 h-5" />
+                </button>
+            </div>
+
+            {/* Messages */}
+            <div className="flex-1 overflow-y-auto p-4 space-y-4 bg-slate-50">
+                {messages.length === 0 && (
+                    <div className="text-center text-slate-400 text-sm mt-10">
+                        <Sparkles className="w-8 h-8 mx-auto mb-2 opacity-50" />
+                        <p>שאל כל דבר על הנתונים שלך!</p>
+                        <p className="text-xs mt-1">"מי הספק הכי יקר?" "איזה מוצר נמכר הכי הרבה?"</p>
+                    </div>
+                )}
+                {messages.map((msg, idx) => (
+                    <div key={idx} className={`flex ${msg.role === 'user' ? 'justify-start' : 'justify-end'}`}>
+                        <div className={`max-w-[80%] p-3 rounded-2xl text-sm shadow-sm ${
+                            msg.role === 'user' 
+                            ? 'bg-white border border-slate-100 text-slate-800 rounded-br-none' 
+                            : 'bg-indigo-600 text-white rounded-bl-none'
+                        }`}>
+                            {msg.content}
+                        </div>
+                    </div>
+                ))}
+                {isThinking && (
+                    <div className="flex justify-end">
+                        <div className="bg-indigo-50 p-3 rounded-2xl rounded-bl-none flex gap-1">
+                            <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '0ms' }}></div>
+                            <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '150ms' }}></div>
+                            <div className="w-2 h-2 bg-indigo-400 rounded-full animate-bounce" style={{ animationDelay: '300ms' }}></div>
+                        </div>
+                    </div>
+                )}
+                <div ref={messagesEndRef} />
+            </div>
+
+            {/* Input */}
+            <form onSubmit={handleSubmit} className="p-3 border-t border-slate-100 bg-white flex gap-2">
+                <input 
+                    type="text" 
+                    value={input}
+                    onChange={(e) => setInput(e.target.value)}
+                    placeholder="הקלד שאלה..." 
+                    className="flex-1 bg-slate-50 border border-slate-200 rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-indigo-500"
+                />
+                <button 
+                    type="submit" 
+                    disabled={isThinking || !input.trim()}
+                    className={`p-2 rounded-full text-white transition-all ${isThinking || !input.trim() ? 'bg-slate-300' : 'bg-indigo-600 hover:bg-indigo-700 shadow-md'}`}
+                >
+                    <Send className="w-4 h-4" />
+                </button>
+            </form>
+        </div>
+    );
 };
 
 // Clear Data Confirmation Modal
@@ -360,6 +456,7 @@ const parseCSV = (text) => {
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#84cc16', '#f43f5e', '#06b6d4'];
 
 const App = () => {
+  // נתונים
   const [salesData, setSalesData] = useState(() => {
     try { const saved = localStorage.getItem('dashboardSalesData'); return saved ? JSON.parse(saved) : []; } catch (e) { return []; }
   });
@@ -384,6 +481,11 @@ const App = () => {
   const [clearModalOpen, setClearModalOpen] = useState(false);
   const [storageWarning, setStorageWarning] = useState(false);
   
+  // Chat State
+  const [chatOpen, setChatOpen] = useState(false);
+  const [chatMessages, setChatMessages] = useState([]);
+  const [isChatThinking, setIsChatThinking] = useState(false);
+
   const [availableDates, setAvailableDates] = useState([]);
   const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
   
@@ -426,7 +528,7 @@ const App = () => {
         setDateFilter({ start: sortedDates[0], end: sortedDates[sortedDates.length - 1] });
     }
     setCurrentPage(1);
-    setDrillDownMonth(null); // Reset drilldown on data change
+    setDrillDownMonth(null); 
   }, [salesData, suppliersData]);
 
   useEffect(() => {
@@ -534,19 +636,10 @@ const App = () => {
   const handleExport = () => {
     if (filteredData.length === 0 || !window.XLSX) return;
     
-    // Prepare data for export (Headers in Hebrew)
     const exportData = filteredData.map(item => {
-        const base = {
-            'תאריך': item.date,
-            'סכום': item.total,
-            'כמות': item.quantity,
-            'יחידה': item.unit
-        };
-        if (activeTab === 'sales') {
-            return { ...base, 'מוצר': item.description, 'מק"ט': item.sku };
-        } else {
-            return { ...base, 'ספק': item.supplier };
-        }
+        const base = { 'תאריך': item.date, 'סכום': item.total, 'כמות': item.quantity, 'יחידה': item.unit };
+        if (activeTab === 'sales') return { ...base, 'מוצר': item.description, 'מק"ט': item.sku };
+        return { ...base, 'ספק': item.supplier };
     });
 
     const ws = window.XLSX.utils.json_to_sheet(exportData);
@@ -565,10 +658,8 @@ const App = () => {
 
   const filteredData = useMemo(() => {
     if (activeTab === 'summary') return []; 
-    
     let data = activeData;
     
-    // Drill-down filter (Overrules date range if active)
     if (drillDownMonth) {
         data = data.filter(item => item.date === drillDownMonth);
     } else {
@@ -611,11 +702,7 @@ const App = () => {
       
       const startVal = dateFilter.start ? getComparableDateValue(dateFilter.start) : 0;
       const endVal = dateFilter.end ? getComparableDateValue(dateFilter.end) : 999999;
-      
-      const filterDate = (d) => {
-          const val = getComparableDateValue(d.date);
-          return val >= startVal && val <= endVal;
-      }
+      const filterDate = (d) => { const val = getComparableDateValue(d.date); return val >= startVal && val <= endVal; }
 
       const filteredSales = salesData.filter(filterDate);
       const filteredSuppliers = suppliersData.filter(filterDate);
@@ -626,7 +713,6 @@ const App = () => {
           if (!monthlySummary[item.date]) monthlySummary[item.date] = { income: 0, expenses: 0, profit: 0 };
           monthlySummary[item.date].income += item.total;
       });
-      
       filteredSuppliers.forEach(item => {
           if (!monthlySummary[item.date]) monthlySummary[item.date] = { income: 0, expenses: 0, profit: 0 };
           monthlySummary[item.date].expenses += item.total;
@@ -634,13 +720,7 @@ const App = () => {
 
       const chart = Object.keys(monthlySummary).map(date => {
           const { income, expenses } = monthlySummary[date];
-          return {
-              name: date,
-              income,
-              expenses,
-              profit: income - expenses,
-              order: getComparableDateValue(date)
-          };
+          return { name: date, income, expenses, profit: income - expenses, order: getComparableDateValue(date) };
       }).sort((a, b) => a.order - b.order);
 
       const totalIncome = filteredSales.reduce((acc, curr) => acc + curr.total, 0);
@@ -661,32 +741,37 @@ const App = () => {
 
   useEffect(() => setCurrentPage(1), [activeTab, searchTerm, dateFilter, selectedProduct, selectedSku, selectedSupplier, drillDownMonth]);
 
+  const calculateTrend = (currentTotal, filteredData) => {
+    if (filteredData.length === 0) return 0;
+    const months = [...new Set(filteredData.map(d => d.date))].sort((a, b) => getComparableDateValue(a) - getComparableDateValue(b));
+    if (months.length < 2) return 0;
+    const lastMonth = months[months.length - 1];
+    const prevMonth = months[months.length - 2];
+    const lastMonthTotal = filteredData.filter(d => d.date === lastMonth).reduce((acc, curr) => acc + curr.total, 0);
+    const prevMonthTotal = filteredData.filter(d => d.date === prevMonth).reduce((acc, curr) => acc + curr.total, 0);
+    if (prevMonthTotal === 0) return 100; 
+    return ((lastMonthTotal - prevMonthTotal) / prevMonthTotal) * 100;
+  };
+
   const stats = useMemo(() => {
     if (activeTab === 'summary') return null;
     const totalAmount = filteredData.reduce((acc, curr) => acc + curr.total, 0);
     const totalQuantity = filteredData.reduce((acc, curr) => acc + curr.quantity, 0);
     const uniqueCount = new Set(filteredData.map(item => activeTab === 'sales' ? item.sku : item.supplier)).size;
     const monthsCount = getMonthsDifference(dateFilter.start || availableDates[0], dateFilter.end || availableDates[availableDates.length - 1]);
-    
-    return {
-        totalAmount, totalQuantity, uniqueCount, 
-        avgAmount: monthsCount > 0 ? totalAmount / monthsCount : 0,
-        avgQuantity: monthsCount > 0 ? totalQuantity / monthsCount : 0,
-        monthsCount
-    };
+    const trend = calculateTrend(totalAmount, filteredData);
+    return { totalAmount, totalQuantity, uniqueCount, avgAmount: monthsCount > 0 ? totalAmount / monthsCount : 0, avgQuantity: monthsCount > 0 ? totalQuantity / monthsCount : 0, monthsCount, trend };
   }, [filteredData, dateFilter, availableDates, activeTab]);
 
   const chartData = useMemo(() => {
     if (activeTab === 'summary') return null;
     const monthsMap = {};
-    // Always use filtered data for chart to reflect filters
     filteredData.forEach(item => {
         if (!item.date) return;
         const monthKey = item.date; 
         if (!monthsMap[monthKey]) monthsMap[monthKey] = { total: 0, quantity: 0 };
         monthsMap[monthKey].total += item.total;
         monthsMap[monthKey].quantity += item.quantity;
-        
         if (activeTab === 'sales' && selectedProduct.length > 0) {
             if (!monthsMap[monthKey][item.description]) monthsMap[monthKey][item.description] = 0;
             monthsMap[monthKey][item.description] += item.total;
@@ -721,16 +806,14 @@ const App = () => {
   const generateAIInsight = async () => {
     setAiModalOpen(true); setAiLoading(true); setAiReport('');
     let prompt = '';
-    
     if (activeTab === 'summary') {
         prompt = `
-        נתח את הדו"ח הפיננסי הבא (רווח והפסד):
+        נתח את הדו"ח הפיננסי:
         סה"כ הכנסות: ${formatCurrency(summaryData.totalIncome)}
         סה"כ הוצאות: ${formatCurrency(summaryData.totalExpenses)}
         רווח נקי: ${formatCurrency(summaryData.totalProfit)} (${summaryData.profitMargin.toFixed(1)}%)
         נתונים חודשיים: ${summaryData.chart.map(m => `${m.name}: רווח ${formatCurrency(m.profit)}`).join(', ')}
-        
-        תן 3 תובנות עסקיות קצרות בעברית על המגמות והרווחיות.
+        תן 3 תובנות עסקיות.
         `;
     } else {
         const context = activeTab === 'sales' ? 'מכירות' : 'רכש וספקים';
@@ -741,7 +824,7 @@ const App = () => {
         סה"כ: ${formatCurrency(stats.totalAmount)}
         מגמות: ${chartData.monthly.map(m => `${m.name}: ${formatCurrency(m.total)}`).join(', ')}
         מובילים: ${chartData.pie.map(p => `${p.name}: ${formatCurrency(p.total)}`).join(', ')}
-        תן תובנות קצרות בעברית.
+        תן תובנות קצרות.
         `;
     }
 
@@ -753,6 +836,43 @@ const App = () => {
       const data = await res.json();
       setAiReport(data.candidates?.[0]?.content?.parts?.[0]?.text || "שגיאה.");
     } catch (e) { setAiReport("שגיאת תקשורת."); } finally { setAiLoading(false); }
+  };
+
+  // Handle Chat Messages
+  const handleChatSend = async (text) => {
+      setChatMessages(prev => [...prev, { role: 'user', content: text }]);
+      setIsChatThinking(true);
+      
+      // Context building for Chat
+      let contextData = '';
+      if (activeTab === 'summary' && summaryData) {
+          contextData = `נתונים פיננסיים: הכנסות ${formatCurrency(summaryData.totalIncome)}, הוצאות ${formatCurrency(summaryData.totalExpenses)}, רווח ${formatCurrency(summaryData.totalProfit)}.`;
+      } else if (stats) {
+          contextData = `נתוני ${activeTab === 'sales' ? 'מכירות' : 'ספקים'}: סה"כ ${formatCurrency(stats.totalAmount)}, כמות ${stats.totalQuantity}.`;
+          const topItems = chartData.pie.slice(0, 3).map(i => `${i.name}: ${formatCurrency(i.total)}`).join(', ');
+          contextData += ` מובילים: ${topItems}.`;
+      }
+
+      const prompt = `
+      אתה עוזר עסקי חכם. ענה לשאלה הבאה על סמך הנתונים:
+      הקשר נתונים נוכחי: ${contextData}
+      שאלה: ${text}
+      ענה בקצרה ובעברית.
+      `;
+
+      try {
+        const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+        });
+        const data = await res.json();
+        const reply = data.candidates?.[0]?.content?.parts?.[0]?.text || "לא הבנתי, נסה שנית.";
+        setChatMessages(prev => [...prev, { role: 'assistant', content: reply }]);
+      } catch (e) {
+        setChatMessages(prev => [...prev, { role: 'assistant', content: "שגיאת תקשורת." }]);
+      } finally {
+        setIsChatThinking(false);
+      }
   };
 
   const requestSort = (key) => {
@@ -769,20 +889,33 @@ const App = () => {
      setDrillDownMonth(null);
   };
 
+  const setQuickDate = (monthsBack) => {
+      if (availableDates.length === 0) return;
+      const sorted = [...availableDates];
+      const end = sorted[sorted.length - 1];
+      let start = sorted[0];
+      
+      if (monthsBack === 'year') {
+          const lastDateParts = end.split('-'); 
+          const year = lastDateParts[1];
+          const startOfYear = sorted.find(d => d.endsWith(year));
+          if (startOfYear) start = startOfYear;
+      } else if (monthsBack) {
+           const startIndex = Math.max(0, sorted.length - monthsBack);
+           start = sorted[startIndex];
+      }
+      setDateFilter({ start, end });
+  };
+
   const avgList = useMemo(() => {
     if (activeTab === 'sales' && selectedProduct.length > 0) return chartData.pie;
     return null;
   }, [activeTab, selectedProduct, chartData?.pie]);
 
-  // Handle Chart Click for Drill-down
   const handleChartClick = (data) => {
       if (data && data.activeLabel) {
-          // If clicking the same month again, clear filter
-          if (drillDownMonth === data.activeLabel) {
-              setDrillDownMonth(null);
-          } else {
-              setDrillDownMonth(data.activeLabel);
-          }
+          if (drillDownMonth === data.activeLabel) setDrillDownMonth(null);
+          else setDrillDownMonth(data.activeLabel);
       }
   };
 
@@ -790,6 +923,25 @@ const App = () => {
     <div className="flex min-h-screen bg-slate-50 font-sans text-slate-800" dir="rtl">
       <AIReportModal isOpen={aiModalOpen} onClose={() => setAiModalOpen(false)} isLoading={aiLoading} report={aiReport} />
       <ClearDataModal isOpen={clearModalOpen} onClose={() => setClearModalOpen(false)} onConfirm={handleClearData} type={activeTab} />
+      
+      {/* Chat Button and Window */}
+      <div className="fixed bottom-6 left-6 z-40">
+          {!chatOpen && (
+              <button 
+                onClick={() => setChatOpen(true)}
+                className="bg-indigo-600 hover:bg-indigo-700 text-white p-4 rounded-full shadow-xl transition-transform hover:scale-105 flex items-center gap-2"
+              >
+                  <MessageSquare className="w-6 h-6" />
+              </button>
+          )}
+          <AIChatWindow 
+            isOpen={chatOpen} 
+            onClose={() => setChatOpen(false)} 
+            onSend={handleChatSend} 
+            messages={chatMessages} 
+            isThinking={isChatThinking} 
+          />
+      </div>
 
       <div className="w-20 lg:w-64 bg-slate-900 text-white flex flex-col flex-shrink-0 transition-all duration-300">
         <div className="p-4 lg:p-6 flex items-center justify-center lg:justify-start gap-3 border-b border-slate-700">
@@ -834,19 +986,24 @@ const App = () => {
                 <h1 className="text-2xl font-bold text-slate-800">
                     {activeTab === 'sales' ? 'דשבורד מכירות' : activeTab === 'suppliers' ? 'דשבורד רכש וספקים' : 'סיכום רווח והפסד'}
                 </h1>
-                {activeTab !== 'summary' && (
-                    <div className="flex flex-wrap items-center gap-2 text-sm text-slate-500">
-                        {activeFileNames.length > 0 ? activeFileNames.map((n, i) => <span key={i} className="bg-slate-100 px-2 py-0.5 rounded text-xs border flex items-center gap-1"><FileSpreadsheet className="w-3 h-3 text-green-600"/>{n}</span>) : <span className="text-slate-400 italic">אין קבצים</span>}
-                    </div>
-                )}
             </div>
             <div className="flex items-center gap-4">
                 {availableDates.length > 0 && (
-                    <div className="hidden md:flex items-center bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 text-sm">
-                        <span className="text-slate-500 ml-2">תקופה:</span>
-                        <select value={dateFilter.start} onChange={(e) => setDateFilter(prev => ({ ...prev, start: e.target.value }))} className="bg-transparent font-bold cursor-pointer text-sm">{availableDates.map(d => <option key={`s${d}`} value={d}>{d}</option>)}</select>
-                        <span className="mx-2 text-slate-400">-</span>
-                        <select value={dateFilter.end} onChange={(e) => setDateFilter(prev => ({ ...prev, end: e.target.value }))} className="bg-transparent font-bold cursor-pointer text-sm">{availableDates.map(d => <option key={`e${d}`} value={d}>{d}</option>)}</select>
+                    <div className="flex items-center gap-2">
+                         <div className="hidden md:flex bg-white border border-slate-200 rounded-lg p-1 text-xs shadow-sm">
+                            <button onClick={() => setQuickDate(3)} className="px-3 py-1 hover:bg-slate-50 rounded transition-colors text-slate-600 font-medium">3 חודשים</button>
+                            <div className="w-px bg-slate-200 my-1"></div>
+                            <button onClick={() => setQuickDate('year')} className="px-3 py-1 hover:bg-slate-50 rounded transition-colors text-slate-600 font-medium">השנה</button>
+                            <div className="w-px bg-slate-200 my-1"></div>
+                            <button onClick={() => setQuickDate(null)} className="px-3 py-1 hover:bg-slate-50 rounded transition-colors text-slate-600 font-medium">הכל</button>
+                        </div>
+
+                        <div className="hidden md:flex items-center bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 text-sm">
+                            <span className="text-slate-500 ml-2"><Calendar className="w-4 h-4" /></span>
+                            <select value={dateFilter.start} onChange={(e) => setDateFilter(prev => ({ ...prev, start: e.target.value }))} className="bg-transparent font-bold cursor-pointer text-sm">{availableDates.map(d => <option key={`s${d}`} value={d}>{d}</option>)}</select>
+                            <span className="mx-2 text-slate-400">-</span>
+                            <select value={dateFilter.end} onChange={(e) => setDateFilter(prev => ({ ...prev, end: e.target.value }))} className="bg-transparent font-bold cursor-pointer text-sm">{availableDates.map(d => <option key={`e${d}`} value={d}>{d}</option>)}</select>
+                        </div>
                     </div>
                 )}
                 <button onClick={generateAIInsight} className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white rounded-lg shadow-md text-sm font-bold hover:-translate-y-0.5 transition-all">
@@ -901,7 +1058,14 @@ const App = () => {
             </div>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                <Card title={activeTab === 'sales' ? 'סה״כ הכנסות' : 'סה״כ הוצאות'} value={formatCurrency(stats.totalAmount)} subtext="בתקופה שנבחרה" icon={activeTab === 'sales' ? DollarSign : Wallet} color={activeTab === 'sales' ? 'bg-blue-500' : 'bg-red-500'} />
+                <Card 
+                    title={activeTab === 'sales' ? 'סה״כ הכנסות' : 'סה״כ הוצאות'} 
+                    value={formatCurrency(stats.totalAmount)} 
+                    subtext="בתקופה שנבחרה" 
+                    icon={activeTab === 'sales' ? DollarSign : Wallet} 
+                    color={activeTab === 'sales' ? 'bg-blue-500' : 'bg-red-500'} 
+                    trend={stats.trend}
+                />
                 <Card title="ממוצע חודשי" value={formatCurrency(stats.avgAmount)} subtext={`לפי ${stats.monthsCount} חודשים`} icon={Activity} color="bg-amber-500" />
                 <Card title={activeTab === 'sales' ? 'כמות יחידות' : 'כמות שורות רכש'} value={stats.totalQuantity.toLocaleString()} subtext="סה״כ בסינון" icon={Package} color="bg-emerald-500" />
                 <Card title="ממוצע כמות" value={avgList ? (
