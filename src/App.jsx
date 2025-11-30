@@ -3,7 +3,7 @@ import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, Arro
 import { ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, Area } from 'recharts';
 
 // --- הגדרות API של GEMINI ---
-const apiKey = "AIzaSyBliujKxcsP_R_nPl0dVRdffZHa3wCiodA"; // הדבק כאן את המפתח שלך
+const apiKey = "AIzaSyBSYZT8KQLVJT1Jh4NJTl18A6lt7TkTlIQ"; // הדבק כאן את המפתח שלך
 
 // --- עזרי תאריך וכלליים ---
 const HebrewMonthsMap = {
