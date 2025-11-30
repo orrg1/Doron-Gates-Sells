@@ -1,9 +1,8 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, ArrowUpDown, ArrowUp, ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot, Loader2, FileText, Check, Trash2, Truck, Wallet, LayoutDashboard, FileSpreadsheet, AlertTriangle, ChevronLeft, ChevronRight } from 'lucide-react';
-import { ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell } from 'recharts';
+import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, ArrowUpDown, ArrowUp, ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot, Loader2, FileText, Check, Trash2, Truck, Wallet, LayoutDashboard, FileSpreadsheet, AlertTriangle, ChevronLeft, ChevronRight, PieChart as PieChartIcon, BarChart3 } from 'lucide-react';
+import { ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, Area } from 'recharts';
 
 // --- הגדרות API של GEMINI ---
-// שים לב: עליך להדביק כאן את המפתח שלך כדי שה-AI יעבוד
 const apiKey = "AIzaSyBliujKxcsP_R_nPl0dVRdffZHa3wCiodA"; 
 
 // --- עזרי תאריך וכלליים ---
@@ -260,7 +259,7 @@ const ClearDataModal = ({ isOpen, onClose, onConfirm, type }) => {
                     </div>
                     <h3 className="text-xl font-bold text-slate-800 mb-2">מחיקת נתונים</h3>
                     <p className="text-slate-600 mb-6">
-                        האם אתה בטוח שברצונך למחוק את כל נתוני ה<strong>{type === 'sales' ? 'מכירות' : 'רכש וספקים'}</strong>?<br/>
+                        האם אתה בטוח שברצונך למחוק את כל נתוני ה<strong>{type === 'sales' ? 'מכירות' : (type === 'suppliers' ? 'רכש וספקים' : 'מערכת')}</strong>?<br/>
                         פעולה זו אינה הפיכה.
                     </p>
                     <div className="flex gap-3 w-full">
@@ -361,36 +360,20 @@ const parseCSV = (text) => {
 const COLORS = ['#3b82f6', '#10b981', '#f59e0b', '#ef4444', '#8b5cf6', '#ec4899', '#6366f1', '#84cc16', '#f43f5e', '#06b6d4'];
 
 const App = () => {
-  // נתונים
   const [salesData, setSalesData] = useState(() => {
-    try {
-        const saved = localStorage.getItem('dashboardSalesData');
-        return saved ? JSON.parse(saved) : [];
-    } catch (e) { return []; }
+    try { const saved = localStorage.getItem('dashboardSalesData'); return saved ? JSON.parse(saved) : []; } catch (e) { return []; }
   });
-  
   const [suppliersData, setSuppliersData] = useState(() => {
-    try {
-        const saved = localStorage.getItem('dashboardSuppliersData');
-        return saved ? JSON.parse(saved) : [];
-    } catch (e) { return []; }
+    try { const saved = localStorage.getItem('dashboardSuppliersData'); return saved ? JSON.parse(saved) : []; } catch (e) { return []; }
   });
-
-  // שמות קבצים
   const [salesFileNames, setSalesFileNames] = useState(() => {
-    try {
-        const saved = localStorage.getItem('salesFileNames');
-        return saved ? JSON.parse(saved) : [];
-    } catch (e) { return []; }
+    try { const saved = localStorage.getItem('salesFileNames'); return saved ? JSON.parse(saved) : []; } catch (e) { return []; }
   });
   const [suppliersFileNames, setSuppliersFileNames] = useState(() => {
-    try {
-        const saved = localStorage.getItem('suppliersFileNames');
-        return saved ? JSON.parse(saved) : [];
-    } catch (e) { return []; }
+    try { const saved = localStorage.getItem('suppliersFileNames'); return saved ? JSON.parse(saved) : []; } catch (e) { return []; }
   });
 
-  const [activeTab, setActiveTab] = useState('sales'); 
+  const [activeTab, setActiveTab] = useState('sales'); // 'sales', 'suppliers', 'summary'
   const [searchTerm, setSearchTerm] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: 'total', direction: 'desc' });
   const [loading, setLoading] = useState(false);
@@ -404,55 +387,43 @@ const App = () => {
   const [availableDates, setAvailableDates] = useState([]);
   const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
   
-  // Pagination
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 50;
   
-  // Filters
   const [selectedProduct, setSelectedProduct] = useState([]); 
   const [selectedSku, setSelectedSku] = useState(''); 
   const [selectedSupplier, setSelectedSupplier] = useState('');
-
   const [pieMetric, setPieMetric] = useState('total');
 
-  // שמירה בטוחה ל-LocalStorage
   const saveToStorage = (key, data) => {
-    try {
-        localStorage.setItem(key, JSON.stringify(data));
-        setStorageWarning(false);
-    } catch (e) {
-        console.error("Quota exceeded", e);
-        setStorageWarning(true);
-    }
+    try { localStorage.setItem(key, JSON.stringify(data)); setStorageWarning(false); } 
+    catch (e) { console.error("Quota exceeded", e); setStorageWarning(true); }
   };
 
-  useEffect(() => {
-    saveToStorage('dashboardSalesData', salesData);
-    saveToStorage('salesFileNames', salesFileNames);
-  }, [salesData, salesFileNames]);
-
-  useEffect(() => {
-    saveToStorage('dashboardSuppliersData', suppliersData);
-    saveToStorage('suppliersFileNames', suppliersFileNames);
-  }, [suppliersData, suppliersFileNames]);
+  useEffect(() => { saveToStorage('dashboardSalesData', salesData); saveToStorage('salesFileNames', salesFileNames); }, [salesData, salesFileNames]);
+  useEffect(() => { saveToStorage('dashboardSuppliersData', suppliersData); saveToStorage('suppliersFileNames', suppliersFileNames); }, [suppliersData, suppliersFileNames]);
 
   const activeData = useMemo(() => {
-    return activeTab === 'sales' ? salesData : suppliersData;
+    if (activeTab === 'sales') return salesData;
+    if (activeTab === 'suppliers') return suppliersData;
+    return []; // Summary tab handles data differently
   }, [activeTab, salesData, suppliersData]);
 
   const activeFileNames = useMemo(() => {
-    return activeTab === 'sales' ? salesFileNames : suppliersFileNames;
+    if (activeTab === 'sales') return salesFileNames;
+    if (activeTab === 'suppliers') return suppliersFileNames;
+    return [];
   }, [activeTab, salesFileNames, suppliersFileNames]);
 
   useEffect(() => {
-    const dates = [...new Set(activeData.map(d => d.date).filter(Boolean))];
+    const dates = [...new Set([...salesData, ...suppliersData].map(d => d.date).filter(Boolean))];
     const sortedDates = dates.sort((a, b) => getComparableDateValue(a) - getComparableDateValue(b));
     setAvailableDates(sortedDates);
     if (sortedDates.length > 0 && (!dateFilter.start || !dateFilter.end)) {
         setDateFilter({ start: sortedDates[0], end: sortedDates[sortedDates.length - 1] });
     }
-    setCurrentPage(1); // Reset pagination on data change
-  }, [activeData]);
+    setCurrentPage(1);
+  }, [salesData, suppliersData]);
 
   useEffect(() => {
     const script = document.createElement('script');
@@ -472,15 +443,11 @@ const App = () => {
                     const workbook = window.XLSX.read(e.target.result, { type: 'binary' });
                     const firstSheetName = workbook.SheetNames[0];
                     const jsonData = window.XLSX.utils.sheet_to_json(workbook.Sheets[firstSheetName], { defval: "" });
-                    
                     const keys = Object.keys(jsonData[0] || {});
                     let type = 'sales';
                     if (keys.some(k => k.includes('ספק') || k.includes('Supplier') || k.includes('הוצאה'))) type = 'suppliers';
-                    
                     resolve({ data: jsonData, type, fileName: file.name, isExcel: true });
-                } catch (error) {
-                    resolve({ data: [], type: 'unknown', fileName: file.name, error: true });
-                }
+                } catch (error) { resolve({ data: [], type: 'unknown', fileName: file.name, error: true }); }
             };
             reader.readAsBinaryString(file);
         } else {
@@ -498,20 +465,14 @@ const App = () => {
     const files = Array.from(event.target.files);
     if (files.length === 0) return;
     setLoading(true);
-
-    const newSalesData = [];
-    const newSuppliersData = [];
-    const newSalesFiles = [];
-    const newSuppliersFiles = [];
+    const newSales = [], newSuppliers = [], newSalesF = [], newSuppliersF = [];
 
     const results = await Promise.all(files.map(file => readFile(file)));
 
     results.forEach(({ data, type, fileName, error }) => {
         if (error || data.length === 0) return;
-
         const processed = data.map((row, index) => {
             const uniqueId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${index}-${fileName}`;
-            
             let date = '';
             if (row['שנה'] && row['חודש']) {
                 const y = row['שנה'].toString().slice(-2);
@@ -520,54 +481,45 @@ const App = () => {
             } else {
                 date = normalizeDate(row['תאריך'] || row['חודש']);
             }
-      
             const rawTotal = row['סה"כ סכום'] || row['סה""כ סכום'] || row['הכנסה בשקלים'] || row['הוצאה משוערכת'] || row['הוצאה כולל מע\'מ'] || row['סה"כ'] || '0';
             const total = parseFloat(rawTotal.toString().replace(/[^\d.-]/g, ''));
             const quantity = parseFloat((row['כמות'] || '0').toString().replace(/[^\d.-]/g, ''));
-      
             const sku = row['מקט מוצר'] || row['מק\'ט'] || row['מקט'] || row['מס\' ספק'] || '';
             const description = row['תיאור מוצר'] || row['תאור מוצר'] || row['שם ספק'] || row['שם הספק'] || ''; 
             const supplier = row['ספק'] || row['שם ספק'] || row['שם הספק'] || 'כללי';
-      
             return { id: uniqueId, date, sku, description, quantity: isNaN(quantity) ? 0 : quantity, total: isNaN(total) ? 0 : total, unit: row['יחידה'] || row['יח\''], supplier };
         }).filter(item => item.description || item.total !== 0);
 
-        if (type === 'suppliers') {
-            newSuppliersData.push(...processed);
-            newSuppliersFiles.push(fileName);
-        } else {
-            newSalesData.push(...processed);
-            newSalesFiles.push(fileName);
-        }
+        if (type === 'suppliers') { newSuppliers.push(...processed); newSuppliersF.push(fileName); } 
+        else { newSales.push(...processed); newSalesF.push(fileName); }
     });
 
-    if (newSalesData.length > 0) {
-        setSalesData(prev => [...prev, ...newSalesData]);
-        setSalesFileNames(prev => [...new Set([...prev, ...newSalesFiles])]);
-        if (activeTab !== 'sales' && newSuppliersData.length === 0) setActiveTab('sales');
+    if (newSales.length > 0) {
+        setSalesData(prev => [...prev, ...newSales]);
+        setSalesFileNames(prev => [...new Set([...prev, ...newSalesF])]);
+        if (activeTab !== 'sales' && newSuppliers.length === 0) setActiveTab('sales');
     }
-
-    if (newSuppliersData.length > 0) {
-        setSuppliersData(prev => [...prev, ...newSuppliersData]);
-        setSuppliersFileNames(prev => [...new Set([...prev, ...newSuppliersFiles])]);
-        if (activeTab !== 'suppliers' && newSalesData.length === 0) setActiveTab('suppliers');
+    if (newSuppliers.length > 0) {
+        setSuppliersData(prev => [...prev, ...newSuppliers]);
+        setSuppliersFileNames(prev => [...new Set([...prev, ...newSuppliersF])]);
+        if (activeTab !== 'suppliers' && newSales.length === 0) setActiveTab('suppliers');
     }
-
     setLoading(false);
     event.target.value = '';
   };
 
   const handleClearData = () => {
-    if (activeTab === 'sales') {
-        setSalesData([]);
-        setSalesFileNames([]);
-        localStorage.removeItem('dashboardSalesData');
-        localStorage.removeItem('salesFileNames');
+    if (activeTab === 'summary') {
+        setSalesData([]); setSalesFileNames([]);
+        setSuppliersData([]); setSuppliersFileNames([]);
+        localStorage.removeItem('dashboardSalesData'); localStorage.removeItem('salesFileNames');
+        localStorage.removeItem('dashboardSuppliersData'); localStorage.removeItem('suppliersFileNames');
+    } else if (activeTab === 'sales') {
+        setSalesData([]); setSalesFileNames([]);
+        localStorage.removeItem('dashboardSalesData'); localStorage.removeItem('salesFileNames');
     } else {
-        setSuppliersData([]);
-        setSuppliersFileNames([]);
-        localStorage.removeItem('dashboardSuppliersData');
-        localStorage.removeItem('suppliersFileNames');
+        setSuppliersData([]); setSuppliersFileNames([]);
+        localStorage.removeItem('dashboardSuppliersData'); localStorage.removeItem('suppliersFileNames');
     }
     setAvailableDates([]);
     setDateFilter({ start: '', end: '' });
@@ -583,6 +535,8 @@ const App = () => {
   }, [salesData, suppliersData]);
 
   const filteredData = useMemo(() => {
+    if (activeTab === 'summary') return []; // Summary handles logic differently
+    
     let data = activeData;
     const startVal = dateFilter.start ? getComparableDateValue(dateFilter.start) : 0;
     const endVal = dateFilter.end ? getComparableDateValue(dateFilter.end) : 999999;
@@ -618,7 +572,55 @@ const App = () => {
     });
   }, [activeData, searchTerm, sortConfig, dateFilter, selectedProduct, selectedSku, selectedSupplier, activeTab]);
 
-  // Pagination Logic
+  const summaryData = useMemo(() => {
+      if (activeTab !== 'summary') return null;
+      
+      const startVal = dateFilter.start ? getComparableDateValue(dateFilter.start) : 0;
+      const endVal = dateFilter.end ? getComparableDateValue(dateFilter.end) : 999999;
+      
+      const filterDate = (d) => {
+          const val = getComparableDateValue(d.date);
+          return val >= startVal && val <= endVal;
+      }
+
+      const filteredSales = salesData.filter(filterDate);
+      const filteredSuppliers = suppliersData.filter(filterDate);
+
+      const monthlySummary = {};
+      
+      // Income
+      filteredSales.forEach(item => {
+          if (!monthlySummary[item.date]) monthlySummary[item.date] = { income: 0, expenses: 0, profit: 0 };
+          monthlySummary[item.date].income += item.total;
+      });
+      
+      // Expenses
+      filteredSuppliers.forEach(item => {
+          if (!monthlySummary[item.date]) monthlySummary[item.date] = { income: 0, expenses: 0, profit: 0 };
+          monthlySummary[item.date].expenses += item.total;
+      });
+
+      // Calculate Profit
+      const chart = Object.keys(monthlySummary).map(date => {
+          const { income, expenses } = monthlySummary[date];
+          return {
+              name: date,
+              income,
+              expenses,
+              profit: income - expenses,
+              order: getComparableDateValue(date)
+          };
+      }).sort((a, b) => a.order - b.order);
+
+      const totalIncome = filteredSales.reduce((acc, curr) => acc + curr.total, 0);
+      const totalExpenses = filteredSuppliers.reduce((acc, curr) => acc + curr.total, 0);
+      const totalProfit = totalIncome - totalExpenses;
+      const profitMargin = totalIncome > 0 ? (totalProfit / totalIncome) * 100 : 0;
+
+      return { chart, totalIncome, totalExpenses, totalProfit, profitMargin };
+
+  }, [activeTab, salesData, suppliersData, dateFilter]);
+
   const paginatedData = useMemo(() => {
     const startIndex = (currentPage - 1) * itemsPerPage;
     return filteredData.slice(startIndex, startIndex + itemsPerPage);
@@ -626,12 +628,10 @@ const App = () => {
 
   const totalPages = Math.ceil(filteredData.length / itemsPerPage);
 
-  useEffect(() => {
-      setCurrentPage(1);
-  }, [activeTab, searchTerm, dateFilter, selectedProduct, selectedSku, selectedSupplier]);
-
+  useEffect(() => setCurrentPage(1), [activeTab, searchTerm, dateFilter, selectedProduct, selectedSku, selectedSupplier]);
 
   const stats = useMemo(() => {
+    if (activeTab === 'summary') return null;
     const totalAmount = filteredData.reduce((acc, curr) => acc + curr.total, 0);
     const totalQuantity = filteredData.reduce((acc, curr) => acc + curr.quantity, 0);
     const uniqueCount = new Set(filteredData.map(item => activeTab === 'sales' ? item.sku : item.supplier)).size;
@@ -646,10 +646,10 @@ const App = () => {
   }, [filteredData, dateFilter, availableDates, activeTab]);
 
   const chartData = useMemo(() => {
+    if (activeTab === 'summary') return null;
     const monthsMap = {};
     filteredData.forEach(item => {
         if (!item.date) return;
-        // שימוש בתאריך המלא כמפתח (כולל שנה)
         const monthKey = item.date; 
         if (!monthsMap[monthKey]) monthsMap[monthKey] = { total: 0, quantity: 0 };
         monthsMap[monthKey].total += item.total;
@@ -663,12 +663,7 @@ const App = () => {
             monthsMap[monthKey][qKey] += item.quantity;
         }
     });
-    
-    // מיון כרונולוגי לפי הערך ההשוואתי
-    const monthly = Object.keys(monthsMap).map(key => ({ 
-        name: key, 
-        ...monthsMap[key] 
-    })).sort((a, b) => getComparableDateValue(a.name) - getComparableDateValue(b.name));
+    const monthly = Object.keys(monthsMap).map(key => ({ name: key, ...monthsMap[key], order: getComparableDateValue(key) })).sort((a, b) => a.order - b.order);
 
     const entityMap = {};
     const keyField = activeTab === 'sales' ? 'description' : 'supplier';
@@ -680,7 +675,6 @@ const App = () => {
     });
     
     const valueKey = (activeTab === 'suppliers' || pieMetric === 'total') ? 'total' : 'quantity';
-    
     let pie = Object.keys(entityMap).map(key => ({
         name: key, total: entityMap[key].total, quantity: entityMap[key].quantity,
         value: entityMap[key][valueKey]
@@ -694,19 +688,30 @@ const App = () => {
 
   const generateAIInsight = async () => {
     setAiModalOpen(true); setAiLoading(true); setAiReport('');
-    const context = activeTab === 'sales' ? 'מכירות' : 'רכש וספקים';
-    const filterTxt = activeTab === 'sales' 
-        ? (selectedProduct.length > 0 ? `מוצרים נבחרים: ${selectedProduct.join(', ')}` : 'כל המוצרים')
-        : (selectedSupplier ? `ספק נבחר: ${selectedSupplier}` : 'כל הספקים');
-
-    const prompt = `
-    נתח את נתוני ה-${context} הבאים והפק דוח מנהלים בעברית.
-    הקשר: ${filterTxt}
-    סה"כ ${context === 'sales' ? 'הכנסות' : 'הוצאות'}: ${formatCurrency(stats.totalAmount)}
-    ${activeTab === 'sales' ? `כמות פריטים: ${stats.totalQuantity}` : ''}
-    נתונים חודשיים: ${chartData.monthly.map(m => `${m.name}: ${formatCurrency(m.total)}`).join(', ')}
-    מובילים: ${chartData.pie.map(p => `${p.name}: ${formatCurrency(p.total)}`).join(', ')}
-    `;
+    let prompt = '';
+    
+    if (activeTab === 'summary') {
+        prompt = `
+        נתח את הדו"ח הפיננסי הבא (רווח והפסד):
+        סה"כ הכנסות: ${formatCurrency(summaryData.totalIncome)}
+        סה"כ הוצאות: ${formatCurrency(summaryData.totalExpenses)}
+        רווח נקי: ${formatCurrency(summaryData.totalProfit)} (${summaryData.profitMargin.toFixed(1)}%)
+        נתונים חודשיים: ${summaryData.chart.map(m => `${m.name}: רווח ${formatCurrency(m.profit)}`).join(', ')}
+        
+        תן 3 תובנות עסקיות קצרות בעברית על המגמות והרווחיות.
+        `;
+    } else {
+        const context = activeTab === 'sales' ? 'מכירות' : 'רכש וספקים';
+        const filterTxt = activeTab === 'sales' ? (selectedProduct.length > 0 ? `מוצרים: ${selectedProduct.join(', ')}` : 'כל המוצרים') : (selectedSupplier ? `ספק: ${selectedSupplier}` : 'כל הספקים');
+        prompt = `
+        נתח נתוני ${context}:
+        הקשר: ${filterTxt}
+        סה"כ: ${formatCurrency(stats.totalAmount)}
+        מגמות: ${chartData.monthly.map(m => `${m.name}: ${formatCurrency(m.total)}`).join(', ')}
+        מובילים: ${chartData.pie.map(p => `${p.name}: ${formatCurrency(p.total)}`).join(', ')}
+        תן תובנות קצרות בעברית.
+        `;
+    }
 
     try {
       const res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-09-2025:generateContent?key=${apiKey}`, {
@@ -714,7 +719,7 @@ const App = () => {
         body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
       });
       const data = await res.json();
-      setAiReport(data.candidates?.[0]?.content?.parts?.[0]?.text || "שגיאה בתשובה.");
+      setAiReport(data.candidates?.[0]?.content?.parts?.[0]?.text || "שגיאה.");
     } catch (e) { setAiReport("שגיאת תקשורת."); } finally { setAiLoading(false); }
   };
 
@@ -728,24 +733,19 @@ const App = () => {
      if (availableDates.length > 0) {
         setDateFilter({ start: availableDates[0], end: availableDates[availableDates.length - 1] });
      }
-     setSearchTerm('');
-     setSelectedProduct([]);
-     setSelectedSku('');
-     setSelectedSupplier('');
+     setSearchTerm(''); setSelectedProduct([]); setSelectedSku(''); setSelectedSupplier('');
   };
 
   const avgList = useMemo(() => {
     if (activeTab === 'sales' && selectedProduct.length > 0) return chartData.pie;
     return null;
-  }, [activeTab, selectedProduct, chartData.pie]);
+  }, [activeTab, selectedProduct, chartData?.pie]);
 
   return (
     <div className="flex min-h-screen bg-slate-50 font-sans text-slate-800" dir="rtl">
-      
       <AIReportModal isOpen={aiModalOpen} onClose={() => setAiModalOpen(false)} isLoading={aiLoading} report={aiReport} />
       <ClearDataModal isOpen={clearModalOpen} onClose={() => setClearModalOpen(false)} onConfirm={handleClearData} type={activeTab} />
 
-      {/* Sidebar Navigation */}
       <div className="w-20 lg:w-64 bg-slate-900 text-white flex flex-col flex-shrink-0 transition-all duration-300">
         <div className="p-4 lg:p-6 flex items-center justify-center lg:justify-start gap-3 border-b border-slate-700">
             <div className="bg-blue-600 p-2 rounded-lg"><LayoutDashboard className="w-6 h-6" /></div>
@@ -760,6 +760,10 @@ const App = () => {
                 <Truck className="w-5 h-5" />
                 <span className="hidden lg:block font-medium">רכש וספקים</span>
             </button>
+             <button onClick={() => { setActiveTab('summary'); resetAllFilters(); }} className={`w-full flex items-center gap-3 p-3 rounded-xl transition-colors ${activeTab === 'summary' ? 'bg-violet-600 text-white shadow-lg' : 'text-slate-400 hover:bg-slate-800 hover:text-white'}`}>
+                <BarChart3 className="w-5 h-5" />
+                <span className="hidden lg:block font-medium">סיכום פיננסי</span>
+            </button>
         </nav>
         <div className="p-4 border-t border-slate-700">
             <div className="flex flex-col gap-4">
@@ -768,66 +772,74 @@ const App = () => {
                     <span className="hidden lg:block text-sm">טען קבצים</span>
                     <input type="file" accept=".csv, .xlsx, .xls" multiple onChange={handleFileUpload} className="hidden" disabled={loading} />
                 </label>
-                {activeData.length > 0 && (
+                {(salesData.length > 0 || suppliersData.length > 0) && (
                     <button onClick={() => setClearModalOpen(true)} className="flex items-center justify-center lg:justify-start gap-3 p-3 rounded-xl hover:bg-red-900/30 text-red-400 hover:text-red-300 transition-colors">
                         <Trash2 className="w-5 h-5" />
                         <span className="hidden lg:block text-sm">נקה הכל</span>
                     </button>
                 )}
-                {storageWarning && <p className="text-xs text-red-400 text-center">שים לב: שטח הזיכרון מלא. חלק מהנתונים לא יישמרו.</p>}
+                {storageWarning && <p className="text-xs text-red-400 text-center">שים לב: שטח הזיכרון מלא</p>}
             </div>
         </div>
       </div>
 
-      {/* Main Content */}
       <div className="flex-1 flex flex-col h-screen overflow-hidden">
         <header className="bg-white border-b border-slate-200 px-8 py-5 flex justify-between items-center shadow-sm z-10">
             <div className="flex flex-col gap-1">
-                <div className="flex items-center gap-3">
-                    <h1 className="text-2xl font-bold text-slate-800">{activeTab === 'sales' ? 'דשבורד מכירות' : 'דשבורד רכש וספקים'}</h1>
-                </div>
-                <div className="flex flex-wrap items-center gap-2 text-sm text-slate-500">
-                    <span>קבצים נטענים:</span>
-                    {activeFileNames.length > 0 ? (
-                        activeFileNames.map((name, idx) => (
-                            <span key={idx} className="flex items-center gap-1 bg-slate-100 text-slate-700 px-2 py-0.5 rounded text-xs border border-slate-200">
-                                <FileSpreadsheet className="w-3 h-3 text-green-600" />
-                                <span className="max-w-[150px] truncate" title={name}>{name}</span>
-                            </span>
-                        ))
-                    ) : (
-                        <span className="text-slate-400 italic">אין קבצים</span>
-                    )}
-                </div>
+                <h1 className="text-2xl font-bold text-slate-800">
+                    {activeTab === 'sales' ? 'דשבורד מכירות' : activeTab === 'suppliers' ? 'דשבורד רכש וספקים' : 'סיכום רווח והפסד'}
+                </h1>
+                {activeTab !== 'summary' && (
+                    <div className="flex flex-wrap items-center gap-2 text-sm text-slate-500">
+                        {activeFileNames.length > 0 ? activeFileNames.map((n, i) => <span key={i} className="bg-slate-100 px-2 py-0.5 rounded text-xs border flex items-center gap-1"><FileSpreadsheet className="w-3 h-3 text-green-600"/>{n}</span>) : <span className="text-slate-400 italic">אין קבצים</span>}
+                    </div>
+                )}
             </div>
             <div className="flex items-center gap-4">
                 {availableDates.length > 0 && (
                     <div className="hidden md:flex items-center bg-slate-50 px-3 py-1.5 rounded-lg border border-slate-200 text-sm">
                         <span className="text-slate-500 ml-2">תקופה:</span>
-                        <select value={dateFilter.start} onChange={(e) => setDateFilter(prev => ({ ...prev, start: e.target.value }))} className="bg-transparent border-none text-slate-700 font-bold cursor-pointer focus:ring-0 text-sm">
-                            {availableDates.map(d => <option key={`start-${d}`} value={d}>{d}</option>)}
-                        </select>
+                        <select value={dateFilter.start} onChange={(e) => setDateFilter(prev => ({ ...prev, start: e.target.value }))} className="bg-transparent font-bold cursor-pointer text-sm">{availableDates.map(d => <option key={`s${d}`} value={d}>{d}</option>)}</select>
                         <span className="mx-2 text-slate-400">-</span>
-                        <select value={dateFilter.end} onChange={(e) => setDateFilter(prev => ({ ...prev, end: e.target.value }))} className="bg-transparent border-none text-slate-700 font-bold cursor-pointer focus:ring-0 text-sm">
-                            {availableDates.map(d => <option key={`end-${d}`} value={d}>{d}</option>)}
-                        </select>
+                        <select value={dateFilter.end} onChange={(e) => setDateFilter(prev => ({ ...prev, end: e.target.value }))} className="bg-transparent font-bold cursor-pointer text-sm">{availableDates.map(d => <option key={`e${d}`} value={d}>{d}</option>)}</select>
                     </div>
                 )}
-                <button onClick={generateAIInsight} className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white rounded-lg shadow-md hover:shadow-lg transition-all transform hover:-translate-y-0.5 text-sm font-bold">
-                    <Sparkles className="w-4 h-4 text-yellow-300" />
-                    <span>תובנות AI</span>
+                <button onClick={generateAIInsight} className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 text-white rounded-lg shadow-md text-sm font-bold hover:-translate-y-0.5 transition-all">
+                    <Sparkles className="w-4 h-4 text-yellow-300" /> <span>תובנות AI</span>
                 </button>
             </div>
         </header>
 
         <main className="flex-1 overflow-y-auto p-8 space-y-6">
-            
-            {/* Filters Bar */}
+            {activeTab === 'summary' ? (
+                 summaryData ? (
+                    <div className="space-y-6">
+                        <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
+                            <Card title="סה״כ הכנסות" value={formatCurrency(summaryData.totalIncome)} subtext="מסה״כ המכירות" icon={DollarSign} color="bg-blue-500" />
+                            <Card title="סה״כ הוצאות" value={formatCurrency(summaryData.totalExpenses)} subtext="מסה״כ הספקים" icon={Wallet} color="bg-red-500" />
+                            <Card title="רווח נקי" value={formatCurrency(summaryData.totalProfit)} subtext={`${summaryData.profitMargin.toFixed(1)}% אחוז רווח`} icon={Activity} color={summaryData.totalProfit >= 0 ? "bg-emerald-500" : "bg-red-600"} />
+                        </div>
+                        <div className="bg-white p-6 rounded-xl border border-slate-100 shadow-sm h-[450px]">
+                            <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><BarChart3 className="w-5 h-5 text-violet-500" />הכנסות מול הוצאות ורווח</h3>
+                            <ResponsiveContainer width="100%" height="100%">
+                                <ComposedChart data={summaryData.chart}>
+                                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                                    <XAxis dataKey="name" />
+                                    <YAxis />
+                                    <RechartsTooltip formatter={(val) => formatCurrency(val)} />
+                                    <Legend />
+                                    <Bar dataKey="income" name="הכנסות" fill="#3b82f6" barSize={20} />
+                                    <Bar dataKey="expenses" name="הוצאות" fill="#ef4444" barSize={20} />
+                                    <Line type="monotone" dataKey="profit" name="רווח נקי" stroke="#10b981" strokeWidth={3} dot={{r:4}} />
+                                </ComposedChart>
+                            </ResponsiveContainer>
+                        </div>
+                    </div>
+                 ) : <div className="text-center py-20 text-slate-400">אין נתונים להצגת סיכום. נא לטעון קבצי מכירות וספקים.</div>
+            ) : (
+            <>
             <div className="bg-white p-4 rounded-xl shadow-sm border border-slate-100 flex flex-col lg:flex-row gap-4 items-center">
-                <div className="flex items-center gap-2 text-slate-500 font-medium text-sm whitespace-nowrap min-w-fit">
-                    <Filter className="w-4 h-4" /> סינון:
-                </div>
-                
+                <div className="flex items-center gap-2 text-slate-500 font-medium text-sm whitespace-nowrap min-w-fit"><Filter className="w-4 h-4" /> סינון:</div>
                 {activeTab === 'sales' ? (
                     <div className="flex-1 grid grid-cols-1 md:grid-cols-2 gap-4 w-full">
                         <Autocomplete options={uniqueItems.products} value={selectedProduct} onChange={(val) => { setSelectedProduct(val); setSelectedSku(''); }} placeholder="בחר מוצרים..." icon={Box} multiple={true} maxSelections={5} />
@@ -838,75 +850,36 @@ const App = () => {
                         <Autocomplete options={uniqueItems.suppliers} value={selectedSupplier} onChange={setSelectedSupplier} placeholder="בחר ספק..." icon={Truck} />
                     </div>
                 )}
-
                 {(selectedProduct.length > 0 || selectedSku || selectedSupplier || searchTerm) && (
-                    <button onClick={resetAllFilters} className="px-4 py-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg text-sm font-medium transition-colors whitespace-nowrap">
-                        נקה סינון
-                    </button>
+                    <button onClick={resetAllFilters} className="px-4 py-2 text-red-600 bg-red-50 hover:bg-red-100 rounded-lg text-sm font-medium">נקה סינון</button>
                 )}
             </div>
 
-            {/* KPIs */}
             <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-6">
-                <Card 
-                    title={activeTab === 'sales' ? 'סה״כ הכנסות' : 'סה״כ הוצאות'} 
-                    value={formatCurrency(stats.totalAmount)} 
-                    subtext="בתקופה שנבחרה" 
-                    icon={activeTab === 'sales' ? DollarSign : Wallet} 
-                    color={activeTab === 'sales' ? 'bg-blue-500' : 'bg-red-500'} 
-                />
-                <Card 
-                    title="ממוצע חודשי" 
-                    value={formatCurrency(stats.avgAmount)} 
-                    subtext={`לפי ${stats.monthsCount} חודשים`} 
-                    icon={Activity} 
-                    color="bg-amber-500" 
-                />
-                <Card 
-                    title={activeTab === 'sales' ? 'כמות יחידות' : 'כמות שורות רכש'}
-                    value={stats.totalQuantity.toLocaleString()} 
-                    subtext="סה״כ בסינון הנוכחי" 
-                    icon={Package} 
-                    color="bg-emerald-500" 
-                />
-                <Card 
-                    title="ממוצע כמות" 
-                    value={avgList ? (
+                <Card title={activeTab === 'sales' ? 'סה״כ הכנסות' : 'סה״כ הוצאות'} value={formatCurrency(stats.totalAmount)} subtext="בתקופה שנבחרה" icon={activeTab === 'sales' ? DollarSign : Wallet} color={activeTab === 'sales' ? 'bg-blue-500' : 'bg-red-500'} />
+                <Card title="ממוצע חודשי" value={formatCurrency(stats.avgAmount)} subtext={`לפי ${stats.monthsCount} חודשים`} icon={Activity} color="bg-amber-500" />
+                <Card title={activeTab === 'sales' ? 'כמות יחידות' : 'כמות שורות רכש'} value={stats.totalQuantity.toLocaleString()} subtext="סה״כ בסינון" icon={Package} color="bg-emerald-500" />
+                <Card title="ממוצע כמות" value={avgList ? (
                         <div className="flex flex-col gap-1 mt-1 max-h-[80px] overflow-y-auto custom-scrollbar pr-1">
                             {avgList.map(item => (
-                                <div key={item.name} className="flex justify-between text-xs border-b border-slate-50 pb-1">
-                                    <span className="truncate w-20" title={item.name}>{item.name}</span>
-                                    <span className="font-bold">{Math.round(item.quantity / stats.monthsCount)}</span>
-                                </div>
+                                <div key={item.name} className="flex justify-between text-xs border-b border-slate-50 pb-1"><span className="truncate w-20" title={item.name}>{item.name}</span><span className="font-bold">{Math.round(item.quantity / stats.monthsCount)}</span></div>
                             ))}
                         </div>
-                    ) : Math.round(stats.avgQuantity).toLocaleString()} 
-                    subtext={avgList ? 'פירוט לפי פריט' : 'ממוצע חודשי כללי'} 
-                    icon={Layers} 
-                    color="bg-cyan-500" 
-                />
+                    ) : Math.round(stats.avgQuantity).toLocaleString()} subtext={avgList ? 'פירוט לפי פריט' : 'ממוצע חודשי כללי'} icon={Layers} color="bg-cyan-500" />
             </div>
 
-            {/* Charts */}
             <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
                 <div className="bg-white p-6 rounded-xl border border-slate-100 shadow-sm min-h-[450px]">
-                    <h3 className="text-lg font-bold mb-6 flex items-center gap-2">
-                        <Calendar className="w-5 h-5 text-blue-500" />
-                        {activeTab === 'sales' ? 'מכירות לפי חודש' : 'הוצאות לפי חודש'}
-                    </h3>
+                    <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><Calendar className="w-5 h-5 text-blue-500" />{activeTab === 'sales' ? 'מכירות לפי חודש' : 'הוצאות לפי חודש'}</h3>
                     <div className="h-96">
                         <ResponsiveContainer width="100%" height="100%">
                             <ComposedChart data={chartData.monthly}>
                                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                                 <XAxis dataKey="name" stroke="#64748b" />
                                 <YAxis yAxisId="left" stroke="#3b82f6" tickFormatter={(val) => `₪${val/1000}k`} />
-                                {/* Show right axis (quantity) ONLY on sales tab */}
                                 {activeTab === 'sales' && <YAxis yAxisId="right" orientation="right" stroke="#10b981" />}
-                                
                                 <RechartsTooltip formatter={(val, name) => name.includes('כמות') ? val : formatCurrency(val)} contentStyle={{ borderRadius: '8px', border: 'none', boxShadow: '0 4px 12px rgba(0,0,0,0.1)' }} />
                                 <Legend />
-                                
-                                {/* Sales View - Stacked Bars + Quantity Lines */}
                                 {activeTab === 'sales' && selectedProduct.length > 0 ? (
                                     selectedProduct.map((p, i) => (
                                         <React.Fragment key={p}>
@@ -920,7 +893,6 @@ const App = () => {
                                         <Line yAxisId="right" type="monotone" dataKey="quantity" name="כמות" stroke="#10b981" strokeWidth={3} />
                                     </>
                                 ) : (
-                                    // Suppliers View - NO QUANTITY LINES
                                     <Bar yAxisId="left" dataKey="total" name="סכום" fill="#ef4444" radius={[4, 4, 0, 0]} />
                                 )}
                             </ComposedChart>
@@ -930,11 +902,7 @@ const App = () => {
 
                 <div className="bg-white p-6 rounded-xl border border-slate-100 shadow-sm flex flex-col min-h-[450px]">
                     <div className="flex justify-between items-start mb-6">
-                        <h3 className="text-lg font-bold flex items-center gap-2">
-                            <TrendingUp className="w-5 h-5 text-emerald-500" />
-                            {activeTab === 'sales' ? (selectedProduct.length > 0 ? 'התפלגות נבחרים' : 'מוצרים מובילים') : 'ספקים מובילים'}
-                        </h3>
-                        {/* Hide toggle on suppliers tab */}
+                        <h3 className="text-lg font-bold flex items-center gap-2"><TrendingUp className="w-5 h-5 text-emerald-500" />{activeTab === 'sales' ? (selectedProduct.length > 0 ? 'התפלגות נבחרים' : 'מוצרים מובילים') : 'ספקים מובילים'}</h3>
                         {activeTab === 'sales' && (
                             <div className="flex bg-slate-100 rounded-lg p-1">
                                 <button onClick={() => setPieMetric('total')} className={`px-3 py-1 text-xs font-medium rounded-md transition-colors ${pieMetric === 'total' ? 'bg-white shadow text-blue-700' : 'text-slate-500'}`}>סכום</button>
@@ -958,7 +926,6 @@ const App = () => {
                 </div>
             </div>
 
-            {/* Table - with Pagination */}
             <div className="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
                 <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row justify-between items-center gap-4">
                     <h3 className="text-lg font-bold flex items-center gap-2"><FileText className="w-5 h-5 text-slate-400" /> פירוט עסקאות</h3>
@@ -973,9 +940,7 @@ const App = () => {
                             <tr>
                                 <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('date')}>תאריך</th>
                                 {activeTab === 'sales' && <th className="px-6 py-3">מק״ט</th>}
-                                <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort(activeTab === 'sales' ? 'description' : 'supplier')}>
-                                    {activeTab === 'sales' ? 'מוצר' : 'ספק'}
-                                </th>
+                                <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort(activeTab === 'sales' ? 'description' : 'supplier')}>{activeTab === 'sales' ? 'מוצר' : 'ספק'}</th>
                                 <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('quantity')}>כמות</th>
                                 <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('total')}>סכום</th>
                             </tr>
@@ -993,30 +958,17 @@ const App = () => {
                         </tbody>
                     </table>
                 </div>
-                
-                {/* Pagination Controls */}
                 <div className="bg-slate-50 px-6 py-4 border-t border-slate-100 text-xs text-slate-500 flex justify-between items-center">
                     <span>מציג {filteredData.length > 0 ? (currentPage - 1) * itemsPerPage + 1 : 0} - {Math.min(currentPage * itemsPerPage, filteredData.length)} מתוך {filteredData.length} רשומות</span>
-                    
                     <div className="flex items-center gap-2">
-                        <button 
-                            onClick={() => setCurrentPage(p => Math.max(1, p - 1))}
-                            disabled={currentPage === 1}
-                            className={`p-1 rounded hover:bg-slate-200 transition-colors ${currentPage === 1 ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        >
-                            <ChevronRight className="w-4 h-4" />
-                        </button>
+                        <button onClick={() => setCurrentPage(p => Math.max(1, p - 1))} disabled={currentPage === 1} className={`p-1 rounded hover:bg-slate-200 transition-colors ${currentPage === 1 ? 'opacity-50 cursor-not-allowed' : ''}`}><ChevronRight className="w-4 h-4" /></button>
                         <span>עמוד {currentPage} מתוך {totalPages || 1}</span>
-                        <button 
-                            onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))}
-                            disabled={currentPage === totalPages || totalPages === 0}
-                            className={`p-1 rounded hover:bg-slate-200 transition-colors ${currentPage === totalPages || totalPages === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}
-                        >
-                            <ChevronLeft className="w-4 h-4" />
-                        </button>
+                        <button onClick={() => setCurrentPage(p => Math.min(totalPages, p + 1))} disabled={currentPage === totalPages || totalPages === 0} className={`p-1 rounded hover:bg-slate-200 transition-colors ${currentPage === totalPages || totalPages === 0 ? 'opacity-50 cursor-not-allowed' : ''}`}><ChevronLeft className="w-4 h-4" /></button>
                     </div>
                 </div>
             </div>
+            </>
+            )}
         </main>
       </div>
     </div>
