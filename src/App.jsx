@@ -1,9 +1,9 @@
 import React, { useState, useMemo, useEffect, useRef } from 'react';
-import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, ArrowUpDown, ArrowUp, ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot, Loader2, FileText, Check, Trash2, Truck, Wallet, LayoutDashboard, FileSpreadsheet, AlertTriangle, ChevronLeft, ChevronRight, PieChart as PieChartIcon, BarChart3 } from 'lucide-react';
+import { Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter, ArrowUpDown, ArrowUp, ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot, Loader2, FileText, Check, Trash2, Truck, Wallet, LayoutDashboard, FileSpreadsheet, AlertTriangle, ChevronLeft, ChevronRight, PieChart as PieChartIcon, BarChart3, Download, MousePointerClick } from 'lucide-react';
 import { ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid, Tooltip as RechartsTooltip, Legend, ResponsiveContainer, PieChart, Pie, Cell, Area } from 'recharts';
 
 // --- הגדרות API של GEMINI ---
-const apiKey = "AIzaSyBliujKxcsP_R_nPl0dVRdffZHa3wCiodA"; 
+const apiKey = "AIzaSyBliujKxcsP_R_nPl0dVRdffZHa3wCiodA"; // הדבק כאן את המפתח שלך
 
 // --- עזרי תאריך וכלליים ---
 const HebrewMonthsMap = {
@@ -373,7 +373,7 @@ const App = () => {
     try { const saved = localStorage.getItem('suppliersFileNames'); return saved ? JSON.parse(saved) : []; } catch (e) { return []; }
   });
 
-  const [activeTab, setActiveTab] = useState('sales'); // 'sales', 'suppliers', 'summary'
+  const [activeTab, setActiveTab] = useState('sales'); 
   const [searchTerm, setSearchTerm] = useState('');
   const [sortConfig, setSortConfig] = useState({ key: 'total', direction: 'desc' });
   const [loading, setLoading] = useState(false);
@@ -386,6 +386,9 @@ const App = () => {
   
   const [availableDates, setAvailableDates] = useState([]);
   const [dateFilter, setDateFilter] = useState({ start: '', end: '' });
+  
+  // Drilldown State
+  const [drillDownMonth, setDrillDownMonth] = useState(null);
   
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 50;
@@ -406,7 +409,7 @@ const App = () => {
   const activeData = useMemo(() => {
     if (activeTab === 'sales') return salesData;
     if (activeTab === 'suppliers') return suppliersData;
-    return []; // Summary tab handles data differently
+    return []; 
   }, [activeTab, salesData, suppliersData]);
 
   const activeFileNames = useMemo(() => {
@@ -423,6 +426,7 @@ const App = () => {
         setDateFilter({ start: sortedDates[0], end: sortedDates[sortedDates.length - 1] });
     }
     setCurrentPage(1);
+    setDrillDownMonth(null); // Reset drilldown on data change
   }, [salesData, suppliersData]);
 
   useEffect(() => {
@@ -524,6 +528,31 @@ const App = () => {
     setAvailableDates([]);
     setDateFilter({ start: '', end: '' });
     resetAllFilters();
+    setDrillDownMonth(null);
+  };
+
+  const handleExport = () => {
+    if (filteredData.length === 0 || !window.XLSX) return;
+    
+    // Prepare data for export (Headers in Hebrew)
+    const exportData = filteredData.map(item => {
+        const base = {
+            'תאריך': item.date,
+            'סכום': item.total,
+            'כמות': item.quantity,
+            'יחידה': item.unit
+        };
+        if (activeTab === 'sales') {
+            return { ...base, 'מוצר': item.description, 'מק"ט': item.sku };
+        } else {
+            return { ...base, 'ספק': item.supplier };
+        }
+    });
+
+    const ws = window.XLSX.utils.json_to_sheet(exportData);
+    const wb = window.XLSX.utils.book_new();
+    window.XLSX.utils.book_append_sheet(wb, ws, "Data");
+    window.XLSX.writeFile(wb, `${activeTab}_export.xlsx`);
   };
 
   const uniqueItems = useMemo(() => {
@@ -535,16 +564,21 @@ const App = () => {
   }, [salesData, suppliersData]);
 
   const filteredData = useMemo(() => {
-    if (activeTab === 'summary') return []; // Summary handles logic differently
+    if (activeTab === 'summary') return []; 
     
     let data = activeData;
-    const startVal = dateFilter.start ? getComparableDateValue(dateFilter.start) : 0;
-    const endVal = dateFilter.end ? getComparableDateValue(dateFilter.end) : 999999;
-
-    data = data.filter(item => {
-        const itemVal = getComparableDateValue(item.date);
-        return itemVal >= startVal && itemVal <= endVal;
-    });
+    
+    // Drill-down filter (Overrules date range if active)
+    if (drillDownMonth) {
+        data = data.filter(item => item.date === drillDownMonth);
+    } else {
+        const startVal = dateFilter.start ? getComparableDateValue(dateFilter.start) : 0;
+        const endVal = dateFilter.end ? getComparableDateValue(dateFilter.end) : 999999;
+        data = data.filter(item => {
+            const itemVal = getComparableDateValue(item.date);
+            return itemVal >= startVal && itemVal <= endVal;
+        });
+    }
 
     if (activeTab === 'sales') {
         if (selectedProduct.length > 0) data = data.filter(item => selectedProduct.includes(item.description));
@@ -570,7 +604,7 @@ const App = () => {
         if (valA > valB) return sortConfig.direction === 'asc' ? 1 : -1;
         return 0;
     });
-  }, [activeData, searchTerm, sortConfig, dateFilter, selectedProduct, selectedSku, selectedSupplier, activeTab]);
+  }, [activeData, searchTerm, sortConfig, dateFilter, selectedProduct, selectedSku, selectedSupplier, activeTab, drillDownMonth]);
 
   const summaryData = useMemo(() => {
       if (activeTab !== 'summary') return null;
@@ -588,19 +622,16 @@ const App = () => {
 
       const monthlySummary = {};
       
-      // Income
       filteredSales.forEach(item => {
           if (!monthlySummary[item.date]) monthlySummary[item.date] = { income: 0, expenses: 0, profit: 0 };
           monthlySummary[item.date].income += item.total;
       });
       
-      // Expenses
       filteredSuppliers.forEach(item => {
           if (!monthlySummary[item.date]) monthlySummary[item.date] = { income: 0, expenses: 0, profit: 0 };
           monthlySummary[item.date].expenses += item.total;
       });
 
-      // Calculate Profit
       const chart = Object.keys(monthlySummary).map(date => {
           const { income, expenses } = monthlySummary[date];
           return {
@@ -628,7 +659,7 @@ const App = () => {
 
   const totalPages = Math.ceil(filteredData.length / itemsPerPage);
 
-  useEffect(() => setCurrentPage(1), [activeTab, searchTerm, dateFilter, selectedProduct, selectedSku, selectedSupplier]);
+  useEffect(() => setCurrentPage(1), [activeTab, searchTerm, dateFilter, selectedProduct, selectedSku, selectedSupplier, drillDownMonth]);
 
   const stats = useMemo(() => {
     if (activeTab === 'summary') return null;
@@ -648,6 +679,7 @@ const App = () => {
   const chartData = useMemo(() => {
     if (activeTab === 'summary') return null;
     const monthsMap = {};
+    // Always use filtered data for chart to reflect filters
     filteredData.forEach(item => {
         if (!item.date) return;
         const monthKey = item.date; 
@@ -734,12 +766,25 @@ const App = () => {
         setDateFilter({ start: availableDates[0], end: availableDates[availableDates.length - 1] });
      }
      setSearchTerm(''); setSelectedProduct([]); setSelectedSku(''); setSelectedSupplier('');
+     setDrillDownMonth(null);
   };
 
   const avgList = useMemo(() => {
     if (activeTab === 'sales' && selectedProduct.length > 0) return chartData.pie;
     return null;
   }, [activeTab, selectedProduct, chartData?.pie]);
+
+  // Handle Chart Click for Drill-down
+  const handleChartClick = (data) => {
+      if (data && data.activeLabel) {
+          // If clicking the same month again, clear filter
+          if (drillDownMonth === data.activeLabel) {
+              setDrillDownMonth(null);
+          } else {
+              setDrillDownMonth(data.activeLabel);
+          }
+      }
+  };
 
   return (
     <div className="flex min-h-screen bg-slate-50 font-sans text-slate-800" dir="rtl">
@@ -804,7 +849,7 @@ const App = () => {
                         <select value={dateFilter.end} onChange={(e) => setDateFilter(prev => ({ ...prev, end: e.target.value }))} className="bg-transparent font-bold cursor-pointer text-sm">{availableDates.map(d => <option key={`e${d}`} value={d}>{d}</option>)}</select>
                     </div>
                 )}
-                <button onClick={generateAIInsight} className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 text-white rounded-lg shadow-md text-sm font-bold hover:-translate-y-0.5 transition-all">
+                <button onClick={generateAIInsight} className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-indigo-600 hover:from-violet-700 hover:to-indigo-700 text-white rounded-lg shadow-md text-sm font-bold hover:-translate-y-0.5 transition-all">
                     <Sparkles className="w-4 h-4 text-yellow-300" /> <span>תובנות AI</span>
                 </button>
             </div>
@@ -873,7 +918,7 @@ const App = () => {
                     <h3 className="text-lg font-bold mb-6 flex items-center gap-2"><Calendar className="w-5 h-5 text-blue-500" />{activeTab === 'sales' ? 'מכירות לפי חודש' : 'הוצאות לפי חודש'}</h3>
                     <div className="h-96">
                         <ResponsiveContainer width="100%" height="100%">
-                            <ComposedChart data={chartData.monthly}>
+                            <ComposedChart data={chartData.monthly} onClick={handleChartClick} style={{ cursor: 'pointer' }}>
                                 <CartesianGrid strokeDasharray="3 3" vertical={false} stroke="#e2e8f0" />
                                 <XAxis dataKey="name" stroke="#64748b" />
                                 <YAxis yAxisId="left" stroke="#3b82f6" tickFormatter={(val) => `₪${val/1000}k`} />
@@ -928,10 +973,24 @@ const App = () => {
 
             <div className="bg-white rounded-xl border border-slate-100 shadow-sm overflow-hidden">
                 <div className="p-6 border-b border-slate-100 flex flex-col sm:flex-row justify-between items-center gap-4">
-                    <h3 className="text-lg font-bold flex items-center gap-2"><FileText className="w-5 h-5 text-slate-400" /> פירוט עסקאות</h3>
-                    <div className="relative w-full sm:w-72">
-                        <Search className="absolute right-3 top-2.5 w-4 h-4 text-slate-400" />
-                        <input type="text" placeholder="חיפוש בטבלה..." className="w-full pl-4 pr-10 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+                    <div className="flex items-center gap-3">
+                        <h3 className="text-lg font-bold flex items-center gap-2"><FileText className="w-5 h-5 text-slate-400" /> פירוט עסקאות</h3>
+                        {drillDownMonth && (
+                             <span className="flex items-center gap-1 bg-blue-100 text-blue-800 px-3 py-1 rounded-full text-sm font-medium animate-in fade-in slide-in-from-left-4">
+                                <MousePointerClick className="w-4 h-4" />
+                                מסונן לפי: {drillDownMonth}
+                                <button onClick={() => setDrillDownMonth(null)} className="hover:bg-blue-200 rounded-full p-0.5 mr-1"><X className="w-3 h-3" /></button>
+                             </span>
+                        )}
+                    </div>
+                    <div className="flex gap-3 items-center">
+                        <button onClick={handleExport} className="flex items-center gap-2 px-3 py-2 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 rounded-lg transition-colors text-sm font-medium border border-emerald-200">
+                            <Download className="w-4 h-4" /> ייצוא לאקסל
+                        </button>
+                        <div className="relative w-full sm:w-64">
+                            <Search className="absolute right-3 top-2.5 w-4 h-4 text-slate-400" />
+                            <input type="text" placeholder="חיפוש בטבלה..." className="w-full pl-4 pr-10 py-2 bg-slate-50 border border-slate-200 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} />
+                        </div>
                     </div>
                 </div>
                 <div className="overflow-x-auto">
@@ -940,7 +999,9 @@ const App = () => {
                             <tr>
                                 <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('date')}>תאריך</th>
                                 {activeTab === 'sales' && <th className="px-6 py-3">מק״ט</th>}
-                                <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort(activeTab === 'sales' ? 'description' : 'supplier')}>{activeTab === 'sales' ? 'מוצר' : 'ספק'}</th>
+                                <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort(activeTab === 'sales' ? 'description' : 'supplier')}>
+                                    {activeTab === 'sales' ? 'מוצר' : 'ספק'}
+                                </th>
                                 <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('quantity')}>כמות</th>
                                 <th className="px-6 py-3 cursor-pointer hover:text-blue-600" onClick={() => requestSort('total')}>סכום</th>
                             </tr>
