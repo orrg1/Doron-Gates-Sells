@@ -712,6 +712,8 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
   const [invFileName, setInvFileName] = useState(() => localStorage.getItem('inventoryFileName')||'');
   const [importStats, setImportStats] = useState(null);
   const [showBanner, setShowBanner] = useState(false);
+  const [showLegend, setShowLegend] = useState(false);
+  const [deadStockDays, setDeadStockDays] = useState(90); // threshold in days
   const [aiInsightOpen, setAiInsightOpen] = useState(false);
   const [aiInsightLoading, setAiInsightLoading] = useState(false);
   const [aiInsightText, setAiInsightText] = useState('');
@@ -891,16 +893,37 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       });
       const annualAvg = monthlyAvgs.reduce((a,b)=>a+b,0)/12 || 1;
       const seasonalityIdx = monthlyAvgs.map(v => +(v/annualAvg).toFixed(2));
-      // Use imported minStock as override for monthsToStock threshold when available
+      // ── XYZ classification: Coefficient of Variation ──────────────
+      const allSaleVals = Object.values(p.monthlyData).filter(v=>v>0);
+      const meanForCV = avgMonthly || 1;
+      const variance = allSaleVals.length > 1
+        ? allSaleVals.reduce((s,v)=>s+Math.pow(v-meanForCV,2),0) / allSaleVals.length
+        : 0;
+      const stdDev = Math.sqrt(variance);
+      const cv = meanForCV > 0 ? stdDev / meanForCV : 0;
+      const xyz = cv <= 0.5 ? 'X' : cv <= 1.0 ? 'Y' : 'Z';
+      const abcXyz = (p.abc||'C') + xyz;
+
+      // ── Safety Stock: 95% service level (Z=1.65) ────────────────
+      const safetyStock = Math.ceil(1.65 * stdDev * Math.sqrt(Math.max(leadTime, 0.5)));
+
+      // ── Lifecycle: compare last 3 vs previous 3 months ──────────
+      const lcRecent = allMonths.slice(-3).reduce((s,m)=>s+(p.monthlyData[m]||0),0)/3;
+      const lcPrev   = allMonths.slice(-6,-3).reduce((s,m)=>s+(p.monthlyData[m]||0),0)/3;
+      const lcTrend  = lcPrev>0 ? (lcRecent-lcPrev)/lcPrev*100 : 0;
+      const lifecycle = lcTrend > 20 ? 'growing' : lcTrend > -20 ? 'stable' : lcTrend > -50 ? 'declining' : 'dying';
+
+      // ── Suggested order: includes safety stock ───────────────────
       const targetStock  = minStock ?? (monthsToStock * avgMonthly);
-      const suggestedOrder = Math.max(0, Math.ceil((monthsToStock+leadTime)*avgMonthly-(currentStock??0)));
+      const baseOrder = (monthsToStock+leadTime)*avgMonthly + safetyStock - (currentStock??0);
+      const suggestedOrder = Math.max(0, Math.ceil(baseOrder));
       const orderCost = (suggestedOrder>0&&unitCost)?suggestedOrder*unitCost:null;
       const risk = currentStock!==null
         ? (currentStock <= 0 ? 'critical'  // negative or zero stock
           : coverageMonths < leadTime ? 'critical'
           : (minStock ? currentStock < minStock : coverageMonths < monthsToStock) ? 'low' : 'ok')
         : 'unknown';
-      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, avgDaily, sparkline, trend, forecastNext, seasonalityIdx, monthlyAvgs, currentStock, unitCost, minStock, supplier, coverageMonths, coverageDays, suggestedOrder, orderCost, risk };
+      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, avgDaily, sparkline, trend, forecastNext, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, coverageMonths, coverageDays, suggestedOrder, orderCost, risk };
     });
   }, [salesData, stockMap, costMap, minStockMap, supplierMap, monthsToStock, leadTime]);
 
@@ -913,6 +936,54 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       return sortConfig.direction==='asc'?(va<vb?-1:va>vb?1:0):(va>vb?-1:va<vb?1:0);
     });
   }, [products, abcFilter, searchTerm, sortConfig]);
+
+  // Dead stock analysis — products not sold in deadStockDays
+  const deadStockData = useMemo(() => {
+    if (!salesData.length) return [];
+    // Find latest date in dataset
+    const MONTHS_REV = {'ינו':0,'פבר':1,'מרץ':2,'אפר':3,'מאי':4,'יונ':5,'יול':6,'אוג':7,'ספט':8,'אוק':9,'נוב':10,'דצמ':11};
+    const toDate = (dateStr) => {
+      if (!dateStr) return null;
+      const [m,y] = dateStr.split('-');
+      const mIdx = MONTHS_REV[m];
+      if (mIdx===undefined) return null;
+      return new Date(2000+parseInt(y), mIdx, 15);
+    };
+    const allDates = salesData.map(d=>d.date).filter(Boolean).map(toDate).filter(Boolean);
+    if (!allDates.length) return [];
+    const latestDate = new Date(Math.max(...allDates.map(d=>d.getTime())));
+    const threshold = new Date(latestDate.getTime() - deadStockDays * 24*60*60*1000);
+
+    return products
+      .filter(p => {
+        // Find last sale date for this product
+        const saleDates = Object.entries(p.monthlyData)
+          .filter(([,v])=>v>0)
+          .map(([d])=>toDate(d))
+          .filter(Boolean);
+        if (!saleDates.length) return p.currentStock > 0; // never sold but has stock
+        const lastSale = new Date(Math.max(...saleDates.map(d=>d.getTime())));
+        return lastSale < threshold && (p.currentStock === null || p.currentStock > 0);
+      })
+      .map(p => {
+        const saleDates = Object.entries(p.monthlyData)
+          .filter(([,v])=>v>0)
+          .map(([d])=>toDate(d))
+          .filter(Boolean);
+        const lastSaleDate = saleDates.length
+          ? new Date(Math.max(...saleDates.map(d=>d.getTime())))
+          : null;
+        const daysSince = lastSaleDate
+          ? Math.round((latestDate-lastSaleDate)/(24*60*60*1000))
+          : null;
+        const stockValue = (p.currentStock??0) * (p.unitCost??0);
+        return { ...p, lastSaleDate, daysSince, stockValue };
+      })
+      .sort((a,b) => (b.stockValue||0)-(a.stockValue||0));
+  }, [products, salesData, deadStockDays]);
+
+  const deadStockValue = useMemo(() =>
+    deadStockData.reduce((a,p)=>a+(p.stockValue||0),0), [deadStockData]);
 
   const reqSort = (key) => setSortConfig(p=>({key, direction:p.key===key&&p.direction==='desc'?'asc':'desc'}));
   const abcCounts = useMemo(()=>({ A:products.filter(p=>p.abc==='A').length, B:products.filter(p=>p.abc==='B').length, C:products.filter(p=>p.abc==='C').length }), [products]);
@@ -937,9 +1008,34 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       .sort((a, b) => b.totalCost - a.totalCost || b.totalUnits - a.totalUnits);
   }, [filtered]);
 
-  const ABCBadge = ({cls}) => {
-    const s = { A:isDarkMode?'bg-amber-500/20 text-amber-300 border-amber-500/30':'bg-amber-50 text-amber-700 border-amber-200', B:isDarkMode?'bg-blue-500/20 text-blue-300 border-blue-500/30':'bg-blue-50 text-blue-700 border-blue-200', C:isDarkMode?'bg-slate-600/40 text-slate-400 border-slate-600':'bg-slate-100 text-slate-500 border-slate-200' };
-    return <span className={`px-2 py-0.5 rounded-md text-xs font-bold border ${s[cls]}`}>{cls}</span>;
+  const ABCBadge = ({cls, xyz, abcXyz}) => {
+    const abcStyle = {
+      A: isDarkMode?'bg-amber-500/20 text-amber-300 border-amber-500/40':'bg-amber-50 text-amber-700 border-amber-300',
+      B: isDarkMode?'bg-blue-500/20 text-blue-300 border-blue-500/30':'bg-blue-50 text-blue-700 border-blue-200',
+      C: isDarkMode?'bg-slate-600/40 text-slate-400 border-slate-600':'bg-slate-100 text-slate-500 border-slate-200',
+    };
+    const xyzStyle = {
+      X: isDarkMode?'text-emerald-400':'text-emerald-600',
+      Y: isDarkMode?'text-amber-400':'text-amber-600',
+      Z: isDarkMode?'text-red-400':'text-red-600',
+    };
+    const tooltips = {
+      AX:'ערך גבוה + ביקוש קבוע — רכש שגרתי אוטומטי',
+      AY:'ערך גבוה + ביקוש משתנה — דרוש מעקב',
+      AZ:'ערך גבוה + ביקוש אי-סדיר — סיכון גבוה',
+      BX:'ערך בינוני + ביקוש קבוע',
+      BY:'ערך בינוני + ביקוש משתנה',
+      BZ:'ערך בינוני + ביקוש אי-סדיר',
+      CX:'ערך נמוך + ביקוש קבוע — שקול הפסקה',
+      CY:'ערך נמוך + ביקוש משתנה',
+      CZ:'ערך נמוך + ביקוש אי-סדיר — שקול ביטול',
+    };
+    return (
+      <span className={`inline-flex items-center px-2 py-0.5 rounded-md text-xs font-bold border cursor-help gap-0.5 ${abcStyle[cls]||abcStyle.C}`}
+        title={tooltips[abcXyz]||abcXyz}>
+        {cls}<span className={`text-[10px] ${xyzStyle[xyz]||''}`}>{xyz||''}</span>
+      </span>
+    );
   };
   const RiskBadge = ({risk, months, days}) => {
     if (risk==='unknown') return <span className={`text-xs ${isDarkMode?'text-slate-600':'text-slate-400'}`}>—</span>;
@@ -1097,6 +1193,68 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
         </div>
       </div>
 
+      {/* ABC-XYZ Legend */}
+      {showLegend && (
+        <div className={`rounded-2xl border p-5 animate-in fade-in slide-in-from-top-2 duration-300 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+          <h3 className={`font-bold text-sm mb-4 flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}>
+            <Info className="w-4 h-4 text-blue-500"/> מקרא ניתוח ABC-XYZ
+          </h3>
+          <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
+            {/* ABC explanation */}
+            <div>
+              <p className={`text-xs font-bold uppercase tracking-wider mb-3 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>ABC — לפי ערך כספי</p>
+              <div className="space-y-2">
+                {[
+                  {cls:'A', xyz:'', color:'amber', text:'~80% מסה"כ ההכנסה — פריטי ליבה. רכש קפדני, מלאי גבוה, בקרה שוטפת'},
+                  {cls:'B', xyz:'', color:'blue',  text:'~15% מסה"כ — חשוב אבל לא קריטי. רכש סדיר, מלאי סביר'},
+                  {cls:'C', xyz:'', color:'gray',  text:'~5% בלבד — שקול הפחתת סוגים, הזמנה לפי דרישה בלבד'},
+                ].map(r=>(
+                  <div key={r.cls} className="flex items-start gap-3">
+                    <span className={`px-2 py-0.5 rounded text-xs font-bold border shrink-0 mt-0.5 ${r.cls==='A'?(isDarkMode?'bg-amber-500/20 text-amber-300 border-amber-500/30':'bg-amber-50 text-amber-700 border-amber-200'):r.cls==='B'?(isDarkMode?'bg-blue-500/20 text-blue-300 border-blue-500/30':'bg-blue-50 text-blue-700 border-blue-200'):(isDarkMode?'bg-slate-600/40 text-slate-400 border-slate-600':'bg-slate-100 text-slate-500 border-slate-200')}`}>{r.cls}</span>
+                    <p className={`text-xs ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{r.text}</p>
+                  </div>
+                ))}
+              </div>
+            </div>
+            {/* XYZ explanation */}
+            <div>
+              <p className={`text-xs font-bold uppercase tracking-wider mb-3 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>XYZ — לפי יציבות ביקוש</p>
+              <div className="space-y-2">
+                {[
+                  {xyz:'X', color:'emerald', cv:'CV ≤ 0.5', text:'ביקוש קבוע וצפוי — ניתן להזמין אוטומטית'},
+                  {xyz:'Y', color:'amber',   cv:'CV 0.5–1.0', text:'ביקוש משתנה — דרוש מלאי בטחון גבוה יותר'},
+                  {xyz:'Z', color:'red',     cv:'CV > 1.0', text:'ביקוש אי-סדיר — הזמנה לפי דרישה, סיכון גבוה'},
+                ].map(r=>(
+                  <div key={r.xyz} className="flex items-start gap-3">
+                    <span className={`px-2 py-0.5 rounded text-xs font-bold border shrink-0 mt-0.5 ${r.xyz==='X'?(isDarkMode?'bg-emerald-500/20 text-emerald-300 border-emerald-500/30':'bg-emerald-50 text-emerald-700 border-emerald-200'):r.xyz==='Y'?(isDarkMode?'bg-amber-500/20 text-amber-300 border-amber-500/30':'bg-amber-50 text-amber-700 border-amber-200'):(isDarkMode?'bg-red-500/20 text-red-300 border-red-500/30':'bg-red-50 text-red-700 border-red-200')}`}>{r.xyz}</span>
+                    <div>
+                      <span className={`text-[10px] font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{r.cv} · </span>
+                      <span className={`text-xs ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{r.text}</span>
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+          </div>
+          {/* Combined matrix */}
+          <div className={`mt-4 pt-4 border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+            <p className={`text-xs font-bold uppercase tracking-wider mb-3 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>השילובים הקריטיים</p>
+            <div className="grid grid-cols-1 sm:grid-cols-3 gap-2">
+              {[
+                {combo:'AX', bg:isDarkMode?'bg-emerald-900/30 border-emerald-700':'bg-emerald-50 border-emerald-200', text:isDarkMode?'text-emerald-300':'text-emerald-800', desc:'אידאלי — רכש אוטומטי בכמות קבועה'},
+                {combo:'AZ', bg:isDarkMode?'bg-red-900/30 border-red-700':'bg-red-50 border-red-200', text:isDarkMode?'text-red-300':'text-red-800', desc:'דחוף — ערך גבוה + ביקוש לא צפוי = סיכון גדול'},
+                {combo:'CZ', bg:isDarkMode?'bg-slate-700/50 border-slate-600':'bg-slate-100 border-slate-200', text:isDarkMode?'text-slate-400':'text-slate-600', desc:'שקול ביטול — ערך נמוך + ביקוש כאוטי'},
+              ].map(r=>(
+                <div key={r.combo} className={`p-3 rounded-xl border ${r.bg}`}>
+                  <span className={`font-bold text-sm ${r.text}`}>{r.combo}</span>
+                  <p className={`text-xs mt-1 ${r.text}`}>{r.desc}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* KPIs */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <KPICard title="מוצרי A" formatted={abcCounts.A.toString()} icon={Star}        color="amber"  subtext="~80% מההכנסה" isDarkMode={isDarkMode}/>
@@ -1108,7 +1266,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       {/* View toggle */}
       <div className="flex items-center gap-3">
         <div className={`flex rounded-xl p-1 border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
-          {[['products', ClipboardList, 'לפי מוצר'], ['suppliers', Truck, 'לפי ספק']].map(([mode, Icon, label]) => (
+          {[['products', ClipboardList, 'לפי מוצר'], ['suppliers', Truck, 'לפי ספק'], ['dead', Trash2, 'פריטים מתים']].map(([mode, Icon, label]) => (
             <button key={mode} onClick={() => setViewMode(mode)}
               className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${viewMode===mode
                 ? (isDarkMode?'bg-slate-700 text-white shadow-sm':'bg-slate-900 text-white shadow-sm')
@@ -1116,6 +1274,9 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
               <Icon className="w-4 h-4"/>{label}
               {mode==='suppliers' && supplierGroups.length>0 && (
                 <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='suppliers'?'bg-white/20 text-white':'bg-blue-100 text-blue-700'}`}>{supplierGroups.length}</span>
+              )}
+              {mode==='dead' && deadStockData.length>0 && (
+                <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='dead'?'bg-red-400/30 text-red-200':'bg-red-100 text-red-700'}`}>{deadStockData.length}</span>
               )}
             </button>
           ))}
@@ -1301,6 +1462,147 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       )}
 
       {/* Product table — shown only in products mode */}
+      {/* Dead Stock View */}
+      {viewMode==='dead' && (
+        <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+          {/* Config + KPIs */}
+          <div className={`p-5 rounded-2xl border flex flex-wrap items-center gap-5 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+            <div className="flex items-center gap-3">
+              <div className={`p-2.5 rounded-xl ${isDarkMode?'bg-red-500/15':'bg-red-50'}`}>
+                <Trash2 className="w-5 h-5 text-red-500"/>
+              </div>
+              <div>
+                <p className={`font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>פריטים מתים / איטיים</p>
+                <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>פריטים עם מלאי שלא נמכרו בתקופה שנבחרה</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-3 mr-auto flex-wrap">
+              <span className={`text-xs font-medium ${isDarkMode?'text-slate-300':'text-slate-600'}`}>לא נמכר מעל:</span>
+              <div className={`flex rounded-lg p-1 ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
+                {[30,60,90,180].map(d=>(
+                  <button key={d} onClick={()=>setDeadStockDays(d)}
+                    className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${deadStockDays===d?(isDarkMode?'bg-slate-600 text-white shadow':'bg-white shadow text-slate-800'):(isDarkMode?'text-slate-400':'text-slate-500')}`}>
+                    {d} יום
+                  </button>
+                ))}
+              </div>
+              {deadStockValue > 0 && (
+                <div className={`flex items-center gap-2 px-3 py-1.5 rounded-xl border text-sm font-bold ${isDarkMode?'bg-red-500/10 border-red-500/20 text-red-300':'bg-red-50 border-red-200 text-red-700'}`}>
+                  <DollarSign className="w-4 h-4"/>
+                  {formatShort(deadStockValue)} מלאי תקוע
+                </div>
+              )}
+            </div>
+          </div>
+
+          {deadStockData.length === 0 ? (
+            <div className={`flex flex-col items-center justify-center py-20 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+              <Check className="w-12 h-12 text-emerald-500 mb-3 opacity-60"/>
+              <p className={`font-medium ${isDarkMode?'text-white':'text-slate-800'}`}>אין פריטים מתים!</p>
+              <p className={`text-sm mt-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>כל הפריטים עם מלאי נמכרו בתוך {deadStockDays} הימים האחרונים</p>
+            </div>
+          ) : (
+            <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+              <div className={`px-5 py-4 border-b flex flex-wrap items-center justify-between gap-3 ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+                <div className="flex items-center gap-3">
+                  <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}>
+                    <Trash2 className="w-4 h-4 text-red-400"/> {deadStockData.length} פריטים לא זמים
+                  </h3>
+                </div>
+                <button onClick={() => {
+                  setTimeout(() => {
+                    try {
+                      let html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="UTF-8"><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>פריטים מתים</x:Name><x:WorksheetOptions><x:DisplayRightToLeft/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml></head><body>`;
+                      html += `<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Calibri;font-size:11px;direction:rtl">`;
+                      html += `<thead><tr style="background:#1e293b;color:#fff"><th>מוצר</th><th>מק"ט</th><th>ABC</th><th>ימים ללא מכירה</th><th>מלאי נוכחי</th><th>עלות יחידה ₪</th><th style="background:#dc2626">ערך מלאי תקוע ₪</th><th>ספק</th></tr></thead><tbody>`;
+                      deadStockData.forEach(p => {
+                        html += `<tr style="background:#fff7f7"><td>${p.name}</td><td>${p.sku||''}</td><td style="text-align:center;font-weight:bold">${p.abc}</td><td style="text-align:center;color:#dc2626;font-weight:bold">${p.daysSince??'לא ידוע'}</td><td style="text-align:center">${p.currentStock??'לא ידוע'}</td><td style="text-align:center">${p.unitCost?'₪'+p.unitCost:''}</td><td style="text-align:center;font-weight:bold;color:#dc2626">${p.stockValue>0?'₪'+Math.round(p.stockValue).toLocaleString():''}</td><td>${p.supplier||''}</td></tr>`;
+                      });
+                      html += `<tr style="background:#fee2e2;font-weight:bold"><td colspan="6">סה"כ ערך מלאי תקוע</td><td style="text-align:center;color:#dc2626">₪${Math.round(deadStockValue).toLocaleString()}</td><td></td></tr>`;
+                      html += `</tbody></table></body></html>`;
+                      const blob = new Blob(['﻿'+html],{type:'application/vnd.ms-excel;charset=utf-8'});
+                      const url = URL.createObjectURL(blob);
+                      const a = document.createElement('a'); a.style.display='none'; a.href=url;
+                      a.setAttribute('download','פריטים_מתים_'+new Date().toLocaleDateString('he-IL').replace(/\//g,'-')+'.xls');
+                      document.body.appendChild(a); a.click();
+                      setTimeout(()=>{document.body.removeChild(a);URL.revokeObjectURL(url);},200);
+                    } catch(e){console.error(e);}
+                  },30);
+                }} className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium border ${isDarkMode?'bg-red-900/20 border-red-800 text-red-400 hover:bg-red-900/40':'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'}`}>
+                  <Download className="w-3.5 h-3.5"/> ייצוא לאקסל
+                </button>
+              </div>
+              <div className="overflow-x-auto">
+                <table className={`w-full text-sm text-right min-w-[700px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                  <thead className={`text-[11px] font-semibold uppercase tracking-widest sticky top-0 z-10 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
+                    <tr>
+                      <th className="px-4 py-3 min-w-[180px]">מוצר</th>
+                      <th className="px-4 py-3">ABC</th>
+                      <th className="px-4 py-3 whitespace-nowrap">ימים ללא מכירה</th>
+                      <th className="px-4 py-3 whitespace-nowrap">מלאי נוכחי</th>
+                      <th className="px-4 py-3 whitespace-nowrap">מחיר קניה</th>
+                      <th className={`px-4 py-3 whitespace-nowrap font-bold ${isDarkMode?'text-red-400':'text-red-700'}`}>ערך תקוע</th>
+                      <th className="px-4 py-3">ספק</th>
+                    </tr>
+                  </thead>
+                  <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                    {deadStockData.map(p => (
+                      <tr key={p.key} className={`transition-all ${isDarkMode?'hover:bg-red-900/10':'hover:bg-red-50/50'}`}>
+                        <td className="px-4 py-3.5">
+                          <p className={`font-medium text-sm truncate max-w-[200px] ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{p.name}</p>
+                          {p.sku&&p.sku!==p.name&&<p className={`text-xs font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}</p>}
+                        </td>
+                        <td className="px-4 py-3.5"><ABCBadge cls={p.abc} xyz={p.xyz} abcXyz={p.abcXyz}/></td>
+                        <td className="px-4 py-3.5">
+                          <span className={`font-bold tabular-nums px-2.5 py-1 rounded-lg text-sm
+                            ${(p.daysSince||0)>180?(isDarkMode?'bg-red-500/20 text-red-300':'bg-red-100 text-red-700')
+                              :(p.daysSince||0)>90?(isDarkMode?'bg-amber-500/20 text-amber-300':'bg-amber-100 text-amber-700')
+                              :(isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-100 text-slate-600')}`}>
+                            {p.daysSince??'—'} יום
+                          </span>
+                        </td>
+                        <td className="px-4 py-3.5">
+                          <span className={`font-bold tabular-nums ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{p.currentStock?.toLocaleString()??'—'}</span>
+                          <span className={`text-xs mr-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>יח'</span>
+                        </td>
+                        <td className="px-4 py-3.5">
+                          {p.unitCost ? <span className={`text-sm ${isDarkMode?'text-slate-300':'text-slate-600'}`}>₪{p.unitCost.toLocaleString()}</span> : <span className={`text-xs ${isDarkMode?'text-slate-600':'text-slate-400'}`}>—</span>}
+                        </td>
+                        <td className="px-4 py-3.5">
+                          {p.stockValue > 0
+                            ? <span className={`font-bold text-sm ${isDarkMode?'text-red-400':'text-red-600'}`}>₪{Math.round(p.stockValue).toLocaleString()}</span>
+                            : <span className={`text-xs ${isDarkMode?'text-slate-600':'text-slate-400'}`}>אין מחיר</span>
+                          }
+                        </td>
+                        <td className="px-4 py-3.5">
+                          <span className={`text-xs truncate block max-w-[120px] ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{p.supplier||'—'}</span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                  <tfoot>
+                    <tr className={`border-t-2 ${isDarkMode?'border-slate-600 bg-slate-900/50':'border-slate-200 bg-slate-50'}`}>
+                      <td colSpan={5} className={`px-4 py-3 text-sm font-bold ${isDarkMode?'text-slate-300':'text-slate-700'}`}>
+                        סה"כ ערך מלאי תקוע
+                      </td>
+                      <td className={`px-4 py-3 font-bold text-base tabular-nums ${isDarkMode?'text-red-400':'text-red-600'}`}>
+                        {formatShort(deadStockValue)}
+                      </td>
+                      <td/>
+                    </tr>
+                  </tfoot>
+                </table>
+              </div>
+              {/* Footer tip */}
+              <div className={`px-5 py-3 border-t text-xs flex items-center gap-2 ${isDarkMode?'border-slate-700 text-slate-500':'border-slate-100 text-slate-400'}`}>
+                <Info className="w-3.5 h-3.5 shrink-0"/>
+                פריטים ללא עלות יחידה לא יציגו ערך — העלה קובץ כרטיס פריטים מ-Priority כדי לחשב ערך מלאי מלא
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {viewMode==='products' && (
         <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
         <div className={`px-5 py-4 border-b flex flex-wrap justify-between items-center gap-3 ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
@@ -1314,6 +1616,10 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
                 <button key={k} onClick={()=>setAbcFilter(k)} className={`px-2.5 py-1 rounded-md transition-all font-medium ${abcFilter===k?(isDarkMode?'bg-slate-600 text-white shadow':'bg-white shadow text-slate-800'):(isDarkMode?'text-slate-400':'text-slate-500')}`}>{l}</button>
               ))}
             </div>
+            <button onClick={()=>setShowLegend(p=>!p)}
+              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border transition-colors ${showLegend?(isDarkMode?'bg-slate-700 border-slate-500 text-white':'bg-slate-200 border-slate-300 text-slate-800'):(isDarkMode?'border-slate-700 text-slate-400 hover:text-white':'border-slate-200 text-slate-500 hover:text-slate-700')}`}>
+              <Info className="w-3.5 h-3.5"/> מקרא ABC-XYZ
+            </button>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
             {totalOrderUnits>0 && (
@@ -1432,14 +1738,19 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
                 return (
                   <tr key={p.key} className={`transition-all duration-150 group cursor-default ${isDarkMode?'hover:bg-slate-700/50':'hover:bg-blue-50/40'} ${rowBg}`}>
                     <td className="px-4 py-3 max-w-[220px]">
-                      <p className={`font-medium text-sm ${isDarkMode?'text-slate-100':'text-slate-800'} truncate`} title={p.name}>{p.name}</p>
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className={`font-medium text-sm ${isDarkMode?'text-slate-100':'text-slate-800'} truncate`} title={p.name}>{p.name}</p>
+                        {p.lifecycle==='growing'  && <span title="צמיחה" className="text-xs">🚀</span>}
+                        {p.lifecycle==='declining' && <span title="דעיכה" className="text-xs">⚠️</span>}
+                        {p.lifecycle==='dying'     && <span title="גוסס" className="text-xs">🔴</span>}
+                      </div>
                       <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                         {p.sku&&p.sku!==p.name&&<span className={`text-xs font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}</span>}
                         {p.supplier&&<span className={`text-xs ${isDarkMode?'text-slate-600':'text-slate-400'} truncate max-w-[100px]`} title={p.supplier}>{p.supplier}</span>}
                       </div>
                       <SeasonalityBar idx={p.seasonalityIdx} avgs={p.monthlyAvgs}/>
                     </td>
-                    <td className="px-4 py-3.5"><ABCBadge cls={p.abc}/></td>
+                    <td className="px-4 py-3.5"><ABCBadge cls={p.abc} xyz={p.xyz} abcXyz={p.abcXyz}/></td>
                     {/* Avg + Forecast combined */}
                     <td className="px-4 py-3">
                       <div className="flex flex-col gap-0.5">
@@ -1461,6 +1772,10 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
                         </div>
                         {p.forecastNext>0 && <div className={`text-xs flex items-center gap-1 ${isDarkMode?'text-blue-400':'text-blue-600'}`}>
                           <TrendingUp className="w-3 h-3"/>תחזית: {p.forecastNext}
+                        </div>}
+                        {p.safetyStock>0 && <div className={`text-xs flex items-center gap-1 ${isDarkMode?'text-purple-400':'text-purple-600'}`}
+                          title="מלאי בטחון מחושב (95% רמת שירות)">
+                          <Activity className="w-3 h-3"/>בטחון: {p.safetyStock}
                         </div>}
                       </div>
                     </td>
