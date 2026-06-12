@@ -17,7 +17,7 @@ import {
 } from 'recharts';
 
 // ─── API ───────────────────────────────────────────────
-const apiKey = "";
+// API key is managed via the settings modal (stored in localStorage)
 
 // ─── HELPERS ───────────────────────────────────────────
 const HebrewMonthsMap = {
@@ -1558,9 +1558,122 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
   );
 };
 
+
+// ─── SETTINGS MODAL ────────────────────────────────────
+const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
+  const [localKey, setLocalKey] = useState(apiKey);
+  const [showKey, setShowKey] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  useEffect(() => { setLocalKey(apiKey); }, [apiKey, isOpen]);
+
+  const handleSave = () => {
+    const trimmed = localKey.trim();
+    localStorage.setItem('geminiApiKey', trimmed);
+    onSave(trimmed);
+    setSaved(true);
+    setTimeout(() => { setSaved(false); onClose(); }, 1000);
+  };
+
+  const handleClear = () => {
+    setLocalKey('');
+    localStorage.removeItem('geminiApiKey');
+    onSave('');
+  };
+
+  if (!isOpen) return null;
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
+      <div className={`rounded-2xl shadow-2xl w-full max-w-md overflow-hidden ${isDarkMode?'bg-slate-800 border border-slate-700':'bg-white'}`}>
+        {/* Header */}
+        <div className={`px-6 py-4 border-b flex items-center justify-between ${isDarkMode?'border-slate-700 bg-slate-900/40':'border-slate-100 bg-slate-50'}`}>
+          <div className="flex items-center gap-3">
+            <div className={`p-2 rounded-xl ${isDarkMode?'bg-slate-700':'bg-white border border-slate-200'}`}>
+              <Settings className="w-5 h-5 text-slate-500"/>
+            </div>
+            <h2 className={`font-bold text-lg ${isDarkMode?'text-white':'text-slate-800'}`}>הגדרות</h2>
+          </div>
+          <button onClick={onClose} className={`p-2 rounded-full transition-colors ${isDarkMode?'hover:bg-slate-700 text-slate-400':'hover:bg-slate-100 text-slate-500'}`}>
+            <X className="w-5 h-5"/>
+          </button>
+        </div>
+
+        {/* Body */}
+        <div className="px-6 py-5 space-y-5">
+          {/* API Key section */}
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <Bot className={`w-4 h-4 ${isDarkMode?'text-blue-400':'text-blue-600'}`}/>
+              <label className={`text-sm font-medium ${isDarkMode?'text-slate-200':'text-slate-700'}`}>
+                מפתח Gemini API
+              </label>
+              {apiKey && (
+                <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${isDarkMode?'bg-emerald-500/20 text-emerald-400':'bg-emerald-100 text-emerald-700'}`}>
+                  ✓ פעיל
+                </span>
+              )}
+            </div>
+
+            <div className={`flex gap-2 p-3 rounded-xl border ${isDarkMode?'bg-slate-900 border-slate-700':'bg-slate-50 border-slate-200'}`}>
+              <input
+                type={showKey ? 'text' : 'password'}
+                value={localKey}
+                onChange={e => setLocalKey(e.target.value)}
+                placeholder="AIza..."
+                dir="ltr"
+                className={`flex-1 bg-transparent border-none focus:ring-0 text-sm font-mono outline-none ${isDarkMode?'text-white placeholder-slate-600':'text-slate-800 placeholder-slate-400'}`}
+              />
+              <button onClick={() => setShowKey(p => !p)}
+                className={`p-1.5 rounded-lg transition-colors shrink-0 ${isDarkMode?'text-slate-500 hover:text-slate-300':'text-slate-400 hover:text-slate-700'}`}
+                title={showKey ? 'הסתר' : 'הצג'}>
+                {showKey ? <EyeOff className="w-4 h-4"/> : <Eye className="w-4 h-4"/>}
+              </button>
+            </div>
+
+            <p className={`mt-2 text-xs leading-relaxed ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+              המפתח נשמר רק בדפדפן שלך (localStorage) — לא עובר לשרת ולא נשלח לשום מקום חוץ מ-Google.
+            </p>
+
+            {/* How to get a key */}
+            <div className={`mt-3 p-3 rounded-xl border text-xs leading-relaxed ${isDarkMode?'bg-blue-500/8 border-blue-500/20 text-blue-300':'bg-blue-50 border-blue-100 text-blue-700'}`}>
+              <p className="font-medium mb-1">איך מקבלים מפתח?</p>
+              <p>1. נכנסים ל-<span className="font-mono">aistudio.google.com</span></p>
+              <p>2. לוחצים "Get API Key" → "Create API key"</p>
+              <p>3. מעתיקים והודבקים כאן</p>
+              <p className="mt-1 opacity-70">Gemini API חינמי עד מגבלה נדיבה מאוד לשימוש אישי.</p>
+            </div>
+          </div>
+        </div>
+
+        {/* Footer */}
+        <div className={`px-6 py-4 border-t flex gap-3 ${isDarkMode?'border-slate-700 bg-slate-900/30':'border-slate-100 bg-slate-50'}`}>
+          {apiKey && (
+            <button onClick={handleClear}
+              className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-600 hover:bg-red-50'}`}>
+              מחק מפתח
+            </button>
+          )}
+          <div className="flex gap-2 mr-auto">
+            <button onClick={onClose}
+              className={`px-4 py-2 rounded-xl text-sm font-medium border transition-colors ${isDarkMode?'border-slate-600 text-slate-300 hover:bg-slate-700':'border-slate-200 text-slate-700 hover:bg-slate-50'}`}>
+              ביטול
+            </button>
+            <button onClick={handleSave} disabled={localKey.trim()===apiKey}
+              className={`px-5 py-2 rounded-xl text-sm font-medium transition-all disabled:opacity-40 ${saved?'bg-emerald-500 text-white':'bg-blue-600 hover:bg-blue-700 text-white'}`}>
+              {saved ? '✓ נשמר!' : 'שמור'}
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+};
+
 // ─── MAIN APP ─────────────────────────────────────────
 const App = () => {
   const [isDarkMode, setIsDarkMode] = useState(() => typeof window!=='undefined' && localStorage.getItem('theme')==='dark');
+  const [apiKey, setApiKey] = useState(() => typeof window!=='undefined' ? (localStorage.getItem('geminiApiKey')||'') : '');
+  const [settingsOpen, setSettingsOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
@@ -1934,6 +2047,7 @@ const App = () => {
 
   return (
     <div className={`flex min-h-screen font-sans transition-colors duration-300 ${isDarkMode?'bg-slate-950 text-slate-100':'bg-slate-50 text-slate-800'}`} dir="rtl">
+      <SettingsModal isOpen={settingsOpen} onClose={()=>setSettingsOpen(false)} apiKey={apiKey} onSave={setApiKey} isDarkMode={isDarkMode}/>
       <AIModal isOpen={aiModalOpen} onClose={()=>setAiModalOpen(false)} loading={aiLoading} report={aiReport} isDarkMode={isDarkMode}/>
       <ClearModal isOpen={clearModalOpen} onClose={()=>setClearModalOpen(false)} onConfirm={handleClearData} type={activeTab} isDarkMode={isDarkMode}/>
 
@@ -2035,6 +2149,13 @@ const App = () => {
                 </div>
               )}
             </div>
+            {/* Settings button — shows dot if no API key */}
+            <button onClick={()=>setSettingsOpen(true)}
+              className={`relative p-2.5 rounded-xl transition-all ${isDarkMode?'bg-slate-800 text-slate-300 hover:bg-slate-700':'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
+              title="הגדרות">
+              <Settings className="w-4 h-4"/>
+              {!apiKey && <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-amber-400 rounded-full" title="מפתח AI לא מוגדר"/>}
+            </button>
             <button onClick={generateAI} className="hidden sm:flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-xl shadow-lg shadow-blue-500/20 font-medium text-sm transition-all hover:-translate-y-0.5 active:scale-95">
               <Sparkles className="w-4 h-4 text-yellow-200"/>
               <span className="hidden sm:inline">תובנות AI</span>
