@@ -627,21 +627,29 @@ const parsePriorityOrders = (rows) => {
   const norm = s => (s||'').toString().trim();
   const headers = Object.keys(rows[0]).map(norm);
 
-  // Detect columns by header name
+  // Detect columns — exact match first, then partial (avoids "ת. הזמנה" matching "הזמנה")
   const findCol = (...variants) => {
     for (const v of variants) {
-      const idx = headers.findIndex(h => h.includes(v));
+      const idx = headers.findIndex(h => h === v);          // exact
+      if (idx !== -1) return idx;
+    }
+    for (const v of variants) {
+      const idx = headers.findIndex(h => h.startsWith(v));  // starts-with
+      if (idx !== -1) return idx;
+    }
+    for (const v of variants) {
+      const idx = headers.findIndex(h => h.includes(v));    // contains
       if (idx !== -1) return idx;
     }
     return -1;
   };
 
-  const colPO    = findCol('הזמנה');
-  const colSKU   = findCol('מק"ט', "מק'ט", 'מקט');
-  const colName  = findCol('תאור מוצר', 'תיאור מוצר');
-  const colQty   = findCol('יתרה לאספקה');   // remaining qty — not ordered qty!
+  const colPO    = findCol('הזמנה', 'מספר הזמנה', 'PO', 'po number');
+  const colSKU   = findCol('מק"ט', "מק'ט", 'מקט', 'sku', 'item number');
+  const colName  = findCol('תאור מוצר', 'תיאור מוצר', 'שם מוצר');
+  const colQty   = findCol('יתרה לאספקה', 'יתרה');
   const colVal   = findCol('שווי יתרה', 'שווי');
-  const colDate  = findCol('ת. הזמנה', 'תאריך הזמנה');
+  const colDate  = findCol('ת. הזמנה', 'תאריך הזמנה', 'ת.הזמנה');
   const colSup   = findCol('שם ספק', 'ספק', 'שם יצרן');
 
   // Convert Excel serial date → dd/mm/yyyy
@@ -767,6 +775,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
   const [monthsToStock, setMonthsToStock] = useState(2);
   const [leadTime, setLeadTime] = useState(1);
   const [abcFilter, setAbcFilter] = useState('all');
+  const [riskFilter, setRiskFilter] = useState('all'); // 'all'|'critical'|'low'|'ok'|'unknown'
   const [searchTerm, setSearchTerm] = useState('');
   const [sortConfig, setSortConfig] = useState({ key:'totalRev', direction:'desc' });
   const [editingStock, setEditingStock] = useState(null);
@@ -1079,12 +1088,28 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
   const filtered = useMemo(() => {
     let data = products;
     if (abcFilter!=='all') data=data.filter(p=>p.abc===abcFilter);
+    if (riskFilter!=='all') data=data.filter(p=>p.risk===riskFilter);
     if (searchTerm) data=data.filter(p=>p.name.toLowerCase().includes(searchTerm.toLowerCase())||p.sku.toLowerCase().includes(searchTerm.toLowerCase()));
     return data.sort((a,b)=>{
       let va=a[sortConfig.key]??-Infinity, vb=b[sortConfig.key]??-Infinity;
       return sortConfig.direction==='asc'?(va<vb?-1:va>vb?1:0):(va>vb?-1:va<vb?1:0);
     });
-  }, [products, abcFilter, searchTerm, sortConfig]);
+  }, [products, abcFilter, riskFilter, searchTerm, sortConfig]);
+
+  // ── Data completeness stats ────────────────────────────────
+  const completeness = useMemo(() => {
+    const total     = products.length;
+    const withStock = products.filter(p => p.currentStock !== null).length;
+    const withCost  = products.filter(p => p.unitCost !== null && p.unitCost > 0).length;
+    const withOrders= products.filter(p => p.incomingQty > 0).length;
+    const withAll   = products.filter(p => p.currentStock !== null && p.unitCost !== null && p.unitCost > 0).length;
+    const noData    = products.filter(p => p.currentStock === null && (p.unitCost === null || p.unitCost === 0)).length;
+    return { total, withStock, withCost, withOrders, withAll, noData,
+      stockPct:  total ? Math.round(withStock/total*100) : 0,
+      costPct:   total ? Math.round(withCost/total*100)  : 0,
+      allPct:    total ? Math.round(withAll/total*100)   : 0,
+    };
+  }, [products]);
 
   // Dead stock analysis — products not sold in deadStockDays
   const deadStockData = useMemo(() => {
@@ -1428,6 +1453,59 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
               ))}
             </div>
           </div>
+        </div>
+      )}
+
+      {/* Data Completeness Panel */}
+      {products.length > 0 && (
+        <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+          <div className={`px-5 py-3 border-b flex items-center justify-between ${isDarkMode?'border-slate-700 bg-slate-900/40':'border-slate-100 bg-slate-50'}`}>
+            <div className="flex items-center gap-2">
+              <Activity className={`w-4 h-4 ${isDarkMode?'text-slate-400':'text-slate-500'}`}/>
+              <span className={`text-sm font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>שלמות נתונים</span>
+              <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>— {completeness.total} פריטים סה"כ</span>
+            </div>
+            {completeness.noData > 0 && (
+              <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${isDarkMode?'bg-amber-500/15 text-amber-400':'bg-amber-50 text-amber-700'}`}>
+                ⚠ {completeness.noData} פריטים ללא נתונים
+              </span>
+            )}
+          </div>
+          <div className="px-5 py-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {[
+              { label:'מלאי נוכחי', count:completeness.withStock, total:completeness.total, pct:completeness.stockPct, tip:'הזן מלאי בטבלה או יבא מ-Priority', color:'blue' },
+              { label:'מחיר קניה',  count:completeness.withCost,  total:completeness.total, pct:completeness.costPct,  tip:'הזן דרך קובץ LOGPART-2 מ-Priority', color:'emerald' },
+              { label:'הכיסוי מלא', count:completeness.withAll,   total:completeness.total, pct:completeness.allPct,   tip:'מלאי + מחיר — נדרש לחישוב מלא', color:'violet' },
+            ].map(({ label, count, total, pct, tip, color }) => (
+              <div key={label} title={tip} className="space-y-1.5 cursor-help">
+                <div className="flex justify-between items-center">
+                  <span className={`text-xs font-medium ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{label}</span>
+                  <span className={`text-xs font-bold ${
+                    pct >= 80 ? (isDarkMode?'text-emerald-400':'text-emerald-600') :
+                    pct >= 50 ? (isDarkMode?'text-amber-400':'text-amber-600') :
+                                (isDarkMode?'text-red-400':'text-red-600')}`}>
+                    {count}/{total} ({pct}%)
+                  </span>
+                </div>
+                <div className={`h-2 rounded-full overflow-hidden ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
+                  <div className="h-full rounded-full transition-all duration-700"
+                    style={{
+                      width: pct+'%',
+                      background: pct >= 80
+                        ? (color==='blue'?'#3b82f6':color==='emerald'?'#10b981':'#8b5cf6')
+                        : pct >= 50 ? '#f59e0b' : '#ef4444'
+                    }}/>
+                </div>
+                {pct < 100 && <p className={`text-[10px] ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{tip}</p>}
+              </div>
+            ))}
+          </div>
+          {completeness.withOrders > 0 && (
+            <div className={`px-5 py-2.5 border-t text-xs flex items-center gap-2 ${isDarkMode?'border-slate-700 bg-blue-500/5 text-blue-400':'border-slate-100 bg-blue-50 text-blue-700'}`}>
+              <Package className="w-3.5 h-3.5 shrink-0"/>
+              {completeness.withOrders} מוצרים עם הזמנות פתוחות בדרך — מחושבות אוטומטית בכיסוי
+            </div>
+          )}
         </div>
       )}
 
@@ -2186,10 +2264,34 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
             <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}>
               <ClipboardList className="w-4 h-4 text-slate-400"/> טבלת רכש
               <span className={`text-xs font-normal px-2 py-0.5 rounded-full ${isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500'}`}>{filtered.length}</span>
+              {(riskFilter!=='all'||abcFilter!=='all') && (
+                <button onClick={()=>{setRiskFilter('all');setAbcFilter('all');}}
+                  className={`text-xs px-2 py-0.5 rounded-full flex items-center gap-1 ${isDarkMode?'bg-blue-500/20 text-blue-300 hover:bg-blue-500/30':'bg-blue-50 text-blue-600 hover:bg-blue-100'}`}>
+                  <X className="w-3 h-3"/> נקה פילטרים
+                </button>
+              )}
             </h3>
             <div className={`flex rounded-lg p-1 text-xs ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
               {[['all','הכל'],['A','A'],['B','B'],['C','C']].map(([k,l])=>(
                 <button key={k} onClick={()=>setAbcFilter(k)} className={`px-2.5 py-1 rounded-md transition-all font-medium ${abcFilter===k?(isDarkMode?'bg-slate-600 text-white shadow':'bg-white shadow text-slate-800'):(isDarkMode?'text-slate-400':'text-slate-500')}`}>{l}</button>
+              ))}
+            </div>
+            {/* Risk filter */}
+            <div className={`flex rounded-lg p-1 text-xs ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
+              {[
+                ['all',     'הכל',    null],
+                ['critical','⛔ קריטי', 'text-red-500'],
+                ['low',     '⚠ נמוך',  'text-amber-500'],
+                ['ok',      '✅ תקין', 'text-emerald-500'],
+                ['unknown', '— לא ידוע',null],
+              ].map(([k,l,cls])=>(
+                <button key={k} onClick={()=>setRiskFilter(k)}
+                  className={`px-2.5 py-1 rounded-md transition-all font-medium whitespace-nowrap ${riskFilter===k?(isDarkMode?'bg-slate-600 text-white shadow':'bg-white shadow text-slate-800'):(cls?cls:(isDarkMode?'text-slate-400':'text-slate-500'))}`}>
+                  {l}
+                  {k!=='all' && riskFilter==='all' && (
+                    <span className={`mr-1 text-[10px] opacity-60`}>{k==='critical'?riskCounts.critical:k==='low'?riskCounts.low:k==='ok'?riskCounts.ok:riskCounts.unknown}</span>
+                  )}
+                </button>
               ))}
             </div>
             <button onClick={()=>setShowLegend(p=>!p)}
