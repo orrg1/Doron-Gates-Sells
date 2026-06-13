@@ -873,12 +873,9 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
         +'== A לרכש ==\n'+topALines+'\n\n'
         +'סה"כ להזמנה: '+totalOrder.toLocaleString()+' יח\' | עלות: ₪'+Math.round(totalCost).toLocaleString()+'\n\n'
         +'תן: 1) עדיפויות 2) אזהרות 3) המלצה לשיפור.';
-      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key='+apiKey,
-        { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({contents:[{parts:[{text:prompt}]}]}) });
-      if (!res.ok) { const e=await res.json().catch(()=>({})); setAiInsightText('שגיאת API: '+(e?.error?.message||res.status)); setAiInsightLoading(false); return; }
-      const d = await res.json();
-      setAiInsightText(d.candidates?.[0]?.content?.parts?.[0]?.text || 'לא קיבלתי תשובה.');
-    } catch(e) { setAiInsightText('שגיאה: '+e.message); }
+      const text = await callGemini(prompt, apiKey);
+      setAiInsightText(text);
+    } catch(e) { setAiInsightText('❌ ' + e.message); }
     finally { setAiInsightLoading(false); }
   };
 
@@ -2564,6 +2561,54 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
   );
 };
 
+
+// ─── SHARED GEMINI HELPER ──────────────────────────────────────────
+// Tries models in order — if one fails moves to the next automatically
+const GEMINI_MODELS = [
+  'gemini-2.5-flash-preview-05-20',
+  'gemini-2.5-flash',
+  'gemini-2.5-flash-preview',
+  'gemini-2.5-flash-preview-04-17',
+  'gemini-2.0-flash',
+  'gemini-1.5-flash',
+  'gemini-1.5-flash-latest',
+];
+
+const callGemini = async (prompt, apiKey) => {
+  if (!apiKey) throw new Error('לא הוגדר API Key. פתח ⚙️ הגדרות והכנס מפתח Gemini.');
+  let lastErr = '';
+  // Try both API versions
+  const apiVersions = ['v1beta', 'v1'];
+  for (const model of GEMINI_MODELS) {
+    for (const ver of apiVersions) {
+      try {
+        const res = await fetch(
+          `https://generativelanguage.googleapis.com/${ver}/models/${model}:generateContent?key=${apiKey}`,
+          { method:'POST', headers:{'Content-Type':'application/json'},
+            body: JSON.stringify({ contents:[{ parts:[{ text:prompt }] }] }) }
+        );
+        const d = await res.json();
+        if (!res.ok) {
+          const msg = d?.error?.message || `HTTP ${res.status}`;
+          lastErr = `[${ver}/${model}] ${msg}`;
+          // Bad key — stop immediately
+          if (res.status === 400 || res.status === 403) throw new Error(lastErr);
+          continue;
+        }
+        const text = d.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) return text;
+        lastErr = `[${ver}/${model}] תשובה ריקה`;
+      } catch(e) {
+        if (e.message.startsWith('[')) { lastErr = e.message; }
+        else lastErr = `[${ver}/${model}] ${e.message}`;
+        // Re-throw on auth errors
+        if (lastErr.includes('403') || lastErr.includes('400')) throw new Error(lastErr);
+      }
+    }
+  }
+  throw new Error(lastErr || 'כל המודלים נכשלו');
+};
+
 // ─── MAIN APP ─────────────────────────────────────────
 const App = () => {
   const [isDarkMode, setIsDarkMode] = useState(() => typeof window!=='undefined' && localStorage.getItem('theme')==='dark');
@@ -2824,60 +2869,15 @@ const App = () => {
 
   const generateAI = async () => {
     setAiModalOpen(true); setAiLoading(true); setAiReport('');
-
-    // Check API key first
-    if (!apiKey) {
-      setAiReport('⚠️ לא הוגדר API Key.\n\nלחץ על כפתור ⚙️ ההגדרות בכותרת → הכנס מפתח Gemini.');
-      setAiLoading(false); return;
-    }
-
-    let prompt = activeTab==='summary'
+    const prompt = activeTab==='summary'
       ? `נתח: הכנסות ${formatCurrency(summaryData?.totalIncome)}, הוצאות ${formatCurrency(summaryData?.totalExpenses)}, רווח ${formatCurrency(summaryData?.totalProfit)} (${summaryData?.profitMargin.toFixed(1)}%). תן 3 תובנות קצרות בעברית.`
       : `נתח ${activeTab==='sales'?'מכירות':'ספקים'}: סה"כ ${formatCurrency(stats?.totalAmount)}, מגמה: ${chartData?.monthly.map(m=>`${m.name}:${formatCurrency(m.total||m.sales)}`).join(', ')}. תן תובנות קצרות בעברית.`;
-
-    // Try models in order until one works
-    const models = [
-      'gemini-2.5-flash-preview-05-20',  // newest
-      'gemini-2.5-flash',
-      'gemini-2.5-pro',
-      'gemini-2.0-flash',
-      'gemini-1.5-flash',
-      'gemini-1.5-flash-latest',
-      'gemini-pro',
-    ];
-    let lastError = '';
-
-    for (const model of models) {
-      try {
-        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
-        const res = await fetch(url, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
-        });
-        const d = await res.json();
-
-        if (!res.ok) {
-          const errMsg = d?.error?.message || `שגיאה ${res.status}`;
-          lastError = `[${model}] ${errMsg}`;
-          if (res.status === 400 || res.status === 403) break; // bad key — no point retrying
-          continue; // model not found — try next
-        }
-
-        const text = d.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (text) { setAiReport(text); setAiLoading(false); return; }
-        lastError = `[${model}] תשובה ריקה`;
-      } catch(e) {
-        lastError = `[${model}] ${e.message}`;
-      }
-    }
-
-    // All models failed
-    setAiReport(
-      `❌ שגיאה בחיבור ל-Gemini\n\n${lastError}\n\n` +
-      `בדוק:\n• האם המפתח תקין? (⚙️ הגדרות)\n• האם יש גישה לאינטרנט?\n• כתובת ה-URL: generativelanguage.googleapis.com`
-    );
-    setAiLoading(false);
+    try {
+      const text = await callGemini(prompt, apiKey);
+      setAiReport(text);
+    } catch(e) {
+      setAiReport('❌ ' + e.message + '\n\nבדוק שהמפתח תקין (⚙️ הגדרות) ושיש גישה לאינטרנט.');
+    } finally { setAiLoading(false); }
   };
 
   const sendChat = useCallback(async (text) => {
@@ -2934,12 +2934,9 @@ const App = () => {
         setChatThinking(false); return;
       }
       const prompt = dataCtx + 'שאלת המשתמש: ' + text + '\nענה בעברית בצורה ברורה וקצרה. אם הנתונים רלוונטיים לשאלה — השתמש בהם.';
-      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key='+apiKey, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({contents:[{parts:[{text:prompt}]}]}) });
-      if (!res.ok) { const err=await res.json().catch(()=>({})); setChatMessages(p=>[...p,{role:'assistant',content:'שגיאת API ('+res.status+'): '+(err?.error?.message||'בדוק את ה-API Key')}]); setChatThinking(false); return; }
-      const d = await res.json();
-      const reply = d.candidates?.[0]?.content?.parts?.[0]?.text;
-      setChatMessages(p=>[...p,{role:'assistant',content:reply||'לא קיבלתי תשובה.'}]);
-    } catch(e) { setChatMessages(p=>[...p,{role:'assistant',content:'שגיאה: '+e.message}]); } finally { setChatThinking(false); }
+      const reply = await callGemini(prompt, apiKey);
+      setChatMessages(p=>[...p,{role:'assistant',content:reply}]);
+    } catch(e) { setChatMessages(p=>[...p,{role:'assistant',content:'❌ '+e.message}]); } finally { setChatThinking(false); }
   }, [salesData, suppliersData]);
 
 
