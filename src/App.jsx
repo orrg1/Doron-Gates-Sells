@@ -620,6 +620,69 @@ const SortIcon = ({ colKey, sortConfig }) => {
   return sortConfig.direction === 'asc' ? <ArrowDown className="w-3 h-3 inline ml-1 text-blue-500 rotate-180"/> : <ArrowDown className="w-3 h-3 inline ml-1 text-blue-500"/>;
 };
 
+
+// ─── PRIORITY OPEN ORDERS PARSER ──────────────────────────────────
+const parsePriorityOrders = (rows) => {
+  if (!rows.length) return [];
+  const norm = s => (s||'').toString().trim();
+  const headers = Object.keys(rows[0]).map(norm);
+
+  // Detect columns by header name
+  const findCol = (...variants) => {
+    for (const v of variants) {
+      const idx = headers.findIndex(h => h.includes(v));
+      if (idx !== -1) return idx;
+    }
+    return -1;
+  };
+
+  const colPO    = findCol('הזמנה');
+  const colSKU   = findCol('מק"ט', "מק'ט", 'מקט');
+  const colName  = findCol('תאור מוצר', 'תיאור מוצר');
+  const colQty   = findCol('יתרה לאספקה');   // remaining qty — not ordered qty!
+  const colVal   = findCol('שווי יתרה', 'שווי');
+  const colDate  = findCol('ת. הזמנה', 'תאריך הזמנה');
+  const colSup   = findCol('שם ספק', 'ספק', 'שם יצרן');
+
+  // Convert Excel serial date → dd/mm/yyyy
+  const excelToDate = (serial) => {
+    const n = parseFloat(serial);
+    if (isNaN(n) || n < 30000 || n > 70000) return serial?.toString() || '';
+    const dt = new Date((n - 25569) * 86400 * 1000);
+    return dt.toLocaleDateString('he-IL', { day:'2-digit', month:'2-digit', year:'numeric' });
+  };
+
+  const result = [];
+  rows.forEach(row => {
+    const vals = Object.values(row).map(v => norm(String(v)));
+    const sku  = colSKU  !== -1 ? vals[colSKU]  : '';
+    const name = colName !== -1 ? vals[colName] : '';
+    if (!sku && !name) return;
+
+    const qtyRaw = colQty !== -1 ? parseFloat(vals[colQty]) : NaN;
+    const qty = isNaN(qtyRaw) || qtyRaw <= 0 ? 0 : qtyRaw;
+    if (qty <= 0) return; // skip rows with no remaining qty
+
+    const valRaw = colVal !== -1 ? parseFloat(vals[colVal]) : NaN;
+
+    result.push({
+      id:          Date.now().toString(36) + Math.random().toString(36).slice(2),
+      poNumber:    colPO   !== -1 ? vals[colPO]   : '',
+      productKey:  sku || name,
+      productName: name || sku,
+      supplier:    colSup  !== -1 ? vals[colSup]  : '',
+      orderedQty:  qty,
+      orderDate:   colDate !== -1 ? excelToDate(vals[colDate]) : '',
+      expectedDate:'',
+      status:      'ordered',
+      notes:       '',
+      value:       isNaN(valRaw) ? 0 : valRaw,
+      fromPriority: true,
+    });
+  });
+  return result;
+};
+
 // ─── INVENTORY FILE PARSER ─────────────────────────────
 const parseInventoryFile = (rows) => {
   // Column name variants — Priority "יתרות מלאי" uses: מק'ט (B), תאור מוצר (C), יתרה (J)
@@ -712,8 +775,18 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
   const [invFileName, setInvFileName] = useState(() => localStorage.getItem('inventoryFileName')||'');
   const [importStats, setImportStats] = useState(null);
   const [showBanner, setShowBanner] = useState(false);
+  const [importBanner, setImportBanner] = useState(null); // {count, skipped}
+  const [ordersLoading, setOrdersLoading] = useState(false);
   const [showLegend, setShowLegend] = useState(false);
   const [deadStockDays, setDeadStockDays] = useState(90); // threshold in days
+  const [whatIfMultiplier, setWhatIfMultiplier] = useState(1.2); // +20% default
+  const [whatIfActive, setWhatIfActive] = useState(false);
+  const [openOrders, setOpenOrders] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('openOrders')||'[]'); } catch { return []; }
+  });
+  const [showAddOrder, setShowAddOrder] = useState(false);
+  const [editOrderId, setEditOrderId] = useState(null);
+  const [orderForm, setOrderForm] = useState({ productKey:'', productName:'', supplier:'', orderedQty:'', orderDate:'', expectedDate:'', status:'ordered', poNumber:'', notes:'' });
   const [aiInsightOpen, setAiInsightOpen] = useState(false);
   const [aiInsightLoading, setAiInsightLoading] = useState(false);
   const [aiInsightText, setAiInsightText] = useState('');
@@ -725,6 +798,49 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
     next.has(name) ? next.delete(name) : next.add(name);
     return next;
   });
+
+  // ── Import open orders from Priority Excel ──────────────────────
+  const handlePriorityOrdersUpload = async (e) => {
+    const file = e.target.files?.[0]; if (!file) return;
+    setOrdersLoading(true);
+    const process = (rows) => {
+      const parsed = parsePriorityOrders(rows);
+      if (!parsed.length) { setOrdersLoading(false); return; }
+      // Remove existing fromPriority orders and replace with new import
+      const manual = openOrders.filter(o => !o.fromPriority);
+      const merged = [...manual, ...parsed];
+      saveOrders(merged);
+      setImportBanner({ count: parsed.length, skipped: rows.length - parsed.length });
+      setTimeout(() => setImportBanner(null), 6000);
+      setOrdersLoading(false);
+      setViewMode('orders');
+    };
+    if (file.name.match(/\.xlsx?$/) && window.XLSX) {
+      const r = new FileReader();
+      r.onload = ev => {
+        try {
+          const wb = window.XLSX.read(ev.target.result, { type: 'binary' });
+          const rows = window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
+          process(rows);
+        } catch { setOrdersLoading(false); }
+      };
+      r.readAsBinaryString(file);
+    } else {
+      const r = new FileReader();
+      r.onload = ev => {
+        const lines = ev.target.result.split('\n').filter(l => l.trim());
+        if (!lines.length) { setOrdersLoading(false); return; }
+        const headers = parseCSVLine(lines[0]).map(c => c.replace(/^"|"$/g,'').trim());
+        const rows = lines.slice(1).map(line => {
+          const vals = parseCSVLine(line).map(c => c.replace(/^"|"$/g,'').trim());
+          const obj = {}; headers.forEach((h,i) => { obj[h] = vals[i]||''; }); return obj;
+        }).filter(r => Object.values(r).some(v => v));
+        process(rows);
+      };
+      r.readAsText(file);
+    }
+    e.target.value = '';
+  };
 
   const saveStock = (key, val) => {
     const n = parseFloat(val);
@@ -757,7 +873,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
         +'== A לרכש ==\n'+topALines+'\n\n'
         +'סה"כ להזמנה: '+totalOrder.toLocaleString()+' יח\' | עלות: ₪'+Math.round(totalCost).toLocaleString()+'\n\n'
         +'תן: 1) עדיפויות 2) אזהרות 3) המלצה לשיפור.';
-      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key='+apiKey,
+      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key='+apiKey,
         { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({contents:[{parts:[{text:prompt}]}]}) });
       if (!res.ok) { const e=await res.json().catch(()=>({})); setAiInsightText('שגיאת API: '+(e?.error?.message||res.status)); setAiInsightLoading(false); return; }
       const d = await res.json();
@@ -765,6 +881,38 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
     } catch(e) { setAiInsightText('שגיאה: '+e.message); }
     finally { setAiInsightLoading(false); }
   };
+
+  const saveOrders = (orders) => {
+    setOpenOrders(orders);
+    localStorage.setItem('openOrders', JSON.stringify(orders));
+  };
+  const addOrder = () => {
+    if (!orderForm.productName || !orderForm.orderedQty) return;
+    const order = {
+      id: Date.now().toString(),
+      ...orderForm,
+      orderedQty: parseFloat(orderForm.orderedQty)||0,
+      productKey: orderForm.productKey || orderForm.productName,
+    };
+    saveOrders([...openOrders, order]);
+    setOrderForm({ productKey:'', productName:'', supplier:'', orderedQty:'', orderDate:'', expectedDate:'', status:'ordered', poNumber:'', notes:'' });
+    setShowAddOrder(false);
+  };
+  const updateOrder = (id, field, val) => {
+    saveOrders(openOrders.map(o => o.id===id ? {...o, [field]: field==='orderedQty'?parseFloat(val)||0:val} : o));
+  };
+  const deleteOrder = (id) => saveOrders(openOrders.filter(o=>o.id!==id));
+  const receiveOrder = (id) => saveOrders(openOrders.filter(o=>o.id!==id)); // remove when received
+
+  // Map incoming quantities by product key for use in calculations
+  const incomingMap = useMemo(() => {
+    const map = {};
+    openOrders.filter(o=>o.status!=='received').forEach(o => {
+      const k = o.productKey||o.productName;
+      map[k] = (map[k]||0) + (o.orderedQty||0);
+    });
+    return map;
+  }, [openOrders]);
 
   const handleInvUpload = async (e) => {
     const file = e.target.files?.[0]; if (!file) return;
@@ -913,9 +1061,13 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       const lcTrend  = lcPrev>0 ? (lcRecent-lcPrev)/lcPrev*100 : 0;
       const lifecycle = lcTrend > 20 ? 'growing' : lcTrend > -20 ? 'stable' : lcTrend > -50 ? 'declining' : 'dying';
 
+      // ── Incoming orders (already on the way) ────────────────────
+      const incomingQty = incomingMap[key] ?? incomingMap[p.sku] ?? incomingMap[p.name] ?? 0;
+      const effectiveStock = (currentStock??0) + incomingQty;
+      const effectiveCoverDays = avgDaily > 0 ? Math.round(effectiveStock / avgDaily) : null;
       // ── Suggested order: includes safety stock ───────────────────
       const targetStock  = minStock ?? (monthsToStock * avgMonthly);
-      const baseOrder = (monthsToStock+leadTime)*avgMonthly + safetyStock - (currentStock??0);
+      const baseOrder = (monthsToStock+leadTime)*avgMonthly + safetyStock - effectiveStock;
       const suggestedOrder = Math.max(0, Math.ceil(baseOrder));
       const orderCost = (suggestedOrder>0&&unitCost)?suggestedOrder*unitCost:null;
       const risk = currentStock!==null
@@ -923,9 +1075,9 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
           : coverageMonths < leadTime ? 'critical'
           : (minStock ? currentStock < minStock : coverageMonths < monthsToStock) ? 'low' : 'ok')
         : 'unknown';
-      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, avgDaily, sparkline, trend, forecastNext, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, coverageMonths, coverageDays, suggestedOrder, orderCost, risk };
+      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, avgDaily, sparkline, trend, forecastNext, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, orderCost, risk };
     });
-  }, [salesData, stockMap, costMap, minStockMap, supplierMap, monthsToStock, leadTime]);
+  }, [salesData, stockMap, costMap, minStockMap, supplierMap, monthsToStock, leadTime, incomingMap]);
 
   const filtered = useMemo(() => {
     let data = products;
@@ -984,6 +1136,33 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
 
   const deadStockValue = useMemo(() =>
     deadStockData.reduce((a,p)=>a+(p.stockValue||0),0), [deadStockData]);
+
+  // ── Procurement schedule: when to order each product ──────────
+  const scheduleData = useMemo(() => {
+    const today = new Date();
+    const leadDays = leadTime * 30;
+    return products
+      .filter(p => p.currentStock !== null && p.avgMonthly > 0 && p.suggestedOrder > 0)
+      .map(p => {
+        const daysUntilOrder = (p.coverageDays||0) - leadDays;
+        const orderByDate = new Date(today.getTime() + daysUntilOrder*24*60*60*1000);
+        const urgency = daysUntilOrder <= 0 ? 'critical' : daysUntilOrder <= 7 ? 'urgent' : daysUntilOrder <= 14 ? 'soon' : daysUntilOrder <= 30 ? 'planned' : 'later';
+        return { ...p, daysUntilOrder: Math.round(daysUntilOrder), orderByDate, urgency };
+      })
+      .sort((a,b) => a.daysUntilOrder - b.daysUntilOrder);
+  }, [products, leadTime]);
+
+  // ── What-If: recalculate with demand multiplier ─────────────
+  const whatIfProducts = useMemo(() => {
+    if (!whatIfActive) return [];
+    return products.map(p => {
+      const adjAvg = p.avgMonthly * whatIfMultiplier;
+      const adjSS  = Math.ceil(1.65 * (p.stdDev||0) * Math.sqrt(Math.max(leadTime,0.5)) * Math.sqrt(whatIfMultiplier));
+      const adjOrder = Math.max(0, Math.ceil((monthsToStock+leadTime)*adjAvg + adjSS - (p.currentStock??0)));
+      const adjCovDays = (p.currentStock!==null && adjAvg>0) ? Math.round(p.currentStock/(adjAvg/30)) : null;
+      return { ...p, adjAvg, adjOrder, adjCovDays, orderDelta: adjOrder - p.suggestedOrder };
+    }).filter(p => p.adjOrder > 0 || p.suggestedOrder > 0);
+  }, [products, whatIfMultiplier, whatIfActive, monthsToStock, leadTime]);
 
   const reqSort = (key) => setSortConfig(p=>({key, direction:p.key===key&&p.direction==='desc'?'asc':'desc'}));
   const abcCounts = useMemo(()=>({ A:products.filter(p=>p.abc==='A').length, B:products.filter(p=>p.abc==='B').length, C:products.filter(p=>p.abc==='C').length }), [products]);
@@ -1266,7 +1445,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       {/* View toggle */}
       <div className="flex items-center gap-3">
         <div className={`flex rounded-xl p-1 border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
-          {[['products', ClipboardList, 'לפי מוצר'], ['suppliers', Truck, 'לפי ספק'], ['dead', Trash2, 'פריטים מתים']].map(([mode, Icon, label]) => (
+          {[['products', ClipboardList, 'לפי מוצר'], ['suppliers', Truck, 'לפי ספק'], ['orders', ShoppingCart, 'הזמנות פתוחות'], ['schedule', Calendar, 'לוח זמנים'], ['whatif', Activity, 'תרחיש'], ['dead', Trash2, 'פריטים מתים']].map(([mode, Icon, label]) => (
             <button key={mode} onClick={() => setViewMode(mode)}
               className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${viewMode===mode
                 ? (isDarkMode?'bg-slate-700 text-white shadow-sm':'bg-slate-900 text-white shadow-sm')
@@ -1274,6 +1453,12 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
               <Icon className="w-4 h-4"/>{label}
               {mode==='suppliers' && supplierGroups.length>0 && (
                 <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='suppliers'?'bg-white/20 text-white':'bg-blue-100 text-blue-700'}`}>{supplierGroups.length}</span>
+              )}
+              {mode==='orders' && openOrders.length>0 && (
+                <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='orders'?'bg-blue-300/30 text-blue-100':'bg-blue-100 text-blue-700'}`}>{openOrders.length}</span>
+              )}
+              {mode==='schedule' && scheduleData.filter(p=>p.urgency==='critical'||p.urgency==='urgent').length>0 && (
+                <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='schedule'?'bg-red-300/30 text-red-200':'bg-red-100 text-red-700'}`}>{scheduleData.filter(p=>p.urgency==='critical'||p.urgency==='urgent').length}</span>
               )}
               {mode==='dead' && deadStockData.length>0 && (
                 <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='dead'?'bg-red-400/30 text-red-200':'bg-red-100 text-red-700'}`}>{deadStockData.length}</span>
@@ -1462,6 +1647,400 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       )}
 
       {/* Product table — shown only in products mode */}
+      {/* ══ OPEN ORDERS VIEW ══ */}
+      {viewMode==='orders' && (
+        <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+
+          {/* Header + Add button */}
+          <div className={`p-5 rounded-2xl border flex items-center justify-between gap-3 flex-wrap ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+            <div className="flex items-center gap-3">
+              <div className={`p-2.5 rounded-xl ${isDarkMode?'bg-blue-500/15':'bg-blue-50'}`}><ShoppingCart className="w-5 h-5 text-blue-500"/></div>
+              <div>
+                <p className={`font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>הזמנות רכש פתוחות</p>
+                <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>מה שהוזמן ועוד לא הגיע — מחושב אוטומטית בהמלצות הרכש</p>
+              </div>
+            </div>
+            <div className="flex items-center gap-2 flex-wrap">
+              {/* Import from Priority */}
+              <label className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border cursor-pointer transition-colors ${isDarkMode?'border-emerald-700 bg-emerald-900/20 text-emerald-400 hover:bg-emerald-900/40':'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'}`}>
+                {ordersLoading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Upload className="w-4 h-4"/>}
+                ייבוא מ-Priority
+                <input type="file" accept=".xlsx,.xls,.csv" onChange={handlePriorityOrdersUpload} className="hidden" disabled={ordersLoading}/>
+              </label>
+              <button onClick={()=>{setShowAddOrder(true);setEditOrderId(null);setOrderForm({productKey:'',productName:'',supplier:'',orderedQty:'',orderDate:new Date().toISOString().slice(0,10),expectedDate:'',status:'ordered',poNumber:'',notes:''}); }}
+                className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-medium transition-colors shadow-lg shadow-blue-500/20">
+                <Check className="w-4 h-4"/> + הוסף ידנית
+              </button>
+            </div>
+          </div>
+
+          {/* Priority import banner */}
+          {importBanner && (
+            <div className={`flex items-center gap-3 px-5 py-3.5 rounded-2xl border animate-in fade-in duration-200 ${isDarkMode?'bg-emerald-500/10 border-emerald-500/20 text-emerald-300':'bg-emerald-50 border-emerald-200 text-emerald-800'}`}>
+              <Check className="w-5 h-5 shrink-0"/>
+              <div className="flex-1">
+                <span className="font-medium text-sm">יובאו {importBanner.count} שורות הזמנה מ-Priority</span>
+                {importBanner.skipped > 0 && <span className={`text-xs mr-2 ${isDarkMode?'text-emerald-500':'text-emerald-600'}`}>({importBanner.skipped} שורות דולגו — יתרה 0)</span>}
+              </div>
+              <span className={`text-xs ${isDarkMode?'text-emerald-500':'text-emerald-600'}`}>הזמנות קודמות מ-Priority הוחלפו</span>
+              <button onClick={()=>setImportBanner(null)}><X className="w-4 h-4 opacity-50 hover:opacity-100"/></button>
+            </div>
+          )}
+
+          {/* Add / Edit form */}
+          {showAddOrder && (
+            <div className={`p-5 rounded-2xl border-2 border-blue-500/30 animate-in fade-in duration-200 ${isDarkMode?'bg-slate-800':'bg-blue-50/30'}`}>
+              <h3 className={`font-bold text-sm mb-4 ${isDarkMode?'text-white':'text-slate-800'}`}>{editOrderId ? 'עריכת הזמנה' : 'הזמנה חדשה'}</h3>
+              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
+                {[
+                  {field:'productName', label:'שם מוצר *', placeholder:'בחר מוצר...', type:'datalist', options: [...new Set(salesData.map(d=>d.description).filter(Boolean))].sort()},
+                  {field:'supplier', label:'ספק', placeholder:'שם ספק', type:'text'},
+                  {field:'orderedQty', label:'כמות שהוזמנה *', placeholder:'0', type:'number'},
+                  {field:'orderDate', label:'תאריך הזמנה', placeholder:'', type:'date'},
+                  {field:'expectedDate', label:'תאריך אספקה צפוי', placeholder:'', type:'date'},
+                  {field:'poNumber', label:'מספר הזמנה / PO', placeholder:'PO-001', type:'text'},
+                ].map(f => (
+                  <div key={f.field}>
+                    <label className={`block text-xs font-medium mb-1 ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{f.label}</label>
+                    {f.type==='datalist' ? (
+                      <div className="relative">
+                        <input list={`dl-${f.field}`} value={orderForm[f.field]} onChange={e=>setOrderForm(p=>({...p,[f.field]:e.target.value, productKey:e.target.value}))}
+                          placeholder={f.placeholder}
+                          style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#334155'}:{}}
+                          className={`w-full px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'border-slate-700 text-white placeholder-slate-500':'border-slate-200 bg-white'}`}/>
+                        <datalist id={`dl-${f.field}`}>{f.options.map(o=><option key={o} value={o}/>)}</datalist>
+                      </div>
+                    ) : (
+                      <input type={f.type} value={orderForm[f.field]} onChange={e=>setOrderForm(p=>({...p,[f.field]:e.target.value}))}
+                        placeholder={f.placeholder}
+                        style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#334155',colorScheme:'dark'}:{}}
+                        className={`w-full px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'border-slate-700 text-white placeholder-slate-500':'border-slate-200 bg-white'}`}/>
+                    )}
+                  </div>
+                ))}
+                <div>
+                  <label className={`block text-xs font-medium mb-1 ${isDarkMode?'text-slate-300':'text-slate-600'}`}>סטטוס</label>
+                  <select value={orderForm.status} onChange={e=>setOrderForm(p=>({...p,status:e.target.value}))}
+                    style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#334155'}:{}}
+                    className={`w-full px-3 py-2 rounded-xl border text-sm focus:outline-none ${isDarkMode?'border-slate-700':'border-slate-200 bg-white'}`}>
+                    <option value="ordered">הוזמן</option>
+                    <option value="in_transit">בדרך</option>
+                    <option value="delayed">מאחר</option>
+                  </select>
+                </div>
+              </div>
+              <div className="mt-3">
+                <label className={`block text-xs font-medium mb-1 ${isDarkMode?'text-slate-300':'text-slate-600'}`}>הערות</label>
+                <input type="text" value={orderForm.notes} onChange={e=>setOrderForm(p=>({...p,notes:e.target.value}))} placeholder="הערות נוספות..."
+                  style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#334155'}:{}}
+                  className={`w-full px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'border-slate-700 text-white placeholder-slate-500':'border-slate-200 bg-white'}`}/>
+              </div>
+              <div className="flex gap-3 mt-4">
+                <button onClick={()=>{setShowAddOrder(false);setEditOrderId(null);}} className={`px-4 py-2 rounded-xl text-sm font-medium border transition-colors ${isDarkMode?'border-slate-600 text-slate-300 hover:bg-slate-700':'border-slate-200 text-slate-600 hover:bg-slate-50'}`}>ביטול</button>
+                <button onClick={()=>{
+                  if(editOrderId){
+                    saveOrders(openOrders.map(o=>o.id===editOrderId?{...o,...orderForm,orderedQty:parseFloat(orderForm.orderedQty)||0,productKey:orderForm.productKey||orderForm.productName}:o));
+                    setEditOrderId(null); setShowAddOrder(false);
+                  } else { addOrder(); }
+                }} disabled={!orderForm.productName||!orderForm.orderedQty}
+                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-medium disabled:opacity-40 transition-colors shadow-md shadow-blue-500/20">
+                  {editOrderId?'עדכן':'הוסף הזמנה'}
+                </button>
+              </div>
+            </div>
+          )}
+
+          {/* Orders list */}
+          {openOrders.length === 0 ? (
+            <div className={`flex flex-col items-center py-16 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+              <ShoppingCart className={`w-12 h-12 mb-3 ${isDarkMode?'text-slate-600':'text-slate-300'}`}/>
+              <p className={`font-medium ${isDarkMode?'text-white':'text-slate-800'}`}>אין הזמנות פתוחות</p>
+              <p className={`text-sm mt-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>לחץ "+ הוסף הזמנה" להוספת הזמנה שבדרך</p>
+            </div>
+          ) : (
+            <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+              {/* Summary bar */}
+              <div className={`px-5 py-3 border-b flex flex-wrap items-center gap-4 ${isDarkMode?'border-slate-700 bg-slate-900/40':'border-slate-100 bg-slate-50'}`}>
+                <span className={`text-xs font-medium ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{openOrders.length} הזמנות פתוחות</span>
+                {[['ordered','הוזמן','#3b82f6'],['in_transit','בדרך','#10b981'],['delayed','מאחר','#ef4444']].map(([s,l,color])=>{
+                  const n = openOrders.filter(o=>o.status===s).length;
+                  return n>0 ? <span key={s} className="flex items-center gap-1 text-xs font-medium" style={{color}}><span className="w-2 h-2 rounded-full" style={{background:color}}/>{l}: {n}</span> : null;
+                })}
+                <div className="mr-auto flex items-center gap-4">
+                  <span className={`text-xs font-bold ${isDarkMode?'text-blue-300':'text-blue-700'}`}>
+                    {openOrders.reduce((a,o)=>a+(o.orderedQty||0),0).toLocaleString()} יח' בדרך
+                  </span>
+                  {openOrders.some(o=>o.value>0) && (
+                    <span className={`text-xs font-bold ${isDarkMode?'text-emerald-400':'text-emerald-700'}`}>
+                      ₪{Math.round(openOrders.reduce((a,o)=>a+(o.value||0),0)).toLocaleString()} שווי
+                    </span>
+                  )}
+                </div>
+              </div>
+              <div className="overflow-x-auto">
+                <table className={`w-full text-sm text-right min-w-[700px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                  <thead className={`text-[11px] font-semibold uppercase tracking-widest ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
+                    <tr>
+                      <th className="px-4 py-3 min-w-[160px]">מוצר</th>
+                      <th className="px-4 py-3">מק"ט</th>
+                      <th className="px-4 py-3">PO</th>
+                      <th className="px-4 py-3">יתרה לאספקה</th>
+                      <th className="px-4 py-3">שווי ₪</th>
+                      <th className="px-4 py-3">הוזמן</th>
+                      <th className="px-4 py-3">אספקה צפויה</th>
+                      <th className="px-4 py-3">סטטוס</th>
+                      <th className="px-4 py-3">פעולות</th>
+                    </tr>
+                  </thead>
+                  <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                    {openOrders.map(order => {
+                      const statusStyle = {
+                        ordered:    isDarkMode?'bg-blue-500/20 text-blue-300 border-blue-500/30':'bg-blue-50 text-blue-700 border-blue-200',
+                        in_transit: isDarkMode?'bg-emerald-500/20 text-emerald-300 border-emerald-500/30':'bg-emerald-50 text-emerald-700 border-emerald-200',
+                        delayed:    isDarkMode?'bg-red-500/20 text-red-300 border-red-500/30':'bg-red-50 text-red-700 border-red-200',
+                      }[order.status] || '';
+                      const statusLabel = {ordered:'הוזמן',in_transit:'בדרך',delayed:'מאחר'}[order.status]||order.status;
+                      const isOverdue = order.expectedDate && new Date(order.expectedDate) < new Date();
+                      return (
+                        <tr key={order.id} className={`transition-all ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'} ${isOverdue?(isDarkMode?'bg-red-900/10':'bg-red-50/40'):''}`}>
+                          <td className="px-4 py-3.5">
+                            <p className={`font-medium text-sm ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{order.productName}</p>
+                            {order.notes && <p className={`text-xs mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{order.notes}</p>}
+                          </td>
+                          <td className={`px-4 py-3.5 text-xs font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{order.productKey!==order.productName?order.productKey:'—'}</td>
+                          <td className={`px-4 py-3.5 text-xs font-mono font-bold ${isDarkMode?'text-blue-400':'text-blue-700'}`}>{order.poNumber||'—'}</td>
+                          <td className="px-4 py-3.5">
+                            <span className={`font-bold text-sm tabular-nums ${isDarkMode?'text-blue-300':'text-blue-700'}`}>{order.orderedQty.toLocaleString()}</span>
+                            <span className={`text-xs mr-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>יח'</span>
+                          </td>
+                          <td className={`px-4 py-3.5 text-sm tabular-nums ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>
+                            {order.value > 0 ? '₪'+Math.round(order.value).toLocaleString() : '—'}
+                          </td>
+                          <td className={`px-4 py-3.5 text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{order.orderDate||'—'}</td>
+                          <td className={`px-4 py-3.5 text-xs ${isOverdue?'text-red-500 font-bold':(isDarkMode?'text-slate-400':'text-slate-500')}`}>
+                            {order.expectedDate||'—'}{isOverdue?' ⚠️':''}
+                          </td>
+                          <td className="px-4 py-3.5">
+                            <select value={order.status} onChange={e=>updateOrder(order.id,'status',e.target.value)}
+                              style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#334155'}:{}}
+                              className={`text-xs px-2 py-1 rounded-lg border font-medium ${statusStyle}`}>
+                              <option value="ordered">הוזמן</option>
+                              <option value="in_transit">בדרך</option>
+                              <option value="delayed">מאחר</option>
+                            </select>
+                          </td>
+                          <td className="px-4 py-3.5">
+                            <div className="flex items-center gap-2">
+                              <button onClick={()=>{setEditOrderId(order.id);setOrderForm({...order,orderedQty:order.orderedQty.toString()});setShowAddOrder(true);}}
+                                className={`p-1.5 rounded-lg transition-colors ${isDarkMode?'text-slate-400 hover:bg-slate-700':'text-slate-400 hover:bg-slate-100'}`} title="ערוך">
+                                <Settings className="w-3.5 h-3.5"/>
+                              </button>
+                              <button onClick={()=>{ if(window.confirm('סמן כהתקבל וסגור הזמנה?')) receiveOrder(order.id); }}
+                                className={`p-1.5 rounded-lg transition-colors text-emerald-500 hover:bg-emerald-500/10`} title="סמן כהתקבל">
+                                <Check className="w-3.5 h-3.5"/>
+                              </button>
+                              <button onClick={()=>{ if(window.confirm('מחק הזמנה?')) deleteOrder(order.id); }}
+                                className={`p-1.5 rounded-lg transition-colors text-red-400 hover:bg-red-500/10`} title="מחק">
+                                <Trash2 className="w-3.5 h-3.5"/>
+                              </button>
+                            </div>
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div className={`px-5 py-3 border-t text-xs flex items-center gap-2 ${isDarkMode?'border-slate-700 text-slate-500':'border-slate-100 text-slate-400'}`}>
+                <Info className="w-3.5 h-3.5 shrink-0"/>
+                ✓ = סמן כהתקבל (מסיר מהרשימה) | כמויות בדרך מחושבות אוטומטית בהמלצות הרכש ובלוח הזמנים
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ══ SCHEDULE VIEW ══ */}
+      {viewMode==='schedule' && (
+        <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+          <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+            <div className="flex items-center gap-3 mb-1">
+              <div className={`p-2.5 rounded-xl ${isDarkMode?'bg-blue-500/15':'bg-blue-50'}`}><Calendar className="w-5 h-5 text-blue-500"/></div>
+              <div>
+                <p className={`font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>לוח זמנים לרכש</p>
+                <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>מתי להזמין כל מוצר — לפי כיסוי מלאי + זמן אספקה ({leadTime} חודש)</p>
+              </div>
+            </div>
+          </div>
+          {scheduleData.length === 0 ? (
+            <div className={`flex flex-col items-center py-16 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+              <Check className="w-12 h-12 text-emerald-500 mb-3 opacity-60"/>
+              <p className={`font-medium ${isDarkMode?'text-white':'text-slate-800'}`}>אין הזמנות דחופות</p>
+              <p className={`text-sm mt-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>הזן מלאי נוכחי במוצרים כדי לראות לוח זמנים</p>
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {[['critical','⛔ הזמן עכשיו','#ef4444'],['urgent','⚡ הזמן תוך שבוע','#f59e0b'],['soon','📅 הזמן תוך שבועיים','#3b82f6'],['planned','🗓 תכנן לחודש הבא','#8b5cf6'],['later','✅ אין צורך דחוף','#10b981']].map(([urg, label, color]) => {
+                const items = scheduleData.filter(p=>p.urgency===urg);
+                if (!items.length) return null;
+                return (
+                  <div key={urg} className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+                    <div className="px-5 py-3 flex items-center gap-3" style={{borderRight:`4px solid ${color}`}}>
+                      <span className="font-bold text-sm" style={{color}}>{label}</span>
+                      <span className={`text-xs px-2 py-0.5 rounded-full font-medium`} style={{background:color+'22',color}}>{items.length} מוצרים</span>
+                    </div>
+                    <div className="divide-y" style={{borderColor: isDarkMode?'rgba(51,65,85,0.5)':'#f1f5f9'}}>
+                      {items.map(p => (
+                        <div key={p.key} className={`px-5 py-3 flex items-center gap-4 flex-wrap ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}`}>
+                          <div className="flex-1 min-w-0">
+                            <div className="flex items-center gap-2 flex-wrap">
+                              <span className={`font-medium text-sm truncate ${isDarkMode?'text-slate-200':'text-slate-800'}`}>{p.name}</span>
+                              <ABCBadge cls={p.abc} xyz={p.xyz} abcXyz={p.abcXyz}/>
+                              {p.supplier && <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.supplier}</span>}
+                            </div>
+                            <div className="flex items-center gap-4 mt-1 text-xs flex-wrap">
+                              <span className={isDarkMode?'text-slate-400':'text-slate-500'}>מלאי: <strong>{p.currentStock?.toLocaleString()}</strong> יח'</span>
+                              <span className={isDarkMode?'text-slate-400':'text-slate-500'}>כיסוי: <strong>{p.coverageDays}</strong> יום</span>
+                              <span className={isDarkMode?'text-slate-400':'text-slate-500'}>ממוצע: <strong>{p.avgMonthly.toFixed(0)}</strong>/חודש</span>
+                            </div>
+                          </div>
+                          <div className="flex items-center gap-3 shrink-0 flex-wrap">
+                            {p.daysUntilOrder < 0
+                              ? <span className="text-xs font-bold text-red-500">באיחור של {Math.abs(p.daysUntilOrder)} יום!</span>
+                              : p.daysUntilOrder === 0
+                              ? <span className="text-xs font-bold text-red-500">הזמן היום!</span>
+                              : <span className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>הזמן עד {p.orderByDate.toLocaleDateString('he-IL',{day:'numeric',month:'short'})}</span>
+                            }
+                            <div className={`flex items-center gap-1.5 px-3 py-1.5 rounded-xl font-bold text-sm border-2`}
+                              style={{background:color+'18', borderColor:color, color}}>
+                              <ShoppingCart className="w-3.5 h-3.5"/>
+                              {p.suggestedOrder.toLocaleString()}
+                            </div>
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* ══ WHAT-IF VIEW ══ */}
+      {viewMode==='whatif' && (
+        <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+          {/* Config */}
+          <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+            <div className="flex items-center gap-3 mb-4">
+              <div className={`p-2.5 rounded-xl ${isDarkMode?'bg-violet-500/15':'bg-violet-50'}`}><Activity className="w-5 h-5 text-violet-500"/></div>
+              <div>
+                <p className={`font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>תרחיש ביקוש</p>
+                <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>מה יקרה להזמנות אם הביקוש ישתנה?</p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-5">
+              <div className="flex-1 min-w-[200px]">
+                <div className="flex justify-between items-center mb-2">
+                  <span className={`text-xs font-medium ${isDarkMode?'text-slate-300':'text-slate-600'}`}>שינוי בביקוש</span>
+                  <span className={`text-lg font-bold px-3 py-0.5 rounded-lg ${whatIfMultiplier>1?(isDarkMode?'bg-emerald-500/20 text-emerald-300':'bg-emerald-50 text-emerald-700'):(isDarkMode?'bg-red-500/20 text-red-300':'bg-red-50 text-red-700')}`}>
+                    {whatIfMultiplier>1?'+':''}{Math.round((whatIfMultiplier-1)*100)}%
+                  </span>
+                </div>
+                <input type="range" min={0.5} max={2.0} step={0.05} value={whatIfMultiplier}
+                  onChange={e=>setWhatIfMultiplier(parseFloat(e.target.value))}
+                  className="w-full accent-violet-500"/>
+                <div className="flex justify-between text-xs mt-1">
+                  {[-50,-25,0,'+25','+50','+100'].map((l,i)=>(
+                    <span key={i} className={isDarkMode?'text-slate-600':'text-slate-400'}>{l}%</span>
+                  ))}
+                </div>
+              </div>
+              <div className="flex gap-2 flex-wrap">
+                {[0.7,0.85,1.0,1.2,1.5,2.0].map(v=>(
+                  <button key={v} onClick={()=>setWhatIfMultiplier(v)}
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${whatIfMultiplier===v?(isDarkMode?'bg-violet-500/20 border-violet-500 text-violet-300':'bg-violet-50 border-violet-400 text-violet-700'):(isDarkMode?'border-slate-700 text-slate-400':'border-slate-200 text-slate-500')}`}>
+                    {v>1?'+':''}{Math.round((v-1)*100)}%
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          {/* Impact summary */}
+          {whatIfProducts.length > 0 && (() => {
+            const totalBase = products.reduce((a,p)=>a+p.suggestedOrder,0);
+            const totalAdj  = whatIfProducts.reduce((a,p)=>a+p.adjOrder,0);
+            const totalCostBase = products.reduce((a,p)=>a+(p.orderCost||0),0);
+            const totalCostAdj  = whatIfProducts.reduce((a,p)=>a+(p.adjOrder*(p.unitCost||0)),0);
+            return (
+              <div className={`grid grid-cols-2 sm:grid-cols-4 gap-4`}>
+                {[
+                  {label:'יחידות (בסיס)', val:totalBase.toLocaleString(), sub:'הזמנה רגילה'},
+                  {label:'יחידות (תרחיש)', val:totalAdj.toLocaleString(), sub:`שינוי: ${totalAdj>totalBase?'+':''}${(totalAdj-totalBase).toLocaleString()}`, color: totalAdj>totalBase?'text-amber-500':'text-emerald-500'},
+                  {label:'עלות (בסיס)', val:formatShort(totalCostBase), sub:''},
+                  {label:'עלות (תרחיש)', val:formatShort(totalCostAdj), sub:`${totalCostAdj>totalCostBase?'+':''}${formatShort(totalCostAdj-totalCostBase)}`, color: totalCostAdj>totalCostBase?'text-amber-500':'text-emerald-500'},
+                ].map(k=>(
+                  <div key={k.label} className={`p-4 rounded-xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+                    <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{k.label}</p>
+                    <p className={`font-bold text-lg mt-1 ${k.color||''} ${isDarkMode&&!k.color?'text-white':'text-slate-800'}`}>{k.val}</p>
+                    {k.sub && <p className={`text-xs mt-0.5 font-medium ${k.color||''}`}>{k.sub}</p>}
+                  </div>
+                ))}
+              </div>
+            );
+          })()}
+
+          {/* Products table */}
+          <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+            <div className={`px-5 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+              <h3 className={`font-bold text-sm ${isDarkMode?'text-white':'text-slate-800'}`}>השפעה לפי מוצר — תרחיש {whatIfMultiplier>1?'+':''}{Math.round((whatIfMultiplier-1)*100)}%</h3>
+            </div>
+            <div className="overflow-x-auto">
+              <table className={`w-full text-sm text-right min-w-[600px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                <thead className={`text-[11px] font-semibold uppercase tracking-widest ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
+                  <tr>
+                    <th className="px-4 py-3">מוצר</th>
+                    <th className="px-4 py-3">ABC</th>
+                    <th className="px-4 py-3">ממוצע בסיס</th>
+                    <th className="px-4 py-3">ממוצע תרחיש</th>
+                    <th className="px-4 py-3">כיסוי (יום)</th>
+                    <th className="px-4 py-3">הזמנה בסיס</th>
+                    <th className={`px-4 py-3 font-bold ${isDarkMode?'text-violet-400':'text-violet-700'}`}>הזמנה תרחיש</th>
+                    <th className="px-4 py-3">שינוי</th>
+                  </tr>
+                </thead>
+                <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                  {whatIfProducts.slice(0,50).map(p=>(
+                    <tr key={p.key} className={`${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'} ${p.orderDelta>0?(isDarkMode?'':'bg-amber-50/30'):''}`}>
+                      <td className="px-4 py-3">
+                        <p className={`font-medium text-sm truncate max-w-[180px] ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{p.name}</p>
+                      </td>
+                      <td className="px-4 py-3"><ABCBadge cls={p.abc} xyz={p.xyz} abcXyz={p.abcXyz}/></td>
+                      <td className={`px-4 py-3 tabular-nums ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{p.avgMonthly.toFixed(1)}</td>
+                      <td className={`px-4 py-3 tabular-nums font-medium ${isDarkMode?'text-white':'text-slate-800'}`}>{p.adjAvg.toFixed(1)}</td>
+                      <td className={`px-4 py-3 tabular-nums text-xs ${p.adjCovDays!=null&&p.adjCovDays<30?(isDarkMode?'text-red-400':'text-red-600'):(isDarkMode?'text-slate-400':'text-slate-500')}`}>
+                        {p.adjCovDays??'—'}
+                      </td>
+                      <td className={`px-4 py-3 tabular-nums ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{p.suggestedOrder}</td>
+                      <td className={`px-4 py-3 tabular-nums font-bold ${isDarkMode?'text-violet-300':'text-violet-700'}`}>{p.adjOrder}</td>
+                      <td className="px-4 py-3">
+                        {p.orderDelta !== 0 && (
+                          <span className={`text-xs font-bold ${p.orderDelta>0?(isDarkMode?'text-amber-400':'text-amber-600'):(isDarkMode?'text-emerald-400':'text-emerald-600')}`}>
+                            {p.orderDelta>0?'+':''}{p.orderDelta}
+                          </span>
+                        )}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* Dead Stock View */}
       {viewMode==='dead' && (
         <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -1743,6 +2322,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
                         {p.lifecycle==='growing'  && <span title="צמיחה" className="text-xs">🚀</span>}
                         {p.lifecycle==='declining' && <span title="דעיכה" className="text-xs">⚠️</span>}
                         {p.lifecycle==='dying'     && <span title="גוסס" className="text-xs">🔴</span>}
+                        {p.incomingQty>0 && <span title={`בדרך: ${p.incomingQty} יח'`} className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-50 text-blue-700'}`}>📦 {p.incomingQty}</span>}
                       </div>
                       <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                         {p.sku&&p.sku!==p.name&&<span className={`text-xs font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}</span>}
@@ -2244,44 +2824,117 @@ const App = () => {
 
   const generateAI = async () => {
     setAiModalOpen(true); setAiLoading(true); setAiReport('');
+
+    // Check API key first
+    if (!apiKey) {
+      setAiReport('⚠️ לא הוגדר API Key.\n\nלחץ על כפתור ⚙️ ההגדרות בכותרת → הכנס מפתח Gemini.');
+      setAiLoading(false); return;
+    }
+
     let prompt = activeTab==='summary'
       ? `נתח: הכנסות ${formatCurrency(summaryData?.totalIncome)}, הוצאות ${formatCurrency(summaryData?.totalExpenses)}, רווח ${formatCurrency(summaryData?.totalProfit)} (${summaryData?.profitMargin.toFixed(1)}%). תן 3 תובנות קצרות בעברית.`
       : `נתח ${activeTab==='sales'?'מכירות':'ספקים'}: סה"כ ${formatCurrency(stats?.totalAmount)}, מגמה: ${chartData?.monthly.map(m=>`${m.name}:${formatCurrency(m.total||m.sales)}`).join(', ')}. תן תובנות קצרות בעברית.`;
-    try {
-      const res=await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key=${apiKey}`,{ method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({contents:[{parts:[{text:prompt}]}]}) });
-      const d=await res.json();
-      setAiReport(d.candidates?.[0]?.content?.parts?.[0]?.text||'שגיאה.');
-    } catch { setAiReport('שגיאת תקשורת.'); } finally { setAiLoading(false); }
+
+    // Try models in order until one works
+    const models = [
+      'gemini-2.5-flash-preview-05-20',  // newest
+      'gemini-2.5-flash',
+      'gemini-2.5-pro',
+      'gemini-2.0-flash',
+      'gemini-1.5-flash',
+      'gemini-1.5-flash-latest',
+      'gemini-pro',
+    ];
+    let lastError = '';
+
+    for (const model of models) {
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+        const res = await fetch(url, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ contents: [{ parts: [{ text: prompt }] }] })
+        });
+        const d = await res.json();
+
+        if (!res.ok) {
+          const errMsg = d?.error?.message || `שגיאה ${res.status}`;
+          lastError = `[${model}] ${errMsg}`;
+          if (res.status === 400 || res.status === 403) break; // bad key — no point retrying
+          continue; // model not found — try next
+        }
+
+        const text = d.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (text) { setAiReport(text); setAiLoading(false); return; }
+        lastError = `[${model}] תשובה ריקה`;
+      } catch(e) {
+        lastError = `[${model}] ${e.message}`;
+      }
+    }
+
+    // All models failed
+    setAiReport(
+      `❌ שגיאה בחיבור ל-Gemini\n\n${lastError}\n\n` +
+      `בדוק:\n• האם המפתח תקין? (⚙️ הגדרות)\n• האם יש גישה לאינטרנט?\n• כתובת ה-URL: generativelanguage.googleapis.com`
+    );
+    setAiLoading(false);
   };
 
   const sendChat = useCallback(async (text) => {
     setChatMessages(p=>[...p,{role:'user',content:text}]); setChatThinking(true);
     try {
-      // Build data context
+      // ── Smart context builder ───────────────────────────────────
+      const lowerQ = text.toLowerCase();
       const totalSales = salesData.reduce((a,c)=>a+c.total,0);
       const totalExp   = suppliersData.reduce((a,c)=>a+c.total,0);
       const months     = [...new Set(salesData.map(d=>d.date).filter(Boolean))].length;
-      const topProds   = Object.entries(salesData.reduce((m,d)=>{m[d.description]=(m[d.description]||0)+d.total;return m;},{}))
-                          .sort((a,b)=>b[1]-a[1]).slice(0,5).map(([n,v])=>`${n}: ${formatCurrency(v)}`).join(', ');
-      const topSups    = Object.entries(suppliersData.reduce((m,d)=>{m[d.supplier]=(m[d.supplier]||0)+d.total;return m;},{}))
-                          .sort((a,b)=>b[1]-a[1]).slice(0,3).map(([n,v])=>`${n}: ${formatCurrency(v)}`).join(', ');
-      const trend      = (() => { const ms=[...new Set(salesData.map(d=>d.date).filter(Boolean))].sort((a,b)=>getDateVal(a)-getDateVal(b)); if(ms.length<2)return''; const last=salesData.filter(d=>d.date===ms[ms.length-1]).reduce((a,c)=>a+c.total,0); const prev=salesData.filter(d=>d.date===ms[ms.length-2]).reduce((a,c)=>a+c.total,0); return prev>0?` מגמה: ${((last-prev)/prev*100).toFixed(0)}% לעומת חודש קודם`:''; })();
-      const dataCtx = salesData.length > 0 ? `
-=== נתוני העסק ===
-• סה"כ מכירות: ${formatCurrency(totalSales)}${trend}
-• סה"כ הוצאות: ${formatCurrency(totalExp)}
-• רווח גולמי: ${formatCurrency(totalSales-totalExp)} (${totalSales>0?((totalSales-totalExp)/totalSales*100).toFixed(1):0}%)
-• תקופה: ${months} חודשים
-• מוצרים מובילים: ${topProds||'אין נתונים'}
-• ספקים מובילים: ${topSups||'אין נתונים'}
-=================
-` : '';
+      const allMonthsSorted = [...new Set(salesData.map(d=>d.date).filter(Boolean))].sort((a,b)=>getDateVal(a)-getDateVal(b));
+      const trend = (() => { if(allMonthsSorted.length<2)return''; const last=salesData.filter(d=>d.date===allMonthsSorted[allMonthsSorted.length-1]).reduce((a,c)=>a+c.total,0); const prev=salesData.filter(d=>d.date===allMonthsSorted[allMonthsSorted.length-2]).reduce((a,c)=>a+c.total,0); return prev>0?' מגמה: '+((last-prev)/prev*100).toFixed(0)+'% לעומת חודש קודם':''; })();
+
+      // Build product map for smart lookup
+      const prodMap = salesData.reduce((m,d)=>{ if(!d.description)return m; if(!m[d.description])m[d.description]={total:0,qty:0,byMonth:{}}; m[d.description].total+=d.total; m[d.description].qty+=d.quantity||0; m[d.description].byMonth[d.date]=(m[d.description].byMonth[d.date]||0)+(d.quantity||0); return m; },{});
+      const supMap  = suppliersData.reduce((m,d)=>{ if(!d.supplier)return m; m[d.supplier]=(m[d.supplier]||0)+d.total; return m; },{});
+
+      // Detect mentioned products/suppliers (partial match, min 3 chars)
+      const mentionedProds = Object.keys(prodMap).filter(n=>n.length>=3&&lowerQ.includes(n.substring(0,Math.min(n.length,6)).toLowerCase())).slice(0,3);
+      const mentionedSups  = Object.keys(supMap).filter(n=>n.length>=3&&lowerQ.includes(n.substring(0,Math.min(n.length,6)).toLowerCase())).slice(0,2);
+
+      // Build focused context
+      let specificCtx = '';
+      if(mentionedProds.length > 0) {
+        specificCtx += '\n== מוצרים שצוינו ==\n';
+        mentionedProds.forEach(name => {
+          const p = prodMap[name];
+          const monthlyStr = Object.entries(p.byMonth).sort((a,b)=>getDateVal(a[0])-getDateVal(b[0])).slice(-6).map(([m,q])=>m+': '+q).join(', ');
+          specificCtx += ['• ',name,': סה"כ ',formatCurrency(p.total),' | כמות ',p.qty.toLocaleString(),' יח\' | חודשים: ',monthlyStr,'\n'].join('');
+        });
+      }
+      if(mentionedSups.length > 0) {
+        specificCtx += '\n== ספקים שצוינו ==\n';
+        mentionedSups.forEach(name => specificCtx += '• '+name+': '+formatCurrency(supMap[name])+'\n');
+      }
+
+      // Top products & suppliers summary
+      const topProds = Object.entries(prodMap).sort((a,b)=>b[1].total-a[1].total).slice(0,5).map(([n,v])=>n+': '+formatCurrency(v.total)).join(', ');
+      const topSups  = Object.entries(supMap).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([n,v])=>n+': '+formatCurrency(v)).join(', ');
+
+      const dataCtx = salesData.length > 0
+        ? '=== נתוני העסק ===\n'
+          +'• סה"כ מכירות: '+formatCurrency(totalSales)+trend+'\n'
+          +'• סה"כ הוצאות: '+formatCurrency(totalExp)+'\n'
+          +'• רווח גולמי: '+formatCurrency(totalSales-totalExp)+' ('+(totalSales>0?((totalSales-totalExp)/totalSales*100).toFixed(1):0)+'%)\n'
+          +'• תקופה: '+months+' חודשים | חודש אחרון: '+(allMonthsSorted[allMonthsSorted.length-1]||'')+'\n'
+          +'• מוצרים מובילים: '+(topProds||'אין')+'\n'
+          +'• ספקים מובילים: '+(topSups||'אין')+'\n'
+          +specificCtx
+          +'=================\n'
+        : '';
       if (!apiKey) {
         setChatMessages(p=>[...p,{role:'assistant',content:'⚠️ לא הוגדר API Key. הוסף את מפתח Gemini בשורה apiKey בתחילת הקובץ.'}]);
         setChatThinking(false); return;
       }
       const prompt = dataCtx + 'שאלת המשתמש: ' + text + '\nענה בעברית בצורה ברורה וקצרה. אם הנתונים רלוונטיים לשאלה — השתמש בהם.';
-      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key='+apiKey, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({contents:[{parts:[{text:prompt}]}]}) });
+      const res = await fetch('https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key='+apiKey, { method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify({contents:[{parts:[{text:prompt}]}]}) });
       if (!res.ok) { const err=await res.json().catch(()=>({})); setChatMessages(p=>[...p,{role:'assistant',content:'שגיאת API ('+res.status+'): '+(err?.error?.message||'בדוק את ה-API Key')}]); setChatThinking(false); return; }
       const d = await res.json();
       const reply = d.candidates?.[0]?.content?.parts?.[0]?.text;
