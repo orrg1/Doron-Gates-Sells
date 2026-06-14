@@ -767,6 +767,10 @@ const parseInventoryFile = (rows) => {
 };
 
 // ─── PROCUREMENT PAGE ──────────────────────────────────
+const MONTH_FULL_LABELS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
+const MONTH_ABBR_LABELS_SHORT = ['ינו','פבר','מרץ','אפר','מאי','יונ','יול','אוג','ספט','אוק','נוב','דצמ'];
+
+// ─── PROCUREMENT PAGE ──────────────────────────────────
 const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
   const [costMap,  setCostMap]  = useState(() => { try { return JSON.parse(localStorage.getItem('procurementCost') ||'{}'); } catch { return {}; } });
@@ -787,7 +791,8 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
   const [importBanner, setImportBanner] = useState(null); // {count, skipped}
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [showLegend, setShowLegend] = useState(false);
-  const [deadStockDays, setDeadStockDays] = useState(90); // threshold in days
+  const [deadStockDays, setDeadStockDays] = useState(90);
+  const [avgWindowMonths, setAvgWindowMonths] = useState(12); // lookback window for avg calc // threshold in days
   const [whatIfMultiplier, setWhatIfMultiplier] = useState(1.2); // +20% default
   const [whatIfActive, setWhatIfActive] = useState(false);
   const [openOrders, setOpenOrders] = useState(() => {
@@ -988,7 +993,14 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       map[key].totalRev += row.total||0;
       if (row.date) map[key].monthlyData[row.date] = (map[key].monthlyData[row.date]||0)+(row.quantity||0);
     });
-    const allMonths = [...new Set(salesData.map(d=>d.date).filter(Boolean))].sort((a,b)=>getDateVal(a)-getDateVal(b));
+    // All months in dataset (used for sparkline / seasonality base)
+    const allMonthsFull = [...new Set(salesData.map(d=>d.date).filter(Boolean))].sort((a,b)=>getDateVal(a)-getDateVal(b));
+    // Window months — for average calculation (default: last 12 months)
+    const allMonths = avgWindowMonths === 0
+      ? allMonthsFull
+      : allMonthsFull.slice(-avgWindowMonths);
+    // Build window-filtered sales totals for each product
+    const windowMonthSet = new Set(allMonths);
     const totalRev = Object.values(map).reduce((a,c)=>a+c.totalRev,0);
     let cumulative = 0;
     const sorted = Object.values(map).sort((a,b)=>b.totalRev-a.totalRev);
@@ -996,13 +1008,17 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       const pct = totalRev>0?(p.totalRev/totalRev)*100:0;
       cumulative += pct; p.revPct=pct;
       p.abc = cumulative<=80?'A':cumulative<=95?'B':'C';
+      // Build windowed monthlyData for average calculation
+      p.monthlyDataWindow = Object.fromEntries(
+        Object.entries(p.monthlyData).filter(([d]) => windowMonthSet.has(d))
+      );
     });
     return sorted.map(p => {
       const key = p.sku||p.name;
       // Use only months where this product actually sold (not all dataset months)
       // This prevents newly-added or seasonal products from appearing with inflated averages
       // ── Smart average: trim outlier months, flag limited data ──
-      const activeVals = Object.values(p.monthlyData).filter(v => v > 0);
+      const activeVals = Object.values(p.monthlyDataWindow||p.monthlyData).filter(v => v > 0);
       let avgMonthly, avgDataMonths, isLimitedData;
       if (activeVals.length === 0) {
         avgMonthly = 0; avgDataMonths = 0; isLimitedData = true;
@@ -1045,6 +1061,24 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
         const vals = Object.entries(p.monthlyData).filter(([d])=>d.startsWith(mName+'-')).map(([,v])=>v);
         return vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : 0;
       });
+      // Per-year breakdown — robust parsing for both '24' and '2024' year formats
+      const monthlyByYear = MONTH_ABBR.map(mName => {
+        const yearMap = {};
+        Object.entries(p.monthlyData).forEach(([date, qty]) => {
+          if (!date) return;
+          // Match: starts with month abbreviation followed by hyphen
+          const hyphenIdx = date.indexOf('-');
+          if (hyphenIdx === -1) return;
+          const dateMon = date.slice(0, hyphenIdx);
+          if (dateMon !== mName) return;
+          const yrRaw = date.slice(hyphenIdx + 1);
+          const year = yrRaw.length <= 2 ? '20' + yrRaw.padStart(2,'0') : yrRaw;
+          yearMap[year] = (yearMap[year]||0) + qty;
+        });
+        return Object.entries(yearMap)
+          .map(([year, qty]) => ({ year, qty }))
+          .sort((a,b) => a.year.localeCompare(b.year));
+      });
       const annualAvg = monthlyAvgs.reduce((a,b)=>a+b,0)/12 || 1;
       const seasonalityIdx = monthlyAvgs.map(v => +(v/annualAvg).toFixed(2));
       // ── XYZ classification: Coefficient of Variation ──────────────
@@ -1083,7 +1117,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
         : 'unknown';
       return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, avgDaily, sparkline, trend, forecastNext, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, orderCost, risk };
     });
-  }, [salesData, stockMap, costMap, minStockMap, supplierMap, monthsToStock, leadTime, incomingMap]);
+  }, [salesData, stockMap, costMap, minStockMap, supplierMap, monthsToStock, leadTime, incomingMap, avgWindowMonths]);
 
   const filtered = useMemo(() => {
     let data = products;
@@ -1255,29 +1289,18 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
     return <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`}><polyline points={pts} fill="none" stroke={vals[vals.length-1]>=vals[0]?'#10b981':'#ef4444'} strokeWidth="1.5" strokeLinejoin="round" strokeLinecap="round"/></svg>;
   };
 
-  const MONTH_FULL_LABELS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
-  const SeasonalityBar = ({idx, avgs}) => {
-    if (!idx || idx.every(v=>v===1||v===0)) return null;
-    const maxVal = avgs ? Math.max(...avgs, 0.1) : 1;
-    return (
-      <div className="flex gap-[3px] mt-2 items-end" title="עונתיות חודשית">
-        {idx.map((v,i) => {
-          const qty = avgs ? Math.round(avgs[i]) : 0;
-          const barH = avgs ? Math.max(4, Math.round((avgs[i]/maxVal)*20)) : Math.max(4, Math.round(v*10));
-          const color = v >= 1.3 ? '#10b981' : v >= 1.1 ? '#34d399' : v >= 0.9 ? '#94a3b8' : v >= 0.7 ? '#fbbf24' : '#f87171';
-          const label = MONTH_FULL_LABELS[i] + ': ' + (qty > 0 ? qty.toLocaleString() + " יח'" : 'אין מכירות');
-          return (
-            <div key={i} title={label} style={{
-              width:'12px', minWidth:'12px', height:barH+'px',
-              borderRadius:'3px', background:color,
-              opacity: v===0 ? 0.2 : 0.85, cursor:'help',
-              transition:'opacity 0.15s'
-            }}/>
-          );
-        })}
-      </div>
-    );
-  };
+  // Seasonality popup — shown on hover over calendar icon
+  const [seasonHover, setSeasonHover] = useState(null); // {key, rect}
+
+  // Close seasonality popup on click outside
+  useEffect(() => {
+    if (!seasonHover) return;
+    const close = () => setSeasonHover(null);
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [seasonHover]);
+
+
 
   if (!salesData.length) return (
     <div className="flex flex-col items-center justify-center h-96 text-center">
@@ -1386,6 +1409,28 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
               </div>
               <input type="range" min={0} max={4} step={1} value={leadTime} onChange={e=>setLeadTime(+e.target.value)} className="w-full accent-emerald-500"/>
               <div className="flex justify-between mt-0.5">{[0,1,2,3,4].map(n=><span key={n} className={`text-xs ${isDarkMode?'text-slate-600':'text-slate-300'}`}>{n}</span>)}</div>
+            </div>
+            {/* Average window */}
+            <div>
+              <div className="flex justify-between items-center mb-2">
+                <span className={`text-xs font-medium ${isDarkMode?'text-slate-300':'text-slate-600'}`}>בסיס ממוצע</span>
+                <span className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+                  {avgWindowMonths===0?'כל הנתונים':avgWindowMonths+' חודשים אחרונים'}
+                </span>
+              </div>
+              <div className={`flex rounded-xl p-1 ${isDarkMode?'bg-slate-900':'bg-slate-100'}`}>
+                {[[6,'6m'],[12,'12m'],[18,'18m'],[24,'24m'],[0,'הכל']].map(([v,label])=>(
+                  <button key={v} onClick={()=>setAvgWindowMonths(v)}
+                    className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-all ${avgWindowMonths===v
+                      ?(isDarkMode?'bg-purple-600 text-white shadow-md':'bg-purple-600 text-white shadow-md')
+                      :(isDarkMode?'text-slate-400 hover:text-slate-200':'text-slate-500 hover:text-slate-700')}`}>
+                    {label}
+                  </button>
+                ))}
+              </div>
+              <p className={`text-[10px] mt-1.5 ${isDarkMode?'text-slate-600':'text-slate-400'}`}>
+                {avgWindowMonths===0?'ממוצע על כל היסטוריית המכירות':'ממוצע על '+avgWindowMonths+' החודשים האחרונים בלבד'}
+              </p>
             </div>
             <div className={`text-xs px-3 py-2.5 rounded-xl border ${isDarkMode?'bg-slate-700/50 border-slate-600 text-slate-300':'bg-slate-50 border-slate-200 text-slate-600'}`}>
               <span className="font-bold">נוסחה: </span>להזמין = ({monthsToStock} + {leadTime}) × ממוצע חודשי − מלאי קיים
@@ -2427,7 +2472,137 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
                         {p.sku&&p.sku!==p.name&&<span className={`text-xs font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}</span>}
                         {p.supplier&&<span className={`text-xs ${isDarkMode?'text-slate-600':'text-slate-400'} truncate max-w-[100px]`} title={p.supplier}>{p.supplier}</span>}
                       </div>
-                      <SeasonalityBar idx={p.seasonalityIdx} avgs={p.monthlyAvgs}/>
+                      <div className="relative" style={{lineHeight:0}}>
+                            <button
+                              onClick={e=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setSeasonHover(prev=>prev?.key===p.key?null:{key:p.key,rect:r});}}
+                              className={`p-1 rounded text-xs transition-opacity ${seasonHover?.key===p.key?'opacity-100 text-blue-500':'opacity-40 hover:opacity-100'} ${isDarkMode?'text-blue-400':'text-blue-500'}`}>
+                              📅
+                            </button>
+                            {seasonHover?.key===p.key && (
+                              <div className={`rounded-2xl border shadow-2xl text-right ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}
+                                onClick={e=>e.stopPropagation()}
+                                style={{
+                                  position:'fixed',
+                                  zIndex:9999,
+                                  width:'max-content',
+                                  padding:'16px',
+                                  ...(seasonHover?.rect ? {
+                                    // Open upward if enough space, else downward
+                                    ...(seasonHover.rect.top > 350
+                                      ? { bottom: window.innerHeight - seasonHover.rect.top + 8 }
+                                      : { top: seasonHover.rect.bottom + 8 }),
+                                    // Position so popup stays within viewport
+                                    ...(()=>{
+                                      const popupW = Math.min(
+                                        24 * 36 + 60,  // max: 24 months * 36px + year col
+                                        window.innerWidth - 16
+                                      );
+                                      const wantedRight = window.innerWidth - seasonHover.rect.right + 8;
+                                      const right = Math.max(8, Math.min(wantedRight, window.innerWidth - popupW - 8));
+                                      return { right };
+                                    })(),
+                                  } : { top:100, right:8 })
+                                }}>
+                                {/* Header */}
+                                <div className="flex items-center justify-between mb-3 gap-3">
+                                  <p className={`text-sm font-bold shrink-0 ${isDarkMode?'text-white':'text-slate-800'}`}>📅 עונתיות חודשית</p>
+                                  <p className={`text-xs truncate ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{p.name}</p>
+                                  <button
+                                    onClick={e=>{e.stopPropagation();setSeasonHover(null);}}
+                                    className={`shrink-0 p-1 rounded-full transition-colors ${isDarkMode?'hover:bg-slate-700 text-slate-400 hover:text-white':'hover:bg-slate-100 text-slate-400 hover:text-slate-700'}`}>
+                                    <X className="w-4 h-4"/>
+                                  </button>
+                                </div>
+                                {/* Table: months as columns, years as rows */}
+                                {(() => {
+                                  // Build: months as columns (ינו-דצמ order), years as rows
+                                  const monthOrder = ['ינו','פבר','מרץ','אפר','מאי','יונ','יול','אוג','ספט','אוק','נוב','דצמ'];
+                                  const monthFull  = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
+
+                                  // Parse all entries: {year, month, qty}
+                                  const cells = {}; // cells[year][monthAbbr] = qty
+                                  Object.entries(p.monthlyData||{}).forEach(([date, qty]) => {
+                                    if (!qty || !date) return;
+                                    const hyphen = date.indexOf('-');
+                                    if (hyphen === -1) return;
+                                    const mon = date.slice(0, hyphen);
+                                    const yrRaw = date.slice(hyphen + 1);
+                                    const yr = yrRaw.length <= 2 ? '20' + yrRaw.padStart(2,'0') : yrRaw;
+                                    if (!cells[yr]) cells[yr] = {};
+                                    cells[yr][mon] = (cells[yr][mon]||0) + qty;
+                                  });
+
+                                  const years = Object.keys(cells).sort();
+                                  if (!years.length) return <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין נתונים</p>;
+
+                                  // Only include months that have data in at least one year
+                                  const activeMons = monthOrder.filter(m => years.some(yr => cells[yr]?.[m]));
+
+                                  return (
+                                    <table className="border-collapse text-right" style={{tableLayout:'auto'}}>
+                                      <thead>
+                                        <tr>
+                                          <th className={`text-xs pb-2 pr-3 text-right ${isDarkMode?'text-slate-400':'text-slate-500'}`} style={{minWidth:'48px'}}>שנה</th>
+                                          {activeMons.map(m=>(
+                                            <th key={m} className={`text-xs pb-2 text-center font-semibold px-2 ${isDarkMode?'text-slate-300':'text-slate-600'}`} style={{minWidth:'32px'}}>{m}</th>
+                                          ))}
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {years.map((yr,ri)=>(
+                                          <tr key={yr} className={ri>0?`border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`:''}>
+                                            <td className={`text-xs font-bold py-1.5 pr-3 ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{yr}</td>
+                                            {activeMons.map(m=>{
+                                              const qty = cells[yr]?.[m];
+                                              const avg = p.avgMonthly||1;
+                                              const ratio = qty ? qty/avg : 0;
+                                              const bg = !qty?''
+                                                :ratio>=1.3?(isDarkMode?'bg-emerald-500/25':'bg-emerald-50')
+                                                :ratio>=1.1?(isDarkMode?'bg-emerald-500/10':'bg-emerald-50/40')
+                                                :ratio>=0.8?''
+                                                :ratio>=0.5?(isDarkMode?'bg-amber-500/15':'bg-amber-50')
+                                                :(isDarkMode?'bg-red-500/15':'bg-red-50');
+                                              const tc = !qty?(isDarkMode?'text-slate-700':'text-slate-300')
+                                                :ratio>=1.2?(isDarkMode?'text-emerald-300':'text-emerald-700')
+                                                :ratio>=0.8?(isDarkMode?'text-slate-200':'text-slate-700')
+                                                :ratio>=0.5?(isDarkMode?'text-amber-300':'text-amber-700')
+                                                :(isDarkMode?'text-red-400':'text-red-600');
+                                              return (
+                                                <td key={m} className={`text-center py-1.5 px-2 text-xs font-semibold rounded-sm ${bg} ${tc}`}>
+                                                  {qty||'—'}
+                                                </td>
+                                              );
+                                            })}
+                                          </tr>
+                                        ))}
+                                        {years.length>1 && (
+                                          <tr className={`border-t-2 ${isDarkMode?'border-slate-600':'border-slate-300'}`}>
+                                            <td className={`text-xs font-bold py-2 pr-3 ${isDarkMode?'text-slate-300':'text-slate-700'}`}>ממוצע</td>
+                                            {activeMons.map(m=>{
+                                              const vals = years.map(yr=>cells[yr]?.[m]).filter(Boolean);
+                                              const avg = vals.length ? Math.round(vals.reduce((a,b)=>a+b,0)/vals.length) : 0;
+                                              return (
+                                                <td key={m} className={`text-center py-2 px-2 text-xs font-bold ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                                                  {avg||'—'}
+                                                </td>
+                                              );
+                                            })}
+                                          </tr>
+                                        )}
+                                      </tbody>
+                                    </table>
+                                  );
+                                })()}
+                                {/* Legend */}
+                                <div className={`flex items-center gap-4 mt-3 pt-3 border-t text-xs ${isDarkMode?'border-slate-700 text-slate-400':'border-slate-100 text-slate-500'}`}>
+                                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-emerald-400/60 inline-block"/>שיא</span>
+                                  <span className="flex items-center gap-1.5"><span className={`w-3 h-3 rounded inline-block ${isDarkMode?'bg-slate-600':'bg-slate-200'}`}/>ממוצע</span>
+                                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-amber-400/60 inline-block"/>שפל</span>
+                                  <span className={`mr-auto text-[10px] opacity-60`}>כמויות בפועל</span>
+                                </div>
+                              </div>
+                            )}
+                          </div>
                     </td>
                     <td className="px-4 py-3.5"><ABCBadge cls={p.abc} xyz={p.xyz} abcXyz={p.abcXyz}/></td>
                     {/* Avg + Forecast combined */}
@@ -2443,9 +2618,9 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
                             </span>
                           )}
                           {!p.isLimitedData && p.avgDataMonths > 0 && (
-                            <span title={`ממוצע מבוסס על ${p.avgDataMonths} חודשים`}
+                            <span title={`ממוצע מבוסס על ${p.avgDataMonths} חודשים (מתוך ${p.windowMonths||'?'} חודשי חלון)`}
                               className={`text-[10px] px-1 rounded cursor-help ${isDarkMode?'text-slate-600':'text-slate-400'}`}>
-                              {p.avgDataMonths}m
+                              {p.avgDataMonths}/{p.windowMonths||'?'}m
                             </span>
                           )}
                         </div>
