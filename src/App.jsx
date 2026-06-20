@@ -20,6 +20,31 @@ import {
 // API key is managed via the settings modal (stored in localStorage)
 
 // ─── HELPERS ───────────────────────────────────────────
+// Smart search: '*' acts as a wildcard matching any characters (including none).
+// "מנוע*1000" matches "מנוע נגרר 1000", "מנוע חדש 1000 וואט", etc.
+// If no '*' is present, falls back to plain substring search (existing behavior).
+const smartMatch = (text, query) => {
+  if (!query) return true;
+  if (!text) return false;
+  const t = text.toString().toLowerCase();
+  const q = query.toString().toLowerCase().trim();
+  if (!q) return true;
+
+  if (q.includes('*')) {
+    // Escape regex special chars except '*', then convert '*' to '.*'
+    const escaped = q
+      .split('*')
+      .map(part => part.replace(/[.+?^${}()|[\]\\]/g, '\\$&'))
+      .join('.*');
+    try {
+      return new RegExp(escaped).test(t);
+    } catch {
+      return t.includes(q.replace(/\*/g, ''));
+    }
+  }
+  return t.includes(q);
+};
+
 const HebrewMonthsMap = {
   0:'ינו',1:'פבר',2:'מרץ',3:'אפר',4:'מאי',5:'יונ',
   6:'יול',7:'אוג',8:'ספט',9:'אוק',10:'נוב',11:'דצמ'
@@ -453,7 +478,7 @@ const Autocomplete = ({ options, value, onChange, placeholder, icon: Icon, multi
     document.addEventListener('mousedown', h);
     return () => document.removeEventListener('mousedown', h);
   }, [value, multiple]);
-  const filtered = useMemo(() => !search ? options : options.filter(o=>o.toString().toLowerCase().includes(search.toLowerCase())), [options, search]);
+  const filtered = useMemo(() => !search ? options : options.filter(o=>smartMatch(o, search)), [options, search]);
   const handleSelect = (opt) => {
     if (multiple) { onChange(value.includes(opt) ? value.filter(v=>v!==opt) : value.length<maxSelections ? [...value,opt] : value); setSearch(''); }
     else { onChange(opt); setSearch(opt); setOpen(false); }
@@ -1123,7 +1148,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
     let data = products;
     if (abcFilter!=='all') data=data.filter(p=>p.abc===abcFilter);
     if (riskFilter!=='all') data=data.filter(p=>p.risk===riskFilter);
-    if (searchTerm) data=data.filter(p=>p.name.toLowerCase().includes(searchTerm.toLowerCase())||p.sku.toLowerCase().includes(searchTerm.toLowerCase()));
+    if (searchTerm) data=data.filter(p=>smartMatch(p.name, searchTerm)||smartMatch(p.sku, searchTerm));
     return data.sort((a,b)=>{
       let va=a[sortConfig.key]??-Infinity, vb=b[sortConfig.key]??-Infinity;
       return sortConfig.direction==='asc'?(va<vb?-1:va>vb?1:0):(va>vb?-1:va<vb?1:0);
@@ -2354,7 +2379,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
             )}
             <div className="relative">
               <Search className={`absolute right-3 top-2.5 w-3.5 h-3.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}/>
-              <input type="text" placeholder="חיפוש..." value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}
+              <input type="text" placeholder="חיפוש... (השתמש ב * להשלמה, למשל: מנוע*1000)" value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}
                 className={`pl-4 pr-9 py-2 border rounded-xl text-xs w-36 focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'bg-slate-900 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
             </div>
             <button
@@ -3079,7 +3104,7 @@ const App = () => {
     } else {
       if (selectedSupplier) data=data.filter(d=>d.supplier===selectedSupplier);
     }
-    if (searchTerm) { const l=searchTerm.toLowerCase(); data=data.filter(d=>(d.description||'').toLowerCase().includes(l)||(d.sku||'').toLowerCase().includes(l)||(d.supplier||'').toLowerCase().includes(l)); }
+    if (searchTerm) { data=data.filter(d=>smartMatch(d.description,searchTerm)||smartMatch(d.sku,searchTerm)||smartMatch(d.supplier,searchTerm)); }
     return data.sort((a,b)=>{
       let va=a[sortConfig.key], vb=b[sortConfig.key];
       if (sortConfig.key==='date') { va=getDateVal(a.date); vb=getDateVal(b.date); }
@@ -3675,7 +3700,7 @@ const App = () => {
                       </button>
                       <div className="relative">
                         <Search className={`absolute right-3 top-2.5 w-3.5 h-3.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}/>
-                        <input type="text" placeholder="חיפוש..." value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}
+                        <input type="text" placeholder="חיפוש... (השתמש ב * להשלמה, למשל: מנוע*1000)" value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}
                           className={`pl-4 pr-9 py-2 border rounded-xl text-xs w-40 focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'bg-slate-900 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
                       </div>
                     </div>
