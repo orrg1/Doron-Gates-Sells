@@ -66,6 +66,54 @@ const formatShort = (val) => {
   return formatCurrency(val);
 };
 
+// Returns a display symbol for a stored currency code. Defaults to ₪ when
+// unknown/missing, since that's the original app-wide assumption.
+const currencySymbol = (code) => {
+  if (code === 'USD') return '$';
+  if (code === 'EUR') return '€';
+  return '₪';
+};
+// Format a unit price with its real currency — NOT converted to ILS.
+const formatUnitCost = (amount, code) => {
+  if (amount==null || isNaN(amount)) return '';
+  return `${currencySymbol(code)}${amount.toLocaleString(undefined,{maximumFractionDigits:2})}`;
+};
+
+// ─── PROCUREMENT TABLE COLUMN RESIZE ───────────────────
+// Shared between the main "by product" table and every per-supplier table,
+// so a manual resize (or auto-fit) looks the same everywhere.
+const PROC_COL_KEYS = ['name','supplier','abc','avg','trend','stock','coverage','order'];
+const PROC_COL_LABELS = { name:'מוצר', supplier:'ספק', abc:'ABC', avg:'ממוצע / תחזית', trend:'מגמה', stock:'מלאי עכשיו', coverage:'כיסוי', order:'להזמין' };
+const PROC_COL_DEFAULTS = { name:220, supplier:140, abc:70, avg:160, trend:90, stock:150, coverage:130, order:150 };
+const PROC_COL_MIN = { name:120, supplier:60, abc:50, avg:90, trend:60, stock:90, coverage:80, order:90 };
+
+let _measureCanvas = null;
+const measureTextWidth = (text, font) => {
+  if (!_measureCanvas) _measureCanvas = document.createElement('canvas');
+  const ctx = _measureCanvas.getContext('2d');
+  ctx.font = font;
+  return ctx.measureText(String(text)).width;
+};
+
+// Pulls the actual displayed value for a column, per product — used to
+// auto-fit a column to its longest real value (not a guess).
+const getProcColValue = (key, p) => {
+  switch (key) {
+    case 'name':     return p.name||'';
+    case 'supplier':  return p.supplier||'';
+    case 'abc':      return p.abcXyz||p.abc||'';
+    case 'avg':      return `${p.avgMonthly.toFixed(1)} יח'`;
+    case 'trend':    return p.trend?`${Math.abs(p.trend).toFixed(0)}%`:'';
+    case 'stock':    return p.currentStock!=null?p.currentStock.toLocaleString():'';
+    case 'coverage': return p.coverageDays!=null?`${p.coverageDays} יום (${(p.coverageMonths||0).toFixed(1)} ח')`:'';
+    case 'order':    return p.suggestedOrder?p.suggestedOrder.toLocaleString():'';
+    default: return '';
+  }
+};
+// Extra px to account for icons/badges/padding that surround the text but
+// aren't captured by a plain text measurement (varies per column).
+const PROC_COL_EXTRA_PADDING = { name:70, supplier:30, abc:40, avg:40, trend:30, stock:40, coverage:40, order:50 };
+
 const excelDateToJS = (serial) => new Date((Math.floor(serial - 25569)) * 86400 * 1000);
 
 const normalizeDate = (val) => {
@@ -725,11 +773,13 @@ const parseInventoryFile = (rows) => {
     name:     ['תאור מוצר','תיאור מוצר','תאור','תיאור','שם מוצר','שם פריט','item name','description','פריט','שם'],
     status:   ['סטטוס','status'],
     managed:  ['מנוהל מלאי'],
-    quantity: ['יתרה','יתרה במלאי','יתרת מלאי','כמות במלאי','כמות מלאי','מלאי','qty','stock','quantity','כמות בסטוק'],
+    quantity: ['יתרה','יתרה במלאי','יתרת מלאי','כמות במלאי','כמות מלאי','qty','stock','quantity','כמות בסטוק'],
     minStock: ['כמות מינימום למלאי','מינימום למלאי','מינימום מלאי','min stock','מינ מלאי','רמת הזמנה'],
     cost:     ['מחיר קניה אחרון','מחיר קניה','עלות ש"ח','עלות שח','עלות','unit cost','cost','מחיר ספק'],
     costAlt:  ['עלות ש"ח','עלות שח','עלות כוללת'],
     supplier: ['שם ספק','ספק','supplier'],
+    moq:      ['כמות מינימום להזמנה','מינימום הזמנה','כמות הזמנה מינימלית','moq','min order','minimum order qty','minimum order quantity'],
+    currency: ['מטבע','currency'],
   };
   const norm = (s) => (s||'').toString().trim().replace(/\s+/g,' ');
   const findCol = (headers, variants) => {
@@ -755,6 +805,10 @@ const parseInventoryFile = (rows) => {
   const costIdx     = findCol(headers, COL.cost);
   const costAltIdx  = findCol(headers, COL.costAlt);
   const supplierIdx = findCol(headers, COL.supplier);
+  const moqIdx      = findCol(headers, COL.moq);
+  // Currency: only meaningful when paired with the primary cost column
+  // ("מחיר קניה אחרון"), since that's the column whose value we store as unitCost.
+  const currencyIdx = (costIdx !== -1) ? findCol(headers, COL.currency) : -1;
 
   // Priority master (כרטיס פריטים) = has SKU + cost but NO quantity column
   const isPriorityMaster = skuIdx !== -1 && costIdx !== -1 && qtyIdx === -1;
@@ -786,7 +840,14 @@ const parseInventoryFile = (rows) => {
     const minStock = (!isNaN(minRaw) && minRaw > 0) ? minRaw : null;
 
     const supplier = supplierIdx !== -1 ? vals[supplierIdx] : null;
-    result.push({ sku: sku||name, name: name||sku, quantity: qty, cost, minStock, supplier });
+    const moqRaw = moqIdx !== -1 ? parseFloat(vals[moqIdx].replace(/[^\d.-]/g,'')) : NaN;
+    const moq = (!isNaN(moqRaw) && moqRaw > 0) ? moqRaw : null;
+    const currRaw = currencyIdx !== -1 ? vals[currencyIdx] : '';
+    const currency = currRaw === 'ש"ח' || currRaw === 'שח' ? 'ILS'
+      : currRaw === '$' ? 'USD'
+      : currRaw === 'EUR' || currRaw === '€' ? 'EUR'
+      : (currRaw || null);
+    result.push({ sku: sku||name, name: name||sku, quantity: qty, cost, minStock, supplier, moq, currency });
   });
   return result;
 };
@@ -801,6 +862,42 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
   const [costMap,  setCostMap]  = useState(() => { try { return JSON.parse(localStorage.getItem('procurementCost') ||'{}'); } catch { return {}; } });
   const [minStockMap, setMinStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementMinStock')||'{}'); } catch { return {}; } });
   const [supplierMap, setSupplierMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementSupplier')||'{}'); } catch { return {}; } });
+  const [moqMap, setMoqMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementMOQ')||'{}'); } catch { return {}; } });
+  const [currencyMap, setCurrencyMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementCurrency')||'{}'); } catch { return {}; } });
+  const [colWidths, setColWidths] = useState(() => {
+    try { return { ...PROC_COL_DEFAULTS, ...JSON.parse(localStorage.getItem('procurementColWidths')||'{}') }; }
+    catch { return { ...PROC_COL_DEFAULTS }; }
+  });
+  useEffect(() => { localStorage.setItem('procurementColWidths', JSON.stringify(colWidths)); }, [colWidths]);
+  const resizeRef = useRef(null); // {key, startX, startWidth}
+  const handleColResizeMove = useCallback((e) => {
+    const r = resizeRef.current; if (!r) return;
+    // RTL layout: dragging the handle left (clientX decreasing) widens the column
+    // to its left, since the column's right edge stays anchored.
+    const delta = r.startX - e.clientX;
+    const min = PROC_COL_MIN[r.key]||50;
+    setColWidths(prev => ({ ...prev, [r.key]: Math.max(min, r.startWidth + delta) }));
+  }, []);
+  const handleColResizeEnd = useCallback(() => {
+    resizeRef.current = null;
+    document.removeEventListener('mousemove', handleColResizeMove);
+    document.removeEventListener('mouseup', handleColResizeEnd);
+  }, [handleColResizeMove]);
+  const handleColResizeStart = useCallback((key, e) => {
+    e.preventDefault(); e.stopPropagation();
+    resizeRef.current = { key, startX: e.clientX, startWidth: colWidths[key]||PROC_COL_DEFAULTS[key]||100 };
+    document.addEventListener('mousemove', handleColResizeMove);
+    document.addEventListener('mouseup', handleColResizeEnd);
+  }, [colWidths, handleColResizeMove, handleColResizeEnd]);
+  // Double-click a column's resize handle: shrink it to just fit its longest value.
+  const autoFitProcColumn = useCallback((key, items) => {
+    const font = '13px system-ui, -apple-system, "Segoe UI", Arial, sans-serif';
+    const values = [PROC_COL_LABELS[key], ...items.map(p=>getProcColValue(key,p))];
+    const maxTextWidth = values.reduce((m,v)=>Math.max(m, measureTextWidth(v, font)), 0);
+    const padding = PROC_COL_EXTRA_PADDING[key]||30;
+    const min = PROC_COL_MIN[key]||50;
+    setColWidths(prev => ({ ...prev, [key]: Math.max(min, Math.ceil(maxTextWidth + padding)) }));
+  }, []);
   const [monthsToStock, setMonthsToStock] = useState(2);
   const [leadTime, setLeadTime] = useState(1);
   const [abcFilter, setAbcFilter] = useState('all');
@@ -808,6 +905,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
   const [searchTerm, setSearchTerm] = useState('');
   const [sortConfig, setSortConfig] = useState({ key:'totalRev', direction:'desc' });
   const [editingStock, setEditingStock] = useState(null);
+  const [editingMOQ, setEditingMOQ] = useState(null);
   const [invLoading, setInvLoading] = useState(false);
   const [exporting, setExporting] = useState(false);
   const [invFileName, setInvFileName] = useState(() => localStorage.getItem('inventoryFileName')||'');
@@ -888,6 +986,14 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
     localStorage.setItem('procurementStock', JSON.stringify(updated));
   };
 
+  const saveMOQ = (key, val) => {
+    const n = parseFloat(val);
+    const updated = { ...moqMap };
+    if (isNaN(n) || n <= 0) { delete updated[key]; } else { updated[key] = n; }
+    setMoqMap(updated);
+    localStorage.setItem('procurementMOQ', JSON.stringify(updated));
+  };
+
   const generateProcurementInsight = async () => {
     if (!apiKey) { setAiInsightText('⚠️ הוסף API Key של Gemini בתחילת הקובץ.'); setAiInsightOpen(true); return; }
     setAiInsightOpen(true); setAiInsightLoading(true); setAiInsightText('');
@@ -956,19 +1062,23 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
     const applyRows = (rows) => {
       const parsed = parseInventoryFile(rows);
       if (!parsed.length) { setInvLoading(false); return; }
-      const ns = {...stockMap}, nc = {...costMap}, nm = {...minStockMap}, nsup = {...supplierMap};
+      const ns = {...stockMap}, nc = {...costMap}, nm = {...minStockMap}, nsup = {...supplierMap}, nmoq = {...moqMap}, ncur = {...currencyMap};
       parsed.forEach(item => {
         const k = item.sku||item.name;
         if (item.quantity !== null) ns[k] = item.quantity;
         if (item.cost !== null) nc[k] = item.cost;
         if (item.minStock !== null) nm[k] = item.minStock;
         if (item.supplier) nsup[k] = item.supplier;
+        if (item.moq !== null) nmoq[k] = item.moq;
+        if (item.currency) ncur[k] = item.currency;
       });
-      setStockMap(ns); setCostMap(nc); setMinStockMap(nm); setSupplierMap(nsup);
+      setStockMap(ns); setCostMap(nc); setMinStockMap(nm); setSupplierMap(nsup); setMoqMap(nmoq); setCurrencyMap(ncur);
       localStorage.setItem('procurementStock', JSON.stringify(ns));
       localStorage.setItem('procurementCost', JSON.stringify(nc));
       localStorage.setItem('procurementMinStock', JSON.stringify(nm));
       localStorage.setItem('procurementSupplier', JSON.stringify(nsup));
+      localStorage.setItem('procurementMOQ', JSON.stringify(nmoq));
+      localStorage.setItem('procurementCurrency', JSON.stringify(ncur));
       localStorage.setItem('inventoryFileName', file.name);
       setInvFileName(file.name);
       const withQty = parsed.filter(p=>p.quantity!==null).length;
@@ -1001,10 +1111,12 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
   };
 
   const clearInventory = () => {
-    setStockMap({}); setCostMap({}); setMinStockMap({}); setSupplierMap({});
+    setStockMap({}); setCostMap({}); setMinStockMap({}); setSupplierMap({}); setMoqMap({}); setCurrencyMap({});
     setInvFileName(''); setImportStats(null);
     localStorage.removeItem('procurementStock'); localStorage.removeItem('procurementCost');
     localStorage.removeItem('procurementMinStock'); localStorage.removeItem('procurementSupplier');
+    localStorage.removeItem('procurementMOQ');
+    localStorage.removeItem('procurementCurrency');
     localStorage.removeItem('inventoryFileName');
   };
 
@@ -1072,15 +1184,11 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       const unitCost     = costMap[key]??costMap[p.sku]??costMap[p.name]??null;
       const minStock     = minStockMap[key]??minStockMap[p.sku]??minStockMap[p.name]??null;
       const supplier     = supplierMap[key]??supplierMap[p.sku]??supplierMap[p.name]??null;
+      const currency     = currencyMap[key]??currencyMap[p.sku]??currencyMap[p.name]??null;
       const avgDaily      = avgMonthly / 30;
       const coverageMonths = (currentStock!==null&&avgMonthly>0)?currentStock/avgMonthly:null;
       const coverageDays   = (currentStock!==null&&avgDaily>0)?Math.round(currentStock/avgDaily):null;
-      // Forecast next month — weighted average of last 3 months adjusted by trend
-      const recent3 = allMonths.slice(-3);
-      const recent3Avg = recent3.reduce((s,m)=>s+(p.monthlyData[m]||0),0) / Math.max(recent3.length,1);
-      const trendFactor = Math.max(0.7, Math.min(1.6, 1 + (trend||0)/200));
-      const forecastNext = Math.round(recent3Avg * trendFactor);
-      // Seasonality index — average per calendar month vs overall annual average
+      // ── Seasonality index — average per calendar month vs overall annual average ──
       const MONTH_ABBR = ['ינו','פבר','מרץ','אפר','מאי','יונ','יול','אוג','ספט','אוק','נוב','דצמ'];
       const monthlyAvgs = MONTH_ABBR.map(mName => {
         const vals = Object.entries(p.monthlyData).filter(([d])=>d.startsWith(mName+'-')).map(([,v])=>v);
@@ -1105,7 +1213,33 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
           .sort((a,b) => a.year.localeCompare(b.year));
       });
       const annualAvg = monthlyAvgs.reduce((a,b)=>a+b,0)/12 || 1;
+      // Only trust the seasonal index once we have at least 2 distinct calendar
+      // months with real data — otherwise a single year of data makes every
+      // month look "seasonal" by definition (no contrast to average against).
+      const monthsWithData = monthlyAvgs.filter(v=>v>0).length;
+      const yearsOfData = new Set(monthlyByYear.flat().map(y=>y.year)).size;
+      const seasonalityReliable = yearsOfData >= 2 && monthsWithData >= 6;
       const seasonalityIdx = monthlyAvgs.map(v => +(v/annualAvg).toFixed(2));
+      // ── Forecast next month ──────────────────────────────────────
+      // Base: weighted recent trend (last 3 months vs previous 3), as before.
+      const recent3 = allMonths.slice(-3);
+      const recent3Avg = recent3.reduce((s,m)=>s+(p.monthlyData[m]||0),0) / Math.max(recent3.length,1);
+      // Trend factor — damped a bit more than before since seasonality below
+      // now explains part of month-to-month swings that used to be read as "trend".
+      const trendFactor = Math.max(0.75, Math.min(1.4, 1 + (trend||0)/250));
+      // Seasonal factor — ratio of the *upcoming* calendar month's typical sales
+      // to the annual average, clamped to avoid wild swings from sparse data.
+      let seasonalFactor = 1;
+      if (seasonalityReliable) {
+        const lastMonthStr = allMonths[allMonths.length-1] || '';
+        const lastMonAbbr = lastMonthStr.slice(0, lastMonthStr.indexOf('-')!==-1 ? lastMonthStr.indexOf('-') : lastMonthStr.length);
+        const lastMonIdx = MONTH_ABBR.indexOf(lastMonAbbr);
+        const nextMonIdx = lastMonIdx !== -1 ? (lastMonIdx+1)%12 : -1;
+        if (nextMonIdx !== -1 && seasonalityIdx[nextMonIdx] > 0) {
+          seasonalFactor = Math.max(0.5, Math.min(2.0, seasonalityIdx[nextMonIdx]));
+        }
+      }
+      const forecastNext = Math.round(recent3Avg * trendFactor * seasonalFactor);
       // ── XYZ classification: Coefficient of Variation ──────────────
       const allSaleVals = Object.values(p.monthlyData).filter(v=>v>0);
       const meanForCV = avgMonthly || 1;
@@ -1130,27 +1264,42 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       const incomingQty = incomingMap[key] ?? incomingMap[p.sku] ?? incomingMap[p.name] ?? 0;
       const effectiveStock = (currentStock??0) + incomingQty;
       const effectiveCoverDays = avgDaily > 0 ? Math.round(effectiveStock / avgDaily) : null;
-      // ── Suggested order: includes safety stock ───────────────────
+      // ── Suggested order: includes safety stock, then rounded up to MOQ ──
+      const moq = moqMap[key] ?? moqMap[p.sku] ?? moqMap[p.name] ?? null;
       const targetStock  = minStock ?? (monthsToStock * avgMonthly);
       const baseOrder = (monthsToStock+leadTime)*avgMonthly + safetyStock - effectiveStock;
-      const suggestedOrder = Math.max(0, Math.ceil(baseOrder));
+      const suggestedOrderRaw = Math.max(0, Math.ceil(baseOrder));
+      const suggestedOrder = (moq && moq>0 && suggestedOrderRaw>0)
+        ? Math.ceil(suggestedOrderRaw / moq) * moq
+        : suggestedOrderRaw;
       const orderCost = (suggestedOrder>0&&unitCost)?suggestedOrder*unitCost:null;
       const risk = currentStock!==null
         ? (currentStock <= 0 ? 'critical'  // negative or zero stock
           : coverageMonths < leadTime ? 'critical'
           : (minStock ? currentStock < minStock : coverageMonths < monthsToStock) ? 'low' : 'ok')
         : 'unknown';
-      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, avgDaily, sparkline, trend, forecastNext, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, orderCost, risk };
+      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, avgDaily, sparkline, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, currency, moq, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, suggestedOrderRaw, orderCost, risk };
     });
-  }, [salesData, stockMap, costMap, minStockMap, supplierMap, monthsToStock, leadTime, incomingMap, avgWindowMonths]);
+  }, [salesData, stockMap, costMap, minStockMap, supplierMap, moqMap, currencyMap, monthsToStock, leadTime, incomingMap, avgWindowMonths]);
 
   const filtered = useMemo(() => {
     let data = products;
     if (abcFilter!=='all') data=data.filter(p=>p.abc===abcFilter);
     if (riskFilter!=='all') data=data.filter(p=>p.risk===riskFilter);
     if (searchTerm) data=data.filter(p=>smartMatch(p.name, searchTerm)||smartMatch(p.sku, searchTerm));
-    return data.sort((a,b)=>{
-      let va=a[sortConfig.key]??-Infinity, vb=b[sortConfig.key]??-Infinity;
+    return [...data].sort((a,b)=>{
+      const va=a[sortConfig.key], vb=b[sortConfig.key];
+      const aEmpty = va===null||va===undefined||va==='';
+      const bEmpty = vb===null||vb===undefined||vb==='';
+      // Always push empty/unknown values to the bottom, regardless of sort direction —
+      // otherwise they get compared against a numeric sentinel and scatter randomly.
+      if (aEmpty && bEmpty) return 0;
+      if (aEmpty) return 1;
+      if (bEmpty) return -1;
+      if (typeof va === 'string' || typeof vb === 'string') {
+        const cmp = String(va).localeCompare(String(vb), 'he');
+        return sortConfig.direction==='asc' ? cmp : -cmp;
+      }
       return sortConfig.direction==='asc'?(va<vb?-1:va>vb?1:0):(va>vb?-1:va<vb?1:0);
     });
   }, [products, abcFilter, riskFilter, searchTerm, sortConfig]);
@@ -1257,14 +1406,17 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
     const groups = {};
     filtered.forEach(p => {
       const sup = p.supplier || 'ספק לא ידוע';
-      if (!groups[sup]) groups[sup] = { name: sup, items: [], totalUnits: 0, totalCost: 0, criticalCount: 0 };
+      if (!groups[sup]) groups[sup] = { name: sup, items: [], totalUnits: 0, totalCost: 0, costByCurrency: {}, criticalCount: 0 };
       groups[sup].items.push(p);
       groups[sup].totalUnits += p.suggestedOrder;
       groups[sup].totalCost  += p.orderCost || 0;
+      if (p.orderCost) {
+        const cur = p.currency || 'ILS';
+        groups[sup].costByCurrency[cur] = (groups[sup].costByCurrency[cur]||0) + p.orderCost;
+      }
       if (p.risk === 'critical') groups[sup].criticalCount++;
     });
     return Object.values(groups)
-      .filter(g => g.totalUnits > 0)
       .sort((a, b) => b.totalCost - a.totalCost || b.totalUnits - a.totalUnits);
   }, [filtered]);
 
@@ -1306,6 +1458,323 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
     if (risk==='low')      return <span className="flex items-center gap-1 text-xs text-amber-500 whitespace-nowrap"><AlertTriangle className="w-3 h-3 shrink-0"/>{label}</span>;
     return <span className={`flex items-center gap-1 text-xs whitespace-nowrap ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}><Check className="w-3 h-3 shrink-0"/>{label}</span>;
   };
+const SeasonalityButton = (p) => (
+                      <div className="relative" style={{lineHeight:0}}>
+                            <button
+                              onClick={e=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setSeasonHover(prev=>prev?.key===p.key?null:{key:p.key,rect:r});}}
+                              className={`p-1 rounded text-xs transition-opacity ${seasonHover?.key===p.key?'opacity-100 text-blue-500':'opacity-40 hover:opacity-100'} ${isDarkMode?'text-blue-400':'text-blue-500'}`}>
+                              📅
+                            </button>
+                            {seasonHover?.key===p.key && (
+                              <div className={`rounded-2xl border shadow-2xl text-right ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}
+                                onClick={e=>e.stopPropagation()}
+                                style={{
+                                  position:'fixed',
+                                  zIndex:9999,
+                                  width:'max-content',
+                                  padding:'16px',
+                                  ...(seasonHover?.rect ? {
+                                    // Open upward if enough space, else downward
+                                    ...(seasonHover.rect.top > 350
+                                      ? { bottom: window.innerHeight - seasonHover.rect.top + 8 }
+                                      : { top: seasonHover.rect.bottom + 8 }),
+                                    // Position so popup stays within viewport
+                                    ...(()=>{
+                                      const popupW = Math.min(
+                                        24 * 36 + 60,  // max: 24 months * 36px + year col
+                                        window.innerWidth - 16
+                                      );
+                                      const wantedRight = window.innerWidth - seasonHover.rect.right + 8;
+                                      const right = Math.max(8, Math.min(wantedRight, window.innerWidth - popupW - 8));
+                                      return { right };
+                                    })(),
+                                  } : { top:100, right:8 })
+                                }}>
+                                {/* Header */}
+                                <div className="flex items-center justify-between mb-3 gap-3">
+                                  <p className={`text-sm font-bold shrink-0 ${isDarkMode?'text-white':'text-slate-800'}`}>📅 עונתיות חודשית</p>
+                                  <p className={`text-xs truncate ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{p.name}</p>
+                                  <button
+                                    onClick={e=>{e.stopPropagation();setSeasonHover(null);}}
+                                    className={`shrink-0 p-1 rounded-full transition-colors ${isDarkMode?'hover:bg-slate-700 text-slate-400 hover:text-white':'hover:bg-slate-100 text-slate-400 hover:text-slate-700'}`}>
+                                    <X className="w-4 h-4"/>
+                                  </button>
+                                </div>
+                                {/* Table: months as columns, years as rows */}
+                                {(() => {
+                                  // Build: months as columns (ינו-דצמ order), years as rows
+                                  const monthOrder = ['ינו','פבר','מרץ','אפר','מאי','יונ','יול','אוג','ספט','אוק','נוב','דצמ'];
+                                  const monthFull  = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
+
+                                  // Parse all entries: {year, month, qty}
+                                  const cells = {}; // cells[year][monthAbbr] = qty
+                                  Object.entries(p.monthlyData||{}).forEach(([date, qty]) => {
+                                    if (!qty || !date) return;
+                                    const hyphen = date.indexOf('-');
+                                    if (hyphen === -1) return;
+                                    const mon = date.slice(0, hyphen);
+                                    const yrRaw = date.slice(hyphen + 1);
+                                    const yr = yrRaw.length <= 2 ? '20' + yrRaw.padStart(2,'0') : yrRaw;
+                                    if (!cells[yr]) cells[yr] = {};
+                                    cells[yr][mon] = (cells[yr][mon]||0) + qty;
+                                  });
+
+                                  const years = Object.keys(cells).sort();
+                                  if (!years.length) return <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין נתונים</p>;
+
+                                  // Only include months that have data in at least one year
+                                  const activeMons = monthOrder.filter(m => years.some(yr => cells[yr]?.[m]));
+
+                                  return (
+                                    <table className="border-collapse text-right" style={{tableLayout:'auto'}}>
+                                      <thead>
+                                        <tr>
+                                          <th className={`text-xs pb-2 pr-3 text-right ${isDarkMode?'text-slate-400':'text-slate-500'}`} style={{minWidth:'48px'}}>שנה</th>
+                                          {activeMons.map(m=>(
+                                            <th key={m} className={`text-xs pb-2 text-center font-semibold px-2 ${isDarkMode?'text-slate-300':'text-slate-600'}`} style={{minWidth:'32px'}}>{m}</th>
+                                          ))}
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {years.map((yr,ri)=>(
+                                          <tr key={yr} className={ri>0?`border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`:''}>
+                                            <td className={`text-xs font-bold py-1.5 pr-3 ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{yr}</td>
+                                            {activeMons.map(m=>{
+                                              const qty = cells[yr]?.[m];
+                                              const avg = p.avgMonthly||1;
+                                              const ratio = qty ? qty/avg : 0;
+                                              const bg = !qty?''
+                                                :ratio>=1.3?(isDarkMode?'bg-emerald-500/25':'bg-emerald-50')
+                                                :ratio>=1.1?(isDarkMode?'bg-emerald-500/10':'bg-emerald-50/40')
+                                                :ratio>=0.8?''
+                                                :ratio>=0.5?(isDarkMode?'bg-amber-500/15':'bg-amber-50')
+                                                :(isDarkMode?'bg-red-500/15':'bg-red-50');
+                                              const tc = !qty?(isDarkMode?'text-slate-700':'text-slate-300')
+                                                :ratio>=1.2?(isDarkMode?'text-emerald-300':'text-emerald-700')
+                                                :ratio>=0.8?(isDarkMode?'text-slate-200':'text-slate-700')
+                                                :ratio>=0.5?(isDarkMode?'text-amber-300':'text-amber-700')
+                                                :(isDarkMode?'text-red-400':'text-red-600');
+                                              return (
+                                                <td key={m} className={`text-center py-1.5 px-2 text-xs font-semibold rounded-sm ${bg} ${tc}`}>
+                                                  {qty||'—'}
+                                                </td>
+                                              );
+                                            })}
+                                          </tr>
+                                        ))}
+                                        {years.length>1 && (
+                                          <tr className={`border-t-2 ${isDarkMode?'border-slate-600':'border-slate-300'}`}>
+                                            <td className={`text-xs font-bold py-2 pr-3 ${isDarkMode?'text-slate-300':'text-slate-700'}`}>ממוצע</td>
+                                            {activeMons.map(m=>{
+                                              const vals = years.map(yr=>cells[yr]?.[m]).filter(Boolean);
+                                              const avg = vals.length ? Math.round(vals.reduce((a,b)=>a+b,0)/vals.length) : 0;
+                                              return (
+                                                <td key={m} className={`text-center py-2 px-2 text-xs font-bold ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                                                  {avg||'—'}
+                                                </td>
+                                              );
+                                            })}
+                                          </tr>
+                                        )}
+                                      </tbody>
+                                    </table>
+                                  );
+                                })()}
+                                {/* Legend */}
+                                <div className={`flex items-center gap-4 mt-3 pt-3 border-t text-xs ${isDarkMode?'border-slate-700 text-slate-400':'border-slate-100 text-slate-500'}`}>
+                                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-emerald-400/60 inline-block"/>שיא</span>
+                                  <span className="flex items-center gap-1.5"><span className={`w-3 h-3 rounded inline-block ${isDarkMode?'bg-slate-600':'bg-slate-200'}`}/>ממוצע</span>
+                                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-amber-400/60 inline-block"/>שפל</span>
+                                  <span className={`mr-auto text-[10px] opacity-60`}>כמויות בפועל</span>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+);
+
+  // Resize handle: sits on a <th>, lets you drag to resize, double-click to auto-fit.
+  const renderColResizeHandle = (key, items) => (
+    <div
+      onMouseDown={e=>handleColResizeStart(key, e)}
+      onClick={e=>{e.preventDefault(); e.stopPropagation();}}
+      onDoubleClick={e=>{e.preventDefault(); e.stopPropagation(); autoFitProcColumn(key, items);}}
+      title="גרור לשינוי רוחב · לחיצה כפולה להתאמה אוטומטית"
+      style={{ position:'absolute', insetInlineEnd:-4, top:0, bottom:0, width:8, cursor:'col-resize', zIndex:5 }}
+      className="group/resize"
+    >
+      <div className={`h-full w-px mx-auto ${isDarkMode?'bg-slate-700 group-hover/resize:bg-blue-400':'bg-slate-200 group-hover/resize:bg-blue-400'}`}/>
+    </div>
+  );
+  // Shared header row — used by the main "by product" table AND every per-supplier
+  // table, so column widths/behavior stay perfectly consistent everywhere.
+  const renderProcTableHeader = (items) => (
+    <tr>
+      {PROC_COL_KEYS.map(key => {
+        const extraCls = key==='order' ? `font-bold ${isDarkMode?'text-blue-400 hover:text-blue-300':'text-blue-700 hover:text-blue-600'}` : '';
+        const sortKeyMap = { name:'name', supplier:'supplier', abc:'abc', avg:'avgMonthly', trend:'trend', stock:null, coverage:'coverageDays', order:'suggestedOrder' };
+        const sortKey = sortKeyMap[key];
+        return (
+          <th key={key}
+            className={`px-4 py-2.5 relative whitespace-nowrap select-none ${sortKey?`cursor-pointer hover:text-blue-500`:''} ${extraCls}`}
+            style={{ width: colWidths[key], maxWidth: colWidths[key] }}
+            onClick={sortKey ? ()=>reqSort(sortKey) : undefined}>
+            {PROC_COL_LABELS[key]}{sortKey?' ↕':''}
+            {renderColResizeHandle(key, items)}
+          </th>
+        );
+      })}
+    </tr>
+  );
+
+const renderProductRow = (p) => {
+                const isEditing = editingStock===p.key;
+                const rowBg = p.risk==='critical'?(isDarkMode?'bg-red-900/10':'bg-red-50/60'):p.risk==='low'?(isDarkMode?'bg-amber-900/5':'bg-amber-50/30'):'';
+                return (
+                  <tr key={p.key} className={`transition-all duration-150 group cursor-default ${isDarkMode?'hover:bg-slate-700/50':'hover:bg-blue-50/40'} ${rowBg}`}>
+                    <td className="px-4 py-3 overflow-hidden">
+                      <div className="flex items-center gap-2 flex-wrap">
+                        <p className={`font-medium text-sm ${isDarkMode?'text-slate-100':'text-slate-800'} truncate`} title={p.name}>{p.name}</p>
+                        {p.lifecycle==='growing'  && <span title="צמיחה" className="text-xs">🚀</span>}
+                        {p.lifecycle==='declining' && <span title="דעיכה" className="text-xs">⚠️</span>}
+                        {p.lifecycle==='dying'     && <span title="גוסס" className="text-xs">🔴</span>}
+                        {p.incomingQty>0 && <span title={`בדרך: ${p.incomingQty} יח'`} className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-50 text-blue-700'}`}>📦 {p.incomingQty}</span>}
+                      </div>
+                      <div className="flex items-center gap-2 mt-0.5 flex-wrap">
+                        {p.sku&&p.sku!==p.name&&<span className={`text-xs font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}</span>}
+                        {editingMOQ===p.key ? (
+                          <input type="number" autoFocus defaultValue={p.moq??''}
+                            onBlur={e=>{saveMOQ(p.key,e.target.value);setEditingMOQ(null);}}
+                            onKeyDown={e=>{if(e.key==='Enter'){saveMOQ(p.key,e.target.value);setEditingMOQ(null);}if(e.key==='Escape')setEditingMOQ(null);}}
+                            style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#a855f7'}:{}}
+                            className="w-16 px-1.5 py-0.5 border-2 border-purple-500 rounded text-[10px] text-right focus:outline-none" placeholder="MOQ"
+                          />
+                        ) : (
+                          <button onClick={()=>setEditingMOQ(p.key)} title="כמות מינימום להזמנה (MOQ) — לחץ לעריכה"
+                            className={`text-[10px] font-medium px-1.5 py-0.5 rounded border transition-colors ${p.moq
+                              ?(isDarkMode?'border-purple-500/40 bg-purple-500/10 text-purple-300 hover:bg-purple-500/20':'border-purple-200 bg-purple-50 text-purple-600 hover:bg-purple-100')
+                              :(isDarkMode?'border-dashed border-slate-700 text-slate-600 hover:text-purple-400':'border-dashed border-slate-300 text-slate-400 hover:text-purple-500')}`}>
+                            {p.moq ? `MOQ ${p.moq}` : '+MOQ'}
+                          </button>
+                        )}
+                      </div>
+                      {p.moq>0 && p.suggestedOrderRaw>0 && p.suggestedOrder!==p.suggestedOrderRaw && (
+                        <div className={`text-[10px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+                          חושב {p.suggestedOrderRaw} · עוגל ל-MOQ
+                        </div>
+                      )}
+                      {SeasonalityButton(p)}
+                    </td>
+                    <td className="px-4 py-3 overflow-hidden">
+                      <span className={`text-sm truncate block ${isDarkMode?'text-slate-300':'text-slate-600'}`} title={p.supplier||''}>{p.supplier||'—'}</span>
+                      {p.currency && p.currency!=='ILS' && <span className={`text-[10px] ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.currency}</span>}
+                    </td>
+                    <td className="px-4 py-3.5"><ABCBadge cls={p.abc} xyz={p.xyz} abcXyz={p.abcXyz}/></td>
+                    {/* Avg + Forecast combined */}
+                    <td className="px-4 py-3">
+                      <div className="flex flex-col gap-0.5">
+                        <div className="flex items-baseline gap-1.5 flex-wrap">
+                          <span className={`font-bold tabular-nums text-sm ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{p.avgMonthly.toFixed(1)}</span>
+                          <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>יח'</span>
+                          {p.isLimitedData && (
+                            <span title={`נתונים מ-${p.avgDataMonths} חודשים בלבד — ממוצע לא אמין`}
+                              className={`text-[10px] font-bold px-1.5 py-0.5 rounded cursor-help ${isDarkMode?'bg-amber-500/20 text-amber-400':'bg-amber-100 text-amber-700'}`}>
+                              ⚠ {p.avgDataMonths}m
+                            </span>
+                          )}
+                          {!p.isLimitedData && p.avgDataMonths > 0 && (
+                            <span title={`ממוצע מבוסס על ${p.avgDataMonths} חודשים (מתוך ${p.windowMonths||'?'} חודשי חלון)`}
+                              className={`text-[10px] px-1 rounded cursor-help ${isDarkMode?'text-slate-600':'text-slate-400'}`}>
+                              {p.avgDataMonths}/{p.windowMonths||'?'}m
+                            </span>
+                          )}
+                        </div>
+                        {p.forecastNext>0 && <div className={`text-xs flex items-center gap-1 ${isDarkMode?'text-blue-400':'text-blue-600'}`}
+                          title={p.seasonalityReliable ? `כולל התאמה עונתית (מקדם ×${p.seasonalFactor.toFixed(2)})` : 'אין מספיק היסטוריה (2+ שנים) להתאמה עונתית'}>
+                          <TrendingUp className="w-3 h-3"/>תחזית: {p.forecastNext}
+                          {p.seasonalityReliable && p.seasonalFactor!==1 && <span className="opacity-70">🍂</span>}
+                        </div>}
+                        {p.safetyStock>0 && <div className={`text-xs flex items-center gap-1 ${isDarkMode?'text-purple-400':'text-purple-600'}`}
+                          title="מלאי בטחון מחושב (95% רמת שירות)">
+                          <Activity className="w-3 h-3"/>בטחון: {p.safetyStock}
+                        </div>}
+                      </div>
+                    </td>
+                    {/* Trend */}
+                    <td className="px-4 py-3">
+                      <span className={`flex items-center gap-1 text-xs font-bold whitespace-nowrap ${!p.trend?(isDarkMode?'text-slate-500':'text-slate-400'):p.trend>0?'text-emerald-500':'text-red-500'}`}>
+                        {p.trend>5?<ArrowUpRight className="w-3.5 h-3.5"/>:p.trend<-5?<ArrowDownRight className="w-3.5 h-3.5"/>:<Minus className="w-3.5 h-3.5"/>}
+                        {p.trend?`${Math.abs(p.trend).toFixed(0)}%`:'—'}
+                      </span>
+                    </td>
+                    {/* Stock — editable, shows minStock hint below */}
+                    <td className="px-4 py-3">
+                      {isEditing ? (
+                        <input type="number" autoFocus defaultValue={p.currentStock??''}
+                          onBlur={e=>{saveStock(p.key,e.target.value);setEditingStock(null);}}
+                          onKeyDown={e=>{if(e.key==='Enter'){saveStock(p.key,e.target.value);setEditingStock(null);}if(e.key==='Escape')setEditingStock(null);}}
+                          style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#3b82f6'}:{}}
+                          className="w-20 px-2 py-1.5 border-2 border-blue-500 rounded-lg text-xs text-right focus:outline-none" placeholder="0"
+                        />
+                      ) : (
+                        <div>
+                          <button onClick={()=>setEditingStock(p.key)}
+                            className={`flex flex-col items-start px-3 py-2 rounded-xl text-xs border-2 transition-colors group-hover:border-blue-400
+                              ${p.currentStock!==null
+                                ?(p.currentStock<=0
+                                  ?(isDarkMode?'border-red-500/60 bg-red-900/20 text-red-300':'border-red-300 bg-red-50 text-red-700')
+                                  :(isDarkMode?'border-slate-700 bg-slate-700/50 text-slate-300':'border-slate-200 bg-white text-slate-700'))
+                                :(isDarkMode?'border-dashed border-slate-700 text-slate-500 hover:text-blue-400':'border-dashed border-slate-300 text-slate-400 hover:text-blue-500')}`}
+                            title="לחץ לעריכה">
+                            {p.currentStock!==null ? (
+                              <>
+                                <span className={`font-bold tabular-nums text-base leading-tight ${p.currentStock<=0?(isDarkMode?'text-red-400':'text-red-600'):(isDarkMode?'text-white':'text-slate-800')}`}>
+                                  {p.currentStock.toLocaleString()}
+                                </span>
+                                <span className={`text-[10px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>יח'{p.minStock?' · מינ׳ '+p.minStock:''}</span>
+                              </>
+                            ) : (
+                              <span className="flex items-center gap-1 py-1"><RefreshCw className="w-3 h-3"/>הזן מלאי</span>
+                            )}
+                          </button>
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      <RiskBadge risk={p.risk} months={p.coverageMonths} days={p.coverageDays}/>
+                      {p.coverageDays!==null && (
+                        <div className={`mt-1.5 h-1.5 rounded-full overflow-hidden w-16 ${isDarkMode?'bg-slate-700':'bg-slate-200'}`}>
+                          <div className="h-full rounded-full transition-all duration-500" style={{
+                            width: Math.min(100,(p.coverageDays/(monthsToStock*30+1)*100)).toFixed(0)+'%',
+                            background: p.risk==='critical'?'#ef4444':p.risk==='low'?'#f59e0b':'#10b981'
+                          }}/>
+                        </div>
+                      )}
+                    </td>
+                    <td className="px-4 py-3">
+                      {p.suggestedOrder>0 ? (
+                        <div className="flex flex-col items-start gap-1">
+                          <div className={`flex items-center gap-2 px-3 py-2 rounded-xl font-bold border-2 whitespace-nowrap
+                            ${p.risk==='critical'
+                              ?(isDarkMode?'bg-red-500/20 border-red-500 text-red-300':'bg-red-50 border-red-400 text-red-700')
+                              :p.risk==='low'
+                              ?(isDarkMode?'bg-amber-500/20 border-amber-500 text-amber-300':'bg-amber-50 border-amber-400 text-amber-700')
+                              :(isDarkMode?'bg-blue-500/15 border-blue-500/50 text-blue-300':'bg-blue-50 border-blue-300 text-blue-700')}`}>
+                            <ShoppingCart className="w-4 h-4"/>
+                            <span className="text-base tabular-nums">{p.suggestedOrder.toLocaleString()}</span>
+                            <span className="text-xs font-normal opacity-70">יח'</span>
+                          </div>
+                          {p.orderCost&&<span className={`text-xs px-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{formatShort(p.orderCost)}</span>}
+                        </div>
+                      ) : (
+                        <span className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-xl border ${isDarkMode?'bg-emerald-500/10 border-emerald-500/20 text-emerald-400':'bg-emerald-50 border-emerald-200 text-emerald-600'}`}>
+                          <Check className="w-3.5 h-3.5"/> מספיק
+                        </span>
+                      )}
+                    </td>
+                  </tr>
+                );
+};
+
   const MiniSparkline = ({data}) => {
     if (!data||data.length<2) return null;
     const vals=data.map(d=>d.v), min=Math.min(...vals), max=Math.max(...vals), range=max-min||1;
@@ -1618,7 +2087,12 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
         {viewMode==='suppliers' && supplierGroups.length>0 && (
           <div className="flex items-center gap-3">
             <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
-              {supplierGroups.reduce((a,g)=>a+g.totalUnits,0).toLocaleString()} יח' · {formatShort(supplierGroups.reduce((a,g)=>a+g.totalCost,0))} סה"כ
+              {supplierGroups.reduce((a,g)=>a+g.totalUnits,0).toLocaleString()} יח'
+              {Object.entries(supplierGroups.reduce((acc,g)=>{
+                Object.entries(g.costByCurrency).forEach(([cur,amt])=>{ acc[cur]=(acc[cur]||0)+amt; });
+                return acc;
+              }, {})).map(([cur,amt]) => ` · ${formatUnitCost(Math.round(amt), cur==='ILS'?null:cur)}${cur!=='ILS'?` (${cur})`:''}`).join('')}
+              {' '}סה"כ
             </span>
             <button
               onClick={() => {
@@ -1629,12 +2103,14 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
                     supplierGroups.forEach(grp => {
                       html += `<h3 style="font-family:Calibri;font-size:14px;font-weight:bold;margin-top:20px;color:#1e293b">הזמנה מ: ${grp.name}</h3>`;
                       html += `<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Calibri;font-size:11px;direction:rtl;margin-bottom:8px">`;
-                      html += `<thead><tr style="background:#1e293b;color:#fff"><th>מק"ט</th><th>תאור מוצר</th><th>ABC</th><th>ממוצע/חודש</th><th>מלאי נוכחי</th><th>כיסוי</th><th style="background:#1d4ed8">להזמין (יח')</th><th>מחיר קניה ₪</th><th>עלות הזמנה ₪</th></tr></thead><tbody>`;
+                      html += `<thead><tr style="background:#1e293b;color:#fff"><th>מק"ט</th><th>תאור מוצר</th><th>ABC</th><th>ממוצע/חודש</th><th>מלאי נוכחי</th><th>כיסוי</th><th style="background:#1d4ed8">להזמין (יח')</th><th>מחיר קניה</th><th>עלות הזמנה</th></tr></thead><tbody>`;
                       grp.items.filter(p=>p.suggestedOrder>0).forEach(p => {
                         const bg = riskColor[p.risk]||'#fff';
-                        html += `<tr style="background:${bg}"><td>${p.sku||p.name}</td><td>${p.name}</td><td style="text-align:center;font-weight:bold">${p.abc}</td><td style="text-align:center">${p.avgMonthly.toFixed(1)}</td><td style="text-align:center">${p.currentStock??'—'}</td><td style="text-align:center">${p.coverageDays!=null?p.coverageDays+' יום':'—'}</td><td style="text-align:center;font-weight:bold;font-size:13px;background:${p.risk==='critical'?'#fecaca':p.risk==='low'?'#fef3c7':'#dbeafe'};color:${p.risk==='critical'?'#dc2626':p.risk==='low'?'#d97706':'#1d4ed8'}">${p.suggestedOrder.toLocaleString()}</td><td style="text-align:center">${p.unitCost?'₪'+p.unitCost:''}</td><td style="text-align:center">${p.orderCost?'₪'+Math.round(p.orderCost).toLocaleString():''}</td></tr>`;
+                        const sym = currencySymbol(p.currency);
+                        html += `<tr style="background:${bg}"><td>${p.sku||p.name}</td><td>${p.name}</td><td style="text-align:center;font-weight:bold">${p.abc}</td><td style="text-align:center">${p.avgMonthly.toFixed(1)}</td><td style="text-align:center">${p.currentStock??'—'}</td><td style="text-align:center">${p.coverageDays!=null?p.coverageDays+' יום':'—'}</td><td style="text-align:center;font-weight:bold;font-size:13px;background:${p.risk==='critical'?'#fecaca':p.risk==='low'?'#fef3c7':'#dbeafe'};color:${p.risk==='critical'?'#dc2626':p.risk==='low'?'#d97706':'#1d4ed8'}">${p.suggestedOrder.toLocaleString()}</td><td style="text-align:center">${p.unitCost?sym+p.unitCost:''}</td><td style="text-align:center">${p.orderCost?sym+Math.round(p.orderCost).toLocaleString():''}</td></tr>`;
                       });
-                      html += `<tr style="background:#f8fafc;font-weight:bold"><td colspan="6" style="text-align:right">סה"כ מ${grp.name}</td><td style="text-align:center;color:#1d4ed8">${grp.totalUnits.toLocaleString()}</td><td></td><td style="text-align:center;color:#16a34a">${grp.totalCost>0?'₪'+Math.round(grp.totalCost).toLocaleString():''}</td></tr>`;
+                      const subtotalText = Object.entries(grp.costByCurrency).map(([cur,amt]) => `${currencySymbol(cur==='ILS'?null:cur)}${Math.round(amt).toLocaleString()}${cur!=='ILS'?` ${cur}`:''}`).join(' + ');
+                      html += `<tr style="background:#f8fafc;font-weight:bold"><td colspan="6" style="text-align:right">סה"כ מ${grp.name}</td><td style="text-align:center;color:#1d4ed8">${grp.totalUnits.toLocaleString()}</td><td></td><td style="text-align:center;color:#16a34a">${subtotalText}</td></tr>`;
                       html += `</tbody></table><br/>`;
                     });
                     html += `</body></html>`;
@@ -1664,13 +2140,10 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
           {supplierGroups.length === 0 ? (
             <div className={`flex flex-col items-center justify-center py-16 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
               <Truck className={`w-10 h-10 mb-3 ${isDarkMode?'text-slate-600':'text-slate-300'}`}/>
-              <p className={`text-sm ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין פריטים להזמנה כרגע</p>
+              <p className={`text-sm ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין מוצרים להצגה</p>
             </div>
           ) : supplierGroups.map(grp => {
             const isOpen = expandedSuppliers.has(grp.name);
-            const critItems = grp.items.filter(p=>p.risk==='critical'&&p.suggestedOrder>0);
-            const lowItems  = grp.items.filter(p=>p.risk==='low'&&p.suggestedOrder>0);
-            const okItems   = grp.items.filter(p=>p.risk!=='critical'&&p.risk!=='low'&&p.suggestedOrder>0);
             return (
               <div key={grp.name} className={`rounded-2xl border overflow-hidden transition-all ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
                 {/* Supplier header */}
@@ -1686,10 +2159,17 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
                         <span className={`font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>{grp.name}</span>
                         {grp.criticalCount>0 && <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-medium">{grp.criticalCount} קריטי</span>}
                       </div>
-                      <div className="flex items-center gap-4 mt-1">
+                      <div className="flex items-center gap-4 mt-1 flex-wrap">
                         <span className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{grp.items.filter(p=>p.suggestedOrder>0).length} פריטים להזמנה</span>
-                        {grp.totalCost>0 && <span className={`text-xs font-medium ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>{formatShort(grp.totalCost)} עלות כוללת</span>}
+                        {Object.entries(grp.costByCurrency).map(([cur, amt]) => (
+                          <span key={cur} className={`text-xs font-medium ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>
+                            {formatUnitCost(Math.round(amt), cur==='ILS'?null:cur)} עלות כוללת{cur!=='ILS'?` (${cur})`:''}
+                          </span>
+                        ))}
                       </div>
+                      {Object.keys(grp.costByCurrency).length>1 && (
+                        <p className={`text-[10px] mt-0.5 ${isDarkMode?'text-amber-500/70':'text-amber-600'}`}>⚠ הספק הזה מיובא במספר מטבעות — הסכומים לא מומרים/מאוחדים</p>
+                      )}
                     </div>
                     {/* Total units badge */}
                     <div className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm shrink-0 ${isDarkMode?'bg-blue-500/15 text-blue-300':'bg-blue-50 text-blue-700'}`}>
@@ -1701,85 +2181,29 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
                   </div>
                 </button>
 
-                {/* Expanded items */}
+                {/* Expanded items — same table as "לפי מוצר" tab, scoped to this supplier */}
                 {isOpen && (
                   <div className={`border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
-                    {/* Critical items */}
-                    {critItems.length>0 && (
-                      <div>
-                        <div className={`px-5 py-2 text-xs font-bold flex items-center gap-2 ${isDarkMode?'bg-red-900/20 text-red-400':'bg-red-50 text-red-700'}`}>
-                          <TriangleAlert className="w-3 h-3"/> קריטי — הזמן מיד
-                        </div>
-                        {critItems.map(p => (
-                          <div key={p.key} className={`flex items-center gap-4 px-5 py-3 border-b last:border-0 ${isDarkMode?'border-slate-700/50 bg-red-900/5':'border-slate-100 bg-red-50/30'}`}>
-                            <div className="flex-1 min-w-0">
-                              <p className={`text-sm font-medium truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{p.name}</p>
-                              <div className="flex items-center gap-3 mt-0.5">
-                                {p.sku&&p.sku!==p.name&&<span className={`text-xs font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.sku}</span>}
-                                <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>ממוצע: {p.avgMonthly.toFixed(1)}/חודש</span>
-                                {p.currentStock!==null&&<span className={`text-xs ${p.currentStock<=0?'text-red-500 font-bold':'text-slate-400'}`}>מלאי: {p.currentStock}</span>}
-                              </div>
-                            </div>
-                            {p.unitCost&&<span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>₪{p.unitCost}/יח'</span>}
-                            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-red-100 text-red-700 font-bold text-sm shrink-0">
-                              <ShoppingCart className="w-3.5 h-3.5"/>{p.suggestedOrder.toLocaleString()}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {/* Low items */}
-                    {lowItems.length>0 && (
-                      <div>
-                        <div className={`px-5 py-2 text-xs font-bold flex items-center gap-2 ${isDarkMode?'bg-amber-900/20 text-amber-400':'bg-amber-50 text-amber-700'}`}>
-                          <AlertTriangle className="w-3 h-3"/> מלאי נמוך
-                        </div>
-                        {lowItems.map(p => (
-                          <div key={p.key} className={`flex items-center gap-4 px-5 py-3 border-b last:border-0 ${isDarkMode?'border-slate-700/50':'border-slate-100'}`}>
-                            <div className="flex-1 min-w-0">
-                              <p className={`text-sm font-medium truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{p.name}</p>
-                              <div className="flex items-center gap-3 mt-0.5">
-                                {p.sku&&p.sku!==p.name&&<span className={`text-xs font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.sku}</span>}
-                                <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>ממוצע: {p.avgMonthly.toFixed(1)}/חודש</span>
-                                {p.currentStock!==null&&<span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>מלאי: {p.currentStock}</span>}
-                              </div>
-                            </div>
-                            {p.unitCost&&<span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>₪{p.unitCost}/יח'</span>}
-                            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-amber-100 text-amber-700 font-bold text-sm shrink-0">
-                              <ShoppingCart className="w-3.5 h-3.5"/>{p.suggestedOrder.toLocaleString()}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
-                    {/* OK items */}
-                    {okItems.length>0 && (
-                      <div>
-                        <div className={`px-5 py-2 text-xs font-bold flex items-center gap-2 ${isDarkMode?'bg-slate-700/50 text-slate-400':'bg-slate-50 text-slate-500'}`}>
-                          <Package className="w-3 h-3"/> להזמין מראש
-                        </div>
-                        {okItems.map(p => (
-                          <div key={p.key} className={`flex items-center gap-4 px-5 py-3 border-b last:border-0 ${isDarkMode?'border-slate-700/50':'border-slate-100'}`}>
-                            <div className="flex-1 min-w-0">
-                              <p className={`text-sm font-medium truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{p.name}</p>
-                              <div className="flex items-center gap-3 mt-0.5">
-                                {p.sku&&p.sku!==p.name&&<span className={`text-xs font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.sku}</span>}
-                                <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>ממוצע: {p.avgMonthly.toFixed(1)}/חודש</span>
-                              </div>
-                            </div>
-                            {p.unitCost&&<span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>₪{p.unitCost}/יח'</span>}
-                            <div className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-blue-50 text-blue-700 font-bold text-sm shrink-0">
-                              <ShoppingCart className="w-3.5 h-3.5"/>{p.suggestedOrder.toLocaleString()}
-                            </div>
-                          </div>
-                        ))}
-                      </div>
-                    )}
+                    <div className="overflow-x-auto -mx-1 px-1 pt-2">
+                      <table className={`text-sm text-right ${isDarkMode?'text-slate-300':'text-slate-600'}`} style={{tableLayout:'fixed', width: PROC_COL_KEYS.reduce((s,k)=>s+(colWidths[k]||PROC_COL_DEFAULTS[k]),0)}}>
+                        <colgroup>{PROC_COL_KEYS.map(k=><col key={k} style={{width: colWidths[k]||PROC_COL_DEFAULTS[k]}}/>)}</colgroup>
+                        <thead className={`text-xs uppercase tracking-wide ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+                          {renderProcTableHeader(grp.items)}
+                        </thead>
+                        <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                          {grp.items.map(renderProductRow)}
+                        </tbody>
+                      </table>
+                    </div>
                     {/* Supplier total footer */}
-                    <div className={`flex justify-between items-center px-5 py-3 ${isDarkMode?'bg-slate-700/30':'bg-slate-50'}`}>
+                    <div className={`flex justify-between items-center px-5 py-3 flex-wrap gap-2 ${isDarkMode?'bg-slate-700/30':'bg-slate-50'}`}>
                       <span className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>סה"כ הזמנה מ{grp.name}</span>
                       <div className="flex items-center gap-4">
-                        {grp.totalCost>0&&<span className={`text-sm font-bold ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>{formatShort(grp.totalCost)}</span>}
+                        {Object.entries(grp.costByCurrency).map(([cur,amt]) => (
+                          <span key={cur} className={`text-sm font-bold ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>
+                            {formatUnitCost(Math.round(amt), cur==='ILS'?null:cur)}{cur!=='ILS'?` ${cur}`:''}
+                          </span>
+                        ))}
                         <span className={`font-bold text-sm ${isDarkMode?'text-white':'text-slate-800'}`}>{grp.totalUnits.toLocaleString()} יח'</span>
                       </div>
                     </div>
@@ -2467,273 +2891,14 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
         </div>
 
         <div className="overflow-x-auto -mx-1 px-1">
-          <table className={`w-full text-sm text-right min-w-[900px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+          <table className={`text-sm text-right ${isDarkMode?'text-slate-300':'text-slate-600'}`} style={{tableLayout:'fixed', width: PROC_COL_KEYS.reduce((s,k)=>s+(colWidths[k]||PROC_COL_DEFAULTS[k]),0)}}>
+            <colgroup>{PROC_COL_KEYS.map(k=><col key={k} style={{width: colWidths[k]||PROC_COL_DEFAULTS[k]}}/>)}</colgroup>
             <thead className={`text-xs uppercase tracking-wide sticky top-0 z-10 ${isDarkMode?'bg-slate-900/95 text-slate-400 backdrop-blur':'bg-slate-50/95 text-slate-500 backdrop-blur'}`}>
-              <tr>
-                <th className="px-4 py-3.5 min-w-[180px]">מוצר</th>
-                <th className="px-4 py-3.5 cursor-pointer hover:text-blue-500 select-none whitespace-nowrap" onClick={()=>reqSort('abc')}>ABC ↕</th>
-                <th className="px-4 py-3.5 cursor-pointer hover:text-blue-500 select-none whitespace-nowrap" onClick={()=>reqSort('avgMonthly')}>ממוצע / תחזית ↕</th>
-                <th className="px-4 py-3.5 cursor-pointer hover:text-blue-500 select-none whitespace-nowrap" onClick={()=>reqSort('trend')}>מגמה ↕</th>
-                <th className="px-4 py-3.5 whitespace-nowrap">מלאי עכשיו</th>
-                <th className="px-4 py-3.5 cursor-pointer hover:text-blue-500 select-none whitespace-nowrap" onClick={()=>reqSort('coverageDays')}>כיסוי ↕</th>
-                <th className={`px-4 py-3.5 cursor-pointer select-none whitespace-nowrap font-bold ${isDarkMode?'text-blue-400 hover:text-blue-300':'text-blue-700 hover:text-blue-600'}`} onClick={()=>reqSort('suggestedOrder')}>להזמין ↕</th>
-              </tr>
+              {renderProcTableHeader(filtered)}
             </thead>
             <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-              {filtered.map(p => {
-                const isEditing = editingStock===p.key;
-                const rowBg = p.risk==='critical'?(isDarkMode?'bg-red-900/10':'bg-red-50/60'):p.risk==='low'?(isDarkMode?'bg-amber-900/5':'bg-amber-50/30'):'';
-                return (
-                  <tr key={p.key} className={`transition-all duration-150 group cursor-default ${isDarkMode?'hover:bg-slate-700/50':'hover:bg-blue-50/40'} ${rowBg}`}>
-                    <td className="px-4 py-3 max-w-[220px]">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <p className={`font-medium text-sm ${isDarkMode?'text-slate-100':'text-slate-800'} truncate`} title={p.name}>{p.name}</p>
-                        {p.lifecycle==='growing'  && <span title="צמיחה" className="text-xs">🚀</span>}
-                        {p.lifecycle==='declining' && <span title="דעיכה" className="text-xs">⚠️</span>}
-                        {p.lifecycle==='dying'     && <span title="גוסס" className="text-xs">🔴</span>}
-                        {p.incomingQty>0 && <span title={`בדרך: ${p.incomingQty} יח'`} className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-50 text-blue-700'}`}>📦 {p.incomingQty}</span>}
-                      </div>
-                      <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                        {p.sku&&p.sku!==p.name&&<span className={`text-xs font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}</span>}
-                        {p.supplier&&<span className={`text-xs ${isDarkMode?'text-slate-600':'text-slate-400'} truncate max-w-[100px]`} title={p.supplier}>{p.supplier}</span>}
-                      </div>
-                      <div className="relative" style={{lineHeight:0}}>
-                            <button
-                              onClick={e=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setSeasonHover(prev=>prev?.key===p.key?null:{key:p.key,rect:r});}}
-                              className={`p-1 rounded text-xs transition-opacity ${seasonHover?.key===p.key?'opacity-100 text-blue-500':'opacity-40 hover:opacity-100'} ${isDarkMode?'text-blue-400':'text-blue-500'}`}>
-                              📅
-                            </button>
-                            {seasonHover?.key===p.key && (
-                              <div className={`rounded-2xl border shadow-2xl text-right ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}
-                                onClick={e=>e.stopPropagation()}
-                                style={{
-                                  position:'fixed',
-                                  zIndex:9999,
-                                  width:'max-content',
-                                  padding:'16px',
-                                  ...(seasonHover?.rect ? {
-                                    // Open upward if enough space, else downward
-                                    ...(seasonHover.rect.top > 350
-                                      ? { bottom: window.innerHeight - seasonHover.rect.top + 8 }
-                                      : { top: seasonHover.rect.bottom + 8 }),
-                                    // Position so popup stays within viewport
-                                    ...(()=>{
-                                      const popupW = Math.min(
-                                        24 * 36 + 60,  // max: 24 months * 36px + year col
-                                        window.innerWidth - 16
-                                      );
-                                      const wantedRight = window.innerWidth - seasonHover.rect.right + 8;
-                                      const right = Math.max(8, Math.min(wantedRight, window.innerWidth - popupW - 8));
-                                      return { right };
-                                    })(),
-                                  } : { top:100, right:8 })
-                                }}>
-                                {/* Header */}
-                                <div className="flex items-center justify-between mb-3 gap-3">
-                                  <p className={`text-sm font-bold shrink-0 ${isDarkMode?'text-white':'text-slate-800'}`}>📅 עונתיות חודשית</p>
-                                  <p className={`text-xs truncate ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{p.name}</p>
-                                  <button
-                                    onClick={e=>{e.stopPropagation();setSeasonHover(null);}}
-                                    className={`shrink-0 p-1 rounded-full transition-colors ${isDarkMode?'hover:bg-slate-700 text-slate-400 hover:text-white':'hover:bg-slate-100 text-slate-400 hover:text-slate-700'}`}>
-                                    <X className="w-4 h-4"/>
-                                  </button>
-                                </div>
-                                {/* Table: months as columns, years as rows */}
-                                {(() => {
-                                  // Build: months as columns (ינו-דצמ order), years as rows
-                                  const monthOrder = ['ינו','פבר','מרץ','אפר','מאי','יונ','יול','אוג','ספט','אוק','נוב','דצמ'];
-                                  const monthFull  = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
-
-                                  // Parse all entries: {year, month, qty}
-                                  const cells = {}; // cells[year][monthAbbr] = qty
-                                  Object.entries(p.monthlyData||{}).forEach(([date, qty]) => {
-                                    if (!qty || !date) return;
-                                    const hyphen = date.indexOf('-');
-                                    if (hyphen === -1) return;
-                                    const mon = date.slice(0, hyphen);
-                                    const yrRaw = date.slice(hyphen + 1);
-                                    const yr = yrRaw.length <= 2 ? '20' + yrRaw.padStart(2,'0') : yrRaw;
-                                    if (!cells[yr]) cells[yr] = {};
-                                    cells[yr][mon] = (cells[yr][mon]||0) + qty;
-                                  });
-
-                                  const years = Object.keys(cells).sort();
-                                  if (!years.length) return <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין נתונים</p>;
-
-                                  // Only include months that have data in at least one year
-                                  const activeMons = monthOrder.filter(m => years.some(yr => cells[yr]?.[m]));
-
-                                  return (
-                                    <table className="border-collapse text-right" style={{tableLayout:'auto'}}>
-                                      <thead>
-                                        <tr>
-                                          <th className={`text-xs pb-2 pr-3 text-right ${isDarkMode?'text-slate-400':'text-slate-500'}`} style={{minWidth:'48px'}}>שנה</th>
-                                          {activeMons.map(m=>(
-                                            <th key={m} className={`text-xs pb-2 text-center font-semibold px-2 ${isDarkMode?'text-slate-300':'text-slate-600'}`} style={{minWidth:'32px'}}>{m}</th>
-                                          ))}
-                                        </tr>
-                                      </thead>
-                                      <tbody>
-                                        {years.map((yr,ri)=>(
-                                          <tr key={yr} className={ri>0?`border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`:''}>
-                                            <td className={`text-xs font-bold py-1.5 pr-3 ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{yr}</td>
-                                            {activeMons.map(m=>{
-                                              const qty = cells[yr]?.[m];
-                                              const avg = p.avgMonthly||1;
-                                              const ratio = qty ? qty/avg : 0;
-                                              const bg = !qty?''
-                                                :ratio>=1.3?(isDarkMode?'bg-emerald-500/25':'bg-emerald-50')
-                                                :ratio>=1.1?(isDarkMode?'bg-emerald-500/10':'bg-emerald-50/40')
-                                                :ratio>=0.8?''
-                                                :ratio>=0.5?(isDarkMode?'bg-amber-500/15':'bg-amber-50')
-                                                :(isDarkMode?'bg-red-500/15':'bg-red-50');
-                                              const tc = !qty?(isDarkMode?'text-slate-700':'text-slate-300')
-                                                :ratio>=1.2?(isDarkMode?'text-emerald-300':'text-emerald-700')
-                                                :ratio>=0.8?(isDarkMode?'text-slate-200':'text-slate-700')
-                                                :ratio>=0.5?(isDarkMode?'text-amber-300':'text-amber-700')
-                                                :(isDarkMode?'text-red-400':'text-red-600');
-                                              return (
-                                                <td key={m} className={`text-center py-1.5 px-2 text-xs font-semibold rounded-sm ${bg} ${tc}`}>
-                                                  {qty||'—'}
-                                                </td>
-                                              );
-                                            })}
-                                          </tr>
-                                        ))}
-                                        {years.length>1 && (
-                                          <tr className={`border-t-2 ${isDarkMode?'border-slate-600':'border-slate-300'}`}>
-                                            <td className={`text-xs font-bold py-2 pr-3 ${isDarkMode?'text-slate-300':'text-slate-700'}`}>ממוצע</td>
-                                            {activeMons.map(m=>{
-                                              const vals = years.map(yr=>cells[yr]?.[m]).filter(Boolean);
-                                              const avg = vals.length ? Math.round(vals.reduce((a,b)=>a+b,0)/vals.length) : 0;
-                                              return (
-                                                <td key={m} className={`text-center py-2 px-2 text-xs font-bold ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
-                                                  {avg||'—'}
-                                                </td>
-                                              );
-                                            })}
-                                          </tr>
-                                        )}
-                                      </tbody>
-                                    </table>
-                                  );
-                                })()}
-                                {/* Legend */}
-                                <div className={`flex items-center gap-4 mt-3 pt-3 border-t text-xs ${isDarkMode?'border-slate-700 text-slate-400':'border-slate-100 text-slate-500'}`}>
-                                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-emerald-400/60 inline-block"/>שיא</span>
-                                  <span className="flex items-center gap-1.5"><span className={`w-3 h-3 rounded inline-block ${isDarkMode?'bg-slate-600':'bg-slate-200'}`}/>ממוצע</span>
-                                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-amber-400/60 inline-block"/>שפל</span>
-                                  <span className={`mr-auto text-[10px] opacity-60`}>כמויות בפועל</span>
-                                </div>
-                              </div>
-                            )}
-                          </div>
-                    </td>
-                    <td className="px-4 py-3.5"><ABCBadge cls={p.abc} xyz={p.xyz} abcXyz={p.abcXyz}/></td>
-                    {/* Avg + Forecast combined */}
-                    <td className="px-4 py-3">
-                      <div className="flex flex-col gap-0.5">
-                        <div className="flex items-baseline gap-1.5 flex-wrap">
-                          <span className={`font-bold tabular-nums text-sm ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{p.avgMonthly.toFixed(1)}</span>
-                          <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>יח'</span>
-                          {p.isLimitedData && (
-                            <span title={`נתונים מ-${p.avgDataMonths} חודשים בלבד — ממוצע לא אמין`}
-                              className={`text-[10px] font-bold px-1.5 py-0.5 rounded cursor-help ${isDarkMode?'bg-amber-500/20 text-amber-400':'bg-amber-100 text-amber-700'}`}>
-                              ⚠ {p.avgDataMonths}m
-                            </span>
-                          )}
-                          {!p.isLimitedData && p.avgDataMonths > 0 && (
-                            <span title={`ממוצע מבוסס על ${p.avgDataMonths} חודשים (מתוך ${p.windowMonths||'?'} חודשי חלון)`}
-                              className={`text-[10px] px-1 rounded cursor-help ${isDarkMode?'text-slate-600':'text-slate-400'}`}>
-                              {p.avgDataMonths}/{p.windowMonths||'?'}m
-                            </span>
-                          )}
-                        </div>
-                        {p.forecastNext>0 && <div className={`text-xs flex items-center gap-1 ${isDarkMode?'text-blue-400':'text-blue-600'}`}>
-                          <TrendingUp className="w-3 h-3"/>תחזית: {p.forecastNext}
-                        </div>}
-                        {p.safetyStock>0 && <div className={`text-xs flex items-center gap-1 ${isDarkMode?'text-purple-400':'text-purple-600'}`}
-                          title="מלאי בטחון מחושב (95% רמת שירות)">
-                          <Activity className="w-3 h-3"/>בטחון: {p.safetyStock}
-                        </div>}
-                      </div>
-                    </td>
-                    {/* Trend */}
-                    <td className="px-4 py-3">
-                      <span className={`flex items-center gap-1 text-xs font-bold whitespace-nowrap ${!p.trend?(isDarkMode?'text-slate-500':'text-slate-400'):p.trend>0?'text-emerald-500':'text-red-500'}`}>
-                        {p.trend>5?<ArrowUpRight className="w-3.5 h-3.5"/>:p.trend<-5?<ArrowDownRight className="w-3.5 h-3.5"/>:<Minus className="w-3.5 h-3.5"/>}
-                        {p.trend?`${Math.abs(p.trend).toFixed(0)}%`:'—'}
-                      </span>
-                    </td>
-                    {/* Stock — editable, shows minStock hint below */}
-                    <td className="px-4 py-3">
-                      {isEditing ? (
-                        <input type="number" autoFocus defaultValue={p.currentStock??''}
-                          onBlur={e=>{saveStock(p.key,e.target.value);setEditingStock(null);}}
-                          onKeyDown={e=>{if(e.key==='Enter'){saveStock(p.key,e.target.value);setEditingStock(null);}if(e.key==='Escape')setEditingStock(null);}}
-                          style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#3b82f6'}:{}}
-                          className="w-20 px-2 py-1.5 border-2 border-blue-500 rounded-lg text-xs text-right focus:outline-none" placeholder="0"
-                        />
-                      ) : (
-                        <div>
-                          <button onClick={()=>setEditingStock(p.key)}
-                            className={`flex flex-col items-start px-3 py-2 rounded-xl text-xs border-2 transition-colors group-hover:border-blue-400
-                              ${p.currentStock!==null
-                                ?(p.currentStock<=0
-                                  ?(isDarkMode?'border-red-500/60 bg-red-900/20 text-red-300':'border-red-300 bg-red-50 text-red-700')
-                                  :(isDarkMode?'border-slate-700 bg-slate-700/50 text-slate-300':'border-slate-200 bg-white text-slate-700'))
-                                :(isDarkMode?'border-dashed border-slate-700 text-slate-500 hover:text-blue-400':'border-dashed border-slate-300 text-slate-400 hover:text-blue-500')}`}
-                            title="לחץ לעריכה">
-                            {p.currentStock!==null ? (
-                              <>
-                                <span className={`font-bold tabular-nums text-base leading-tight ${p.currentStock<=0?(isDarkMode?'text-red-400':'text-red-600'):(isDarkMode?'text-white':'text-slate-800')}`}>
-                                  {p.currentStock.toLocaleString()}
-                                </span>
-                                <span className={`text-[10px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>יח'{p.minStock?' · מינ׳ '+p.minStock:''}</span>
-                              </>
-                            ) : (
-                              <span className="flex items-center gap-1 py-1"><RefreshCw className="w-3 h-3"/>הזן מלאי</span>
-                            )}
-                          </button>
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">
-                      <RiskBadge risk={p.risk} months={p.coverageMonths} days={p.coverageDays}/>
-                      {p.coverageDays!==null && (
-                        <div className={`mt-1.5 h-1.5 rounded-full overflow-hidden w-16 ${isDarkMode?'bg-slate-700':'bg-slate-200'}`}>
-                          <div className="h-full rounded-full transition-all duration-500" style={{
-                            width: Math.min(100,(p.coverageDays/(monthsToStock*30+1)*100)).toFixed(0)+'%',
-                            background: p.risk==='critical'?'#ef4444':p.risk==='low'?'#f59e0b':'#10b981'
-                          }}/>
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">
-                      {p.suggestedOrder>0 ? (
-                        <div className="flex flex-col items-start gap-1">
-                          <div className={`flex items-center gap-2 px-3 py-2 rounded-xl font-bold border-2 whitespace-nowrap
-                            ${p.risk==='critical'
-                              ?(isDarkMode?'bg-red-500/20 border-red-500 text-red-300':'bg-red-50 border-red-400 text-red-700')
-                              :p.risk==='low'
-                              ?(isDarkMode?'bg-amber-500/20 border-amber-500 text-amber-300':'bg-amber-50 border-amber-400 text-amber-700')
-                              :(isDarkMode?'bg-blue-500/15 border-blue-500/50 text-blue-300':'bg-blue-50 border-blue-300 text-blue-700')}`}>
-                            <ShoppingCart className="w-4 h-4"/>
-                            <span className="text-base tabular-nums">{p.suggestedOrder.toLocaleString()}</span>
-                            <span className="text-xs font-normal opacity-70">יח'</span>
-                          </div>
-                          {p.orderCost&&<span className={`text-xs px-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{formatShort(p.orderCost)}</span>}
-                        </div>
-                      ) : (
-                        <span className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-xl border ${isDarkMode?'bg-emerald-500/10 border-emerald-500/20 text-emerald-400':'bg-emerald-50 border-emerald-200 text-emerald-600'}`}>
-                          <Check className="w-3.5 h-3.5"/> מספיק
-                        </span>
-                      )}
-                    </td>
-                  </tr>
-                );
-              })}
-              {!filtered.length&&<tr><td colSpan={7} className={`px-4 py-16 text-center text-sm ${isDarkMode?'text-slate-600':'text-slate-400'}`}>לא נמצאו מוצרים</td></tr>}
+              {filtered.map(renderProductRow)}
+              {!filtered.length&&<tr><td colSpan={8} className={`px-4 py-16 text-center text-sm ${isDarkMode?'text-slate-600':'text-slate-400'}`}>לא נמצאו מוצרים</td></tr>}
             </tbody>
           </table>
         </div>
