@@ -1176,6 +1176,8 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
         isLimitedData = finalVals.length < 3;
       }
       const sparkline = allMonths.slice(-6).map(m=>({m, v:p.monthlyData[m]||0}));
+      // Richer 12-month series for the trend popup chart (sparkline stays at 6 for compact use elsewhere)
+      const trendSeries = allMonths.slice(-12).map(m=>({month:m, qty:p.monthlyData[m]||0}));
       const last3 = allMonths.slice(-3).reduce((a,m)=>a+(p.monthlyData[m]||0),0)/3;
       const prev3 = allMonths.slice(-6,-3).reduce((a,m)=>a+(p.monthlyData[m]||0),0)/3;
       const trend = prev3>0?((last3-prev3)/prev3)*100:0;
@@ -1278,7 +1280,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
           : coverageMonths < leadTime ? 'critical'
           : (minStock ? currentStock < minStock : coverageMonths < monthsToStock) ? 'low' : 'ok')
         : 'unknown';
-      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, avgDaily, sparkline, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, currency, moq, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, suggestedOrderRaw, orderCost, risk };
+      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, currency, moq, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, suggestedOrderRaw, orderCost, risk };
     });
   }, [salesData, stockMap, costMap, minStockMap, supplierMap, moqMap, currencyMap, monthsToStock, leadTime, incomingMap, avgWindowMonths]);
 
@@ -1470,6 +1472,7 @@ const SeasonalityButton = (p) => (
                                 onClick={e=>e.stopPropagation()}
                                 style={{
                                   position:'fixed',
+                                  lineHeight:'normal',
                                   zIndex:9999,
                                   width:'max-content',
                                   padding:'16px',
@@ -1626,6 +1629,95 @@ const SeasonalityButton = (p) => (
     </tr>
   );
 
+  const TrendButton = (p) => {
+    const trendCls = !p.trend?(isDarkMode?'text-slate-500':'text-slate-400'):p.trend>0?'text-emerald-500':'text-red-500';
+    const isOpen = trendHover?.key===p.key;
+    return (
+      <span className="relative inline-block" style={{lineHeight:0}}>
+        <button
+          onClick={e=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setTrendHover(prev=>prev?.key===p.key?null:{key:p.key,rect:r});}}
+          className={`flex items-center gap-1 text-xs font-bold whitespace-nowrap rounded px-1 -mx-1 transition-opacity ${trendCls} ${isOpen?'opacity-100 underline':'hover:opacity-70'}`}
+          title="לחץ לגרף מגמה">
+          {p.trend>5?<ArrowUpRight className="w-3.5 h-3.5"/>:p.trend<-5?<ArrowDownRight className="w-3.5 h-3.5"/>:<Minus className="w-3.5 h-3.5"/>}
+          {p.trend?`${Math.abs(p.trend).toFixed(0)}%`:'—'}
+        </button>
+        {isOpen && (
+          <div className={`rounded-2xl border shadow-2xl text-right ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}
+            onClick={e=>e.stopPropagation()}
+            style={{
+              position:'fixed', zIndex:9999, width: Math.min(440, window.innerWidth-16), padding:'16px', lineHeight:'normal',
+              ...(trendHover?.rect ? {
+                ...(trendHover.rect.top > 350
+                  ? { bottom: window.innerHeight - trendHover.rect.top + 8 }
+                  : { top: trendHover.rect.bottom + 8 }),
+                ...(()=>{
+                  const popupW = Math.min(440, window.innerWidth - 16);
+                  const wantedRight = window.innerWidth - trendHover.rect.right + 8;
+                  const right = Math.max(8, Math.min(wantedRight, window.innerWidth - popupW - 8));
+                  return { right };
+                })(),
+              } : { top:100, right:8 })
+            }}>
+            {/* Header */}
+            <div className="flex items-center justify-between mb-2 gap-3">
+              <p className={`text-sm font-bold shrink-0 ${isDarkMode?'text-white':'text-slate-800'}`}>📈 גרף מגמה — 12 חודשים</p>
+              <button onClick={e=>{e.stopPropagation();setTrendHover(null);}}
+                className={`shrink-0 p-1 rounded-full transition-colors ${isDarkMode?'hover:bg-slate-700 text-slate-400 hover:text-white':'hover:bg-slate-100 text-slate-400 hover:text-slate-700'}`}>
+                <X className="w-4 h-4"/>
+              </button>
+            </div>
+            <p className={`text-xs truncate mb-3 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{p.name}</p>
+            {(!p.trendSeries || p.trendSeries.every(d=>!d.qty)) ? (
+              <p className={`text-xs py-8 text-center ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין מספיק נתונים להצגת גרף</p>
+            ) : (
+              <>
+                <div style={{width: Math.min(408, window.innerWidth-48), height:200}}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={p.trendSeries} margin={{top:5,right:5,bottom:0,left:-15}}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode?'#334155':'#e2e8f0'} vertical={false}/>
+                      <XAxis dataKey="month" tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false}/>
+                      <YAxis tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false} width={32}/>
+                      <RechartsTooltip
+                        content={({active, payload, label}) => {
+                          if (!active || !payload?.length) return null;
+                          // Read straight from the underlying data row ({month, qty}) instead of
+                          // matching a specific series — avoids any ambiguity with the avg line.
+                          const row = payload[0]?.payload;
+                          if (!row) return null;
+                          const qty = row.qty||0;
+                          const diff = p.avgMonthly>0 ? Math.round((qty/p.avgMonthly - 1)*100) : null;
+                          return (
+                            <div style={{background:isDarkMode?'#1e293b':'#fff', border:`1px solid ${isDarkMode?'#334155':'#e2e8f0'}`, borderRadius:8, fontSize:12, padding:'8px 10px', direction:'rtl'}}>
+                              <p style={{color:isDarkMode?'#e2e8f0':'#1e293b', fontWeight:'bold', marginBottom:4}}>{label}</p>
+                              <p style={{color:isDarkMode?'#cbd5e1':'#334155'}}>{qty.toLocaleString()} יח' נמכרו</p>
+                              {diff!=null && <p style={{color: diff>=0?'#10b981':'#ef4444', fontSize:11, marginTop:2}}>{diff>=0?'+':''}{diff}% מהממוצע ({p.avgMonthly.toFixed(1)})</p>}
+                            </div>
+                          );
+                        }}
+                      />
+                      <Bar dataKey="qty" name="נמכר" radius={[4,4,0,0]}>
+                        {p.trendSeries.map((d,i)=>(
+                          <Cell key={i} fill={d.qty >= (p.avgMonthly||0) ? '#10b981' : (isDarkMode?'#475569':'#cbd5e1')}/>
+                        ))}
+                      </Bar>
+                      {p.avgMonthly>0 && (
+                        <Line type="monotone" dataKey={()=>p.avgMonthly} stroke="#3b82f6" strokeWidth={1.5} strokeDasharray="4 3" dot={false} activeDot={false} name="ממוצע" isAnimationActive={false}/>
+                      )}
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className={`flex items-center justify-between mt-2 text-[11px] ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+                  <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm" style={{background:'#10b981'}}/>מעל הממוצע</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-4 border-t border-dashed" style={{borderColor:'#3b82f6'}}/>ממוצע ({p.avgMonthly.toFixed(1)})</span>
+                  <span className={`font-bold ${p.trend>0?'text-emerald-500':p.trend<0?'text-red-500':''}`}>מגמה: {p.trend?`${p.trend>0?'+':''}${p.trend.toFixed(0)}%`:'—'}</span>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </span>
+    );
+  };
 const renderProductRow = (p) => {
                 const isEditing = editingStock===p.key;
                 const rowBg = p.risk==='critical'?(isDarkMode?'bg-red-900/10':'bg-red-50/60'):p.risk==='low'?(isDarkMode?'bg-amber-900/5':'bg-amber-50/30'):'';
@@ -1701,10 +1793,7 @@ const renderProductRow = (p) => {
                     </td>
                     {/* Trend */}
                     <td className="px-4 py-3">
-                      <span className={`flex items-center gap-1 text-xs font-bold whitespace-nowrap ${!p.trend?(isDarkMode?'text-slate-500':'text-slate-400'):p.trend>0?'text-emerald-500':'text-red-500'}`}>
-                        {p.trend>5?<ArrowUpRight className="w-3.5 h-3.5"/>:p.trend<-5?<ArrowDownRight className="w-3.5 h-3.5"/>:<Minus className="w-3.5 h-3.5"/>}
-                        {p.trend?`${Math.abs(p.trend).toFixed(0)}%`:'—'}
-                      </span>
+                      {TrendButton(p)}
                     </td>
                     {/* Stock — editable, shows minStock hint below */}
                     <td className="px-4 py-3">
@@ -1793,6 +1882,15 @@ const renderProductRow = (p) => {
     document.addEventListener('click', close);
     return () => document.removeEventListener('click', close);
   }, [seasonHover]);
+
+  // Trend chart popup — shown on click over the trend % badge
+  const [trendHover, setTrendHover] = useState(null); // {key, rect}
+  useEffect(() => {
+    if (!trendHover) return;
+    const close = () => setTrendHover(null);
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [trendHover]);
 
 
 
