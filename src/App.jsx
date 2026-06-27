@@ -869,23 +869,41 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
     catch { return { ...PROC_COL_DEFAULTS }; }
   });
   useEffect(() => { localStorage.setItem('procurementColWidths', JSON.stringify(colWidths)); }, [colWidths]);
-  const resizeRef = useRef(null); // {key, startX, startWidth}
+  const resizeRef = useRef(null); // {key, startX, startWidth, liveWidth}
   const handleColResizeMove = useCallback((e) => {
     const r = resizeRef.current; if (!r) return;
     // RTL layout: dragging the handle left (clientX decreasing) widens the column
     // to its left, since the column's right edge stays anchored.
     const delta = r.startX - e.clientX;
     const min = PROC_COL_MIN[r.key]||50;
-    setColWidths(prev => ({ ...prev, [r.key]: Math.max(min, r.startWidth + delta) }));
+    const newWidth = Math.max(min, r.startWidth + delta);
+    r.liveWidth = newWidth;
+    // Mutate the DOM directly while dragging — updating React state on every
+    // mousemove would re-render every row in every visible table (main +
+    // every expanded supplier table) on every pixel of movement, which is
+    // what made resizing feel sluggish on large product lists.
+    document.querySelectorAll(`col[data-colkey="${r.key}"]`).forEach(col => { col.style.width = newWidth+'px'; });
+    document.querySelectorAll(`th[data-colkey="${r.key}"]`).forEach(th => { th.style.width = newWidth+'px'; th.style.maxWidth = newWidth+'px'; });
+    document.querySelectorAll(`table[data-proctable]`).forEach(t => {
+      const total = PROC_COL_KEYS.reduce((s,k)=> s + (k===r.key ? newWidth : (parseFloat(t.querySelector(`col[data-colkey="${k}"]`)?.style.width)||PROC_COL_DEFAULTS[k])), 0);
+      t.style.width = total+'px';
+    });
   }, []);
   const handleColResizeEnd = useCallback(() => {
+    const r = resizeRef.current;
+    // Commit the final width to React state once — this is the only re-render
+    // the whole resize gesture triggers, keeping everything else in sync
+    // (other tables that weren't visible/mounted during the drag, persistence, etc).
+    if (r && r.liveWidth != null) {
+      setColWidths(prev => ({ ...prev, [r.key]: r.liveWidth }));
+    }
     resizeRef.current = null;
     document.removeEventListener('mousemove', handleColResizeMove);
     document.removeEventListener('mouseup', handleColResizeEnd);
   }, [handleColResizeMove]);
   const handleColResizeStart = useCallback((key, e) => {
     e.preventDefault(); e.stopPropagation();
-    resizeRef.current = { key, startX: e.clientX, startWidth: colWidths[key]||PROC_COL_DEFAULTS[key]||100 };
+    resizeRef.current = { key, startX: e.clientX, startWidth: colWidths[key]||PROC_COL_DEFAULTS[key]||100, liveWidth: null };
     document.addEventListener('mousemove', handleColResizeMove);
     document.addEventListener('mouseup', handleColResizeEnd);
   }, [colWidths, handleColResizeMove, handleColResizeEnd]);
@@ -910,6 +928,18 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
   const [exporting, setExporting] = useState(false);
   const [invFileName, setInvFileName] = useState(() => localStorage.getItem('inventoryFileName')||'');
   const [importStats, setImportStats] = useState(null);
+  // History of every file imported into "מלאי נוכחי" — kept as a list so uploading
+  // a second file (e.g. כרטיס פריט after יתרות מלאי) doesn't make the first one
+  // disappear from view, even though their data was already merged together.
+  const [importedFiles, setImportedFiles] = useState(() => {
+    try {
+      const list = JSON.parse(localStorage.getItem('procurementImportedFiles')||'[]');
+      if (list.length) return list;
+    } catch {}
+    // Migrate legacy single-filename storage from before this list existed
+    const legacyName = localStorage.getItem('inventoryFileName');
+    return legacyName ? [{ name: legacyName, total:null, withQty:null, withCost:null, withMinStock:null }] : [];
+  });
   const [showBanner, setShowBanner] = useState(false);
   const [importBanner, setImportBanner] = useState(null); // {count, skipped}
   const [ordersLoading, setOrdersLoading] = useState(false);
@@ -1084,7 +1114,13 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       const withQty = parsed.filter(p=>p.quantity!==null).length;
       const withCost = parsed.filter(p=>p.cost!==null).length;
       const withMinStock = parsed.filter(p=>p.minStock!==null).length;
+      const withSupplier = parsed.filter(p=>p.supplier).length;
       setImportStats({ total: parsed.length, withQty, withCost, withMinStock });
+      setImportedFiles(prev => {
+        const next = [...prev, { name: file.name, total: parsed.length, withQty, withCost, withMinStock, withSupplier, importedAt: Date.now() }];
+        localStorage.setItem('procurementImportedFiles', JSON.stringify(next));
+        return next;
+      });
       setShowBanner(true);
       setTimeout(() => setShowBanner(false), 7000);
       setInvLoading(false);
@@ -1112,12 +1148,13 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
 
   const clearInventory = () => {
     setStockMap({}); setCostMap({}); setMinStockMap({}); setSupplierMap({}); setMoqMap({}); setCurrencyMap({});
-    setInvFileName(''); setImportStats(null);
+    setInvFileName(''); setImportStats(null); setImportedFiles([]);
     localStorage.removeItem('procurementStock'); localStorage.removeItem('procurementCost');
     localStorage.removeItem('procurementMinStock'); localStorage.removeItem('procurementSupplier');
     localStorage.removeItem('procurementMOQ');
     localStorage.removeItem('procurementCurrency');
     localStorage.removeItem('inventoryFileName');
+    localStorage.removeItem('procurementImportedFiles');
   };
 
   const products = useMemo(() => {
@@ -1305,6 +1342,29 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
       return sortConfig.direction==='asc'?(va<vb?-1:va>vb?1:0):(va>vb?-1:va<vb?1:0);
     });
   }, [products, abcFilter, riskFilter, searchTerm, sortConfig]);
+
+  // ─── Progressive rendering for the main table ───────────────────
+  // With large catalogs (1000+ SKUs), building/diffing every row on every
+  // interaction (typing in search, sorting, etc.) is what makes the page feel
+  // sluggish — most of that cost is rows the user can't even see yet. Instead
+  // we render an initial batch and grow it as the user scrolls near the
+  // bottom, via an IntersectionObserver sentinel row.
+  const PROC_BATCH_SIZE = 150;
+  const [visibleCount, setVisibleCount] = useState(PROC_BATCH_SIZE);
+  useEffect(() => { setVisibleCount(PROC_BATCH_SIZE); }, [filtered]);
+  const loadMoreSentinelRef = useRef(null);
+  useEffect(() => {
+    const el = loadMoreSentinelRef.current;
+    if (!el) return;
+    const obs = new IntersectionObserver((entries) => {
+      if (entries[0]?.isIntersecting) {
+        setVisibleCount(v => Math.min(filtered.length, v + PROC_BATCH_SIZE));
+      }
+    }, { rootMargin: '600px' });
+    obs.observe(el);
+    return () => obs.disconnect();
+  }, [filtered.length]);
+  const visibleProducts = useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount]);
 
   // ── Data completeness stats ────────────────────────────────
   const completeness = useMemo(() => {
@@ -1618,6 +1678,7 @@ const SeasonalityButton = (p) => (
         const sortKey = sortKeyMap[key];
         return (
           <th key={key}
+            data-colkey={key}
             className={`px-4 py-2.5 relative whitespace-nowrap select-none ${sortKey?`cursor-pointer hover:text-blue-500`:''} ${extraCls}`}
             style={{ width: colWidths[key], maxWidth: colWidths[key] }}
             onClick={sortKey ? ()=>reqSort(sortKey) : undefined}>
@@ -1951,20 +2012,34 @@ const renderProductRow = (p) => {
         {/* Inventory upload */}
         <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
           <h3 className={`font-bold text-sm mb-3 flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Package className="w-4 h-4 text-amber-500"/> מלאי נוכחי</h3>
-          {invFileName ? (
+          {importedFiles.length > 0 ? (
             <div className="space-y-3">
-              <div className={`flex items-center gap-3 p-3 rounded-xl ${isDarkMode?'bg-slate-700/50':'bg-slate-50'}`}>
-                <FileSpreadsheet className="w-5 h-5 text-emerald-500 shrink-0"/>
-                <div className="flex-1 min-w-0">
-                  <p className={`text-sm font-medium truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{invFileName}</p>
-                  <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{stockedCount} מוצרים עם מלאי</p>
-                </div>
-                <button onClick={clearInventory} className={`p-1.5 rounded-lg ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-500 hover:bg-red-50'}`}><Trash2 className="w-4 h-4"/></button>
+              <div className="space-y-2">
+                {importedFiles.map((f, i) => (
+                  <div key={i} className={`flex items-center gap-3 p-3 rounded-xl ${isDarkMode?'bg-slate-700/50':'bg-slate-50'}`}>
+                    <FileSpreadsheet className="w-5 h-5 text-emerald-500 shrink-0"/>
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-sm font-medium truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{f.name}</p>
+                      {f.total!=null ? (
+                        <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+                          {f.total} פריטים
+                          {f.withQty>0 && ` · ${f.withQty} עם כמות`}
+                          {f.withCost>0 && ` · ${f.withCost} עם עלות`}
+                          {f.withSupplier>0 && ` · ${f.withSupplier} עם ספק`}
+                        </p>
+                      ) : <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>יובא בעבר</p>}
+                    </div>
+                  </div>
+                ))}
               </div>
+              <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>סה"כ {stockedCount} מוצרים עם מלאי מכל הקבצים שיובאו</p>
               <label className={`flex items-center justify-center gap-2 py-2.5 rounded-xl border-dashed border-2 cursor-pointer text-xs font-medium transition-colors ${isDarkMode?'border-slate-600 text-slate-400 hover:border-blue-500 hover:text-blue-400':'border-slate-200 text-slate-500 hover:border-blue-400 hover:text-blue-600'}`}>
-                {invLoading?<Loader2 className="w-4 h-4 animate-spin"/>:<RefreshCw className="w-4 h-4"/>} עדכן קובץ מלאי
+                {invLoading?<Loader2 className="w-4 h-4 animate-spin"/>:<Upload className="w-4 h-4"/>} העלה קובץ נוסף (מתמזג עם הקיים)
                 <input type="file" accept=".csv,.xlsx,.xls" onChange={handleInvUpload} className="hidden" disabled={invLoading}/>
               </label>
+              <button onClick={clearInventory} className={`w-full text-xs flex items-center justify-center gap-1.5 py-2 rounded-lg ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-500 hover:bg-red-50'}`}>
+                <Trash2 className="w-3.5 h-3.5"/> נקה את כל נתוני המלאי שיובאו
+              </button>
             </div>
           ) : (
             <label className={`flex flex-col items-center justify-center gap-3 p-6 rounded-xl border-2 border-dashed cursor-pointer transition-all group ${isDarkMode?'border-slate-600 hover:border-amber-500/50 hover:bg-amber-500/5':'border-slate-200 hover:border-amber-400 hover:bg-amber-50'}`}>
@@ -1979,7 +2054,7 @@ const renderProductRow = (p) => {
               <input type="file" accept=".csv,.xlsx,.xls" onChange={handleInvUpload} className="hidden" disabled={invLoading}/>
             </label>
           )}
-          {!invFileName && <p className={`text-xs mt-2 text-center ${isDarkMode?'text-slate-600':'text-slate-400'}`}>אפשר גם להזין ידנית — לחץ על שדה בטבלה</p>}
+          {!importedFiles.length && <p className={`text-xs mt-2 text-center ${isDarkMode?'text-slate-600':'text-slate-400'}`}>אפשר גם להזין ידנית — לחץ על שדה בטבלה</p>}
         </div>
 
         {/* Planning config */}
@@ -2283,8 +2358,8 @@ const renderProductRow = (p) => {
                 {isOpen && (
                   <div className={`border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
                     <div className="overflow-x-auto -mx-1 px-1 pt-2">
-                      <table className={`text-sm text-right ${isDarkMode?'text-slate-300':'text-slate-600'}`} style={{tableLayout:'fixed', width: PROC_COL_KEYS.reduce((s,k)=>s+(colWidths[k]||PROC_COL_DEFAULTS[k]),0)}}>
-                        <colgroup>{PROC_COL_KEYS.map(k=><col key={k} style={{width: colWidths[k]||PROC_COL_DEFAULTS[k]}}/>)}</colgroup>
+                      <table data-proctable className={`text-sm text-right ${isDarkMode?'text-slate-300':'text-slate-600'}`} style={{tableLayout:'fixed', width: PROC_COL_KEYS.reduce((s,k)=>s+(colWidths[k]||PROC_COL_DEFAULTS[k]),0)}}>
+                        <colgroup>{PROC_COL_KEYS.map(k=><col key={k} data-colkey={k} style={{width: colWidths[k]||PROC_COL_DEFAULTS[k]}}/>)}</colgroup>
                         <thead className={`text-xs uppercase tracking-wide ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
                           {renderProcTableHeader(grp.items)}
                         </thead>
@@ -2989,17 +3064,25 @@ const renderProductRow = (p) => {
         </div>
 
         <div className="overflow-x-auto -mx-1 px-1">
-          <table className={`text-sm text-right ${isDarkMode?'text-slate-300':'text-slate-600'}`} style={{tableLayout:'fixed', width: PROC_COL_KEYS.reduce((s,k)=>s+(colWidths[k]||PROC_COL_DEFAULTS[k]),0)}}>
-            <colgroup>{PROC_COL_KEYS.map(k=><col key={k} style={{width: colWidths[k]||PROC_COL_DEFAULTS[k]}}/>)}</colgroup>
+          <table data-proctable className={`text-sm text-right ${isDarkMode?'text-slate-300':'text-slate-600'}`} style={{tableLayout:'fixed', width: PROC_COL_KEYS.reduce((s,k)=>s+(colWidths[k]||PROC_COL_DEFAULTS[k]),0)}}>
+            <colgroup>{PROC_COL_KEYS.map(k=><col key={k} data-colkey={k} style={{width: colWidths[k]||PROC_COL_DEFAULTS[k]}}/>)}</colgroup>
             <thead className={`text-xs uppercase tracking-wide sticky top-0 z-10 ${isDarkMode?'bg-slate-900/95 text-slate-400 backdrop-blur':'bg-slate-50/95 text-slate-500 backdrop-blur'}`}>
               {renderProcTableHeader(filtered)}
             </thead>
             <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-              {filtered.map(renderProductRow)}
+              {visibleProducts.map(renderProductRow)}
               {!filtered.length&&<tr><td colSpan={8} className={`px-4 py-16 text-center text-sm ${isDarkMode?'text-slate-600':'text-slate-400'}`}>לא נמצאו מוצרים</td></tr>}
+              {visibleCount < filtered.length && (
+                <tr ref={loadMoreSentinelRef}><td colSpan={8} className={`px-4 py-4 text-center text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>טוען עוד מוצרים…</td></tr>
+              )}
             </tbody>
           </table>
         </div>
+        {visibleCount < filtered.length && (
+          <div className={`px-5 py-2 text-xs text-center border-t ${isDarkMode?'border-slate-700 text-slate-500':'border-slate-100 text-slate-400'}`}>
+            מציג {visibleCount.toLocaleString()} מתוך {filtered.length.toLocaleString()} מוצרים — גלול למטה לעוד
+          </div>
+        )}
         <div className={`px-5 py-3 border-t flex flex-wrap gap-4 text-xs ${isDarkMode?'border-slate-700 text-slate-500':'border-slate-100 text-slate-400'}`}>
           <span><span className="font-bold text-amber-500">A</span> = 80%</span>
           <span><span className="font-bold text-blue-500">B</span> = 15%</span>
