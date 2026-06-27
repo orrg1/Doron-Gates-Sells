@@ -329,6 +329,29 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
   const sparkRevenue = monthlyData.slice(-8).map(m => ({ value: m.revenue }));
   const sparkProfit = monthlyData.slice(-8).map(m => ({ value: m.profit }));
 
+  // ─── Automatic insights — surfaces things worth noticing without having to dig ───
+  const insights = useMemo(() => {
+    const list = [];
+    if (revTrend >= 25) list.push({ type:'success', icon:ArrowUpRight, text:`עלייה של ${revTrend.toFixed(0)}% בהכנסות החודש לעומת החודש הקודם` });
+    else if (revTrend <= -25) list.push({ type:'warning', icon:ArrowDownRight, text:`ירידה של ${Math.abs(revTrend).toFixed(0)}% בהכנסות החודש לעומת החודש הקודם` });
+
+    if (totalRevenue > 0) {
+      if (margin < 10) list.push({ type:'warning', icon:TriangleAlert, text:`רווחיות נמוכה — ${margin.toFixed(1)}% בלבד מההכנסות` });
+      else if (margin >= 40) list.push({ type:'success', icon:TrendingUp, text:`רווחיות גבוהה — ${margin.toFixed(1)}% מההכנסות` });
+    }
+
+    if (topSuppliers.length && topSuppliers[0].pct >= 40) {
+      list.push({ type:'info', icon:Truck, text:`${topSuppliers[0].pct.toFixed(0)}% מההוצאות מגיעות מספק אחד (${topSuppliers[0].name}) — שווה לבדוק תלות` });
+    }
+    if (topProducts.length && topProducts[0].pct >= 40) {
+      list.push({ type:'info', icon:Box, text:`${topProducts[0].pct.toFixed(0)}% מההכנסות מגיעות ממוצר אחד (${topProducts[0].name})` });
+    }
+    if (netProfit < 0) {
+      list.push({ type:'warning', icon:TriangleAlert, text:`הפסד נקי בטווח הנבחר — ${formatCurrency(Math.abs(netProfit))}` });
+    }
+    return list.slice(0,4);
+  }, [revTrend, margin, totalRevenue, topSuppliers, topProducts, netProfit]);
+
   const noData = salesData.length === 0 && suppliersData.length === 0;
 
   if (noData) return (
@@ -343,6 +366,21 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
 
   return (
     <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
+      {/* Auto insights */}
+      {insights.length > 0 && (
+        <div className="flex flex-wrap gap-3">
+          {insights.map((ins, i) => (
+            <div key={i} className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-medium border ${
+              ins.type==='success' ? (isDarkMode?'bg-emerald-500/10 border-emerald-500/20 text-emerald-300':'bg-emerald-50 border-emerald-200 text-emerald-700')
+              : ins.type==='warning' ? (isDarkMode?'bg-red-500/10 border-red-500/20 text-red-300':'bg-red-50 border-red-200 text-red-700')
+              : (isDarkMode?'bg-blue-500/10 border-blue-500/20 text-blue-300':'bg-blue-50 border-blue-200 text-blue-700')
+            }`}>
+              <ins.icon className="w-3.5 h-3.5 shrink-0"/>
+              {ins.text}
+            </div>
+          ))}
+        </div>
+      )}
       {/* KPI Row */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <KPICard title="הכנסות" formatted={formatShort(totalRevenue)} icon={DollarSign} color="blue" trend={revTrend} sparkData={sparkRevenue} isDarkMode={isDarkMode} onClick={() => setActiveTab('sales')} />
@@ -3426,6 +3464,40 @@ const App = () => {
     setSearchTerm(''); setSelectedProduct([]); setSelectedSku(''); setSelectedSupplier(''); setDrillDownMonth(null);
   };
 
+  // ─── Saved views — remembers a filter combo (tab + date range + product/supplier) ───
+  const [savedViews, setSavedViews] = useState(() => { try { return JSON.parse(localStorage.getItem('savedViews')||'[]'); } catch { return []; } });
+  const [showSavedViews, setShowSavedViews] = useState(false);
+  const [newViewName, setNewViewName] = useState('');
+  const saveCurrentView = () => {
+    const name = newViewName.trim();
+    if (!name) return;
+    const view = { id:Date.now(), name, activeTab, dateFilter, selectedProduct, selectedSku, selectedSupplier };
+    const next = [...savedViews, view];
+    setSavedViews(next);
+    localStorage.setItem('savedViews', JSON.stringify(next));
+    setNewViewName('');
+  };
+  const applySavedView = (view) => {
+    setActiveTab(view.activeTab);
+    setDateFilter(view.dateFilter||{start:'',end:''});
+    setSelectedProduct(view.selectedProduct||[]);
+    setSelectedSku(view.selectedSku||'');
+    setSelectedSupplier(view.selectedSupplier||'');
+    setDrillDownMonth(null);
+    setShowSavedViews(false);
+  };
+  const deleteSavedView = (id) => {
+    const next = savedViews.filter(v=>v.id!==id);
+    setSavedViews(next);
+    localStorage.setItem('savedViews', JSON.stringify(next));
+  };
+  useEffect(() => {
+    if (!showSavedViews) return;
+    const close = (e) => { if (!e.target.closest('[data-saved-views]')) setShowSavedViews(false); };
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [showSavedViews]);
+
   const setQuickDate = (n) => {
     if (!availableDates.length) return;
     const sorted = [...availableDates];
@@ -4105,6 +4177,39 @@ const App = () => {
                       <X className="w-3.5 h-3.5"/> נקה
                     </button>
                   )}
+                  {/* Saved views */}
+                  <div className="relative" data-saved-views>
+                    <button onClick={()=>setShowSavedViews(p=>!p)} className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border-2 transition-colors ${isDarkMode?'bg-amber-500/10 border-amber-500/40 text-amber-300 hover:bg-amber-500/20':'bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100'}`}>
+                      <Star className="w-3.5 h-3.5 fill-current"/> תצוגות שמורות {savedViews.length>0?`(${savedViews.length})`:''}
+                    </button>
+                    {showSavedViews && (
+                      <div className={`absolute left-0 top-full mt-1.5 w-72 rounded-xl shadow-2xl border p-3 z-50 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+                        <div className="flex items-center gap-2 mb-3">
+                          <input type="text" value={newViewName} onChange={e=>setNewViewName(e.target.value)} placeholder="שם לתצוגה הנוכחית..."
+                            onKeyDown={e=>{if(e.key==='Enter') saveCurrentView();}}
+                            className={`flex-1 px-2.5 py-1.5 border rounded-lg text-xs focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'bg-slate-900 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
+                          <button onClick={saveCurrentView} disabled={!newViewName.trim()} className={`px-2.5 py-1.5 rounded-lg text-xs font-medium disabled:opacity-40 ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-50 text-blue-700'}`}>שמור</button>
+                        </div>
+                        {savedViews.length===0 ? (
+                          <p className={`text-xs text-center py-2 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין תצוגות שמורות עדיין</p>
+                        ) : (
+                          <div className="space-y-1 max-h-56 overflow-y-auto">
+                            {savedViews.map(v => (
+                              <div key={v.id} className={`flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs group ${isDarkMode?'hover:bg-slate-700/50':'hover:bg-slate-50'}`}>
+                                <button onClick={()=>applySavedView(v)} className={`flex-1 text-right truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>
+                                  ⭐ {v.name}
+                                  <span className={`mr-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>· {v.activeTab==='sales'?'מכירות':'ספקים'}</span>
+                                </button>
+                                <button onClick={()=>deleteSavedView(v.id)} className={`p-1 rounded opacity-0 group-hover:opacity-100 transition-opacity ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-500 hover:bg-red-50'}`}>
+                                  <Trash2 className="w-3 h-3"/>
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
 
                 {/* KPIs */}
