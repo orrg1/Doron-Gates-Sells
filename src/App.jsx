@@ -288,7 +288,450 @@ const KPICard = ({ title, value, formatted, subtext, icon: Icon, color, trend, s
 };
 
 // Overview Dashboard Page
-const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, isDarkMode, setActiveTab }) => {
+// ─── CUSTOMERS PAGE ─────────────────────────────────────
+const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUploadMonthly, onUploadProduct, onClearMonthly, onClearProduct, loading, excludeCurrentMonth }) => {
+  const [search, setSearch] = useState('');
+  const [sortConfig, setSortConfig] = useState({ key:'totalRevenue', direction:'desc' });
+  const [expandedCustomer, setExpandedCustomer] = useState(null);
+  const [periodFilter, setPeriodFilter] = useState({ start:'', end:'' });
+  const availableMonths = useMemo(() => [...new Set(monthlyData.map(d=>d.date))].sort((a,b)=>getDateVal(a)-getDateVal(b)), [monthlyData]);
+  useEffect(() => {
+    if (!availableMonths.length || periodFilter.start) return;
+    setPeriodFilter({ start:availableMonths[0], end:availableMonths[availableMonths.length-1] });
+  }, [availableMonths]);
+  const filteredMonthlyData = useMemo(() => {
+    if (!periodFilter.start) return monthlyData;
+    const startVal = getDateVal(periodFilter.start), endVal = getDateVal(periodFilter.end||periodFilter.start);
+    return monthlyData.filter(d => { const v=getDateVal(d.date); return v>=startVal && v<=endVal; });
+  }, [monthlyData, periodFilter]);
+  const [trendHover, setTrendHover] = useState(null); // {key, rect}
+  useEffect(() => {
+    if (!trendHover) return;
+    const close = () => setTrendHover(null);
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [trendHover]);
+
+  // ─── Per-customer aggregation from the monthly file (time dimension) ───
+  const customers = useMemo(() => {
+    if (!filteredMonthlyData.length) return [];
+    const allMonths = [...new Set(filteredMonthlyData.map(d=>d.date))].sort((a,b)=>getDateVal(a)-getDateVal(b));
+    // The most recent month is usually only partially invoiced — keep it in the
+    // revenue total (that money is real), but exclude it from average/trend/churn
+    // math so one incomplete month doesn't masquerade as a real decline.
+    const effectiveMonths = (excludeCurrentMonth && allMonths.length>1) ? allMonths.slice(0,-1) : allMonths;
+    const map = {};
+    filteredMonthlyData.forEach(d => {
+      if (!map[d.customer]) map[d.customer] = { name:d.customer, customerId:d.customerId, monthly:{} };
+      map[d.customer].monthly[d.date] = (map[d.customer].monthly[d.date]||0) + d.revenue;
+    });
+    const list = Object.values(map).map(c => {
+      const months = Object.keys(c.monthly).sort((a,b)=>getDateVal(a)-getDateVal(b));
+      const totalRevenue = months.reduce((s,m)=>s+c.monthly[m],0);
+      const effMonthsForCustomer = months.filter(m=>effectiveMonths.includes(m));
+      const avgMonthly = effMonthsForCustomer.length ? effMonthsForCustomer.reduce((s,m)=>s+c.monthly[m],0)/effMonthsForCustomer.length : 0;
+      const firstMonth = months[0];
+      const lastActiveMonth = months[months.length-1];
+      const recent = effMonthsForCustomer.slice(-3).reduce((s,m)=>s+(c.monthly[m]||0),0);
+      const prev = effMonthsForCustomer.slice(-6,-3).reduce((s,m)=>s+(c.monthly[m]||0),0);
+      const trend = prev>0 ? ((recent-prev)/prev*100) : (recent>0?100:0);
+      const isNew = effectiveMonths.indexOf(firstMonth) >= effectiveMonths.length-2;
+      // Churned = zero revenue across the last 2 *effective* months (i.e. excluding
+      // the partial one when the toggle is on).
+      const last2Sum = effectiveMonths.slice(-2).reduce((s,m)=>s+(c.monthly[m]||0),0);
+      const isChurned = !isNew && last2Sum === 0 && months.length>0;
+      const status = isChurned ? 'churned' : isNew ? 'new' : 'active';
+      return { ...c, months, totalRevenue, avgMonthly, firstMonth, lastActiveMonth, trend, status };
+    });
+    const totalAll = list.reduce((s,c)=>s+c.totalRevenue,0);
+    const sorted = [...list].sort((a,b)=>b.totalRevenue-a.totalRevenue);
+    let cumulative = 0;
+    sorted.forEach(c => {
+      const pct = totalAll>0 ? (c.totalRevenue/totalAll)*100 : 0;
+      cumulative += pct;
+      c.revPct = pct;
+      c.abc = cumulative<=80 ? 'A' : cumulative<=95 ? 'B' : 'C';
+    });
+    return sorted;
+  }, [filteredMonthlyData, excludeCurrentMonth]);
+
+  // Customer segmentation by ABC (revenue concentration) — replaces the monthly
+  // trend chart here, since that's already covered in the "מכירות" tab.
+  const abcSegments = useMemo(() => {
+    const groups = { A:{count:0,revenue:0}, B:{count:0,revenue:0}, C:{count:0,revenue:0} };
+    customers.forEach(c => { groups[c.abc].count++; groups[c.abc].revenue += c.totalRevenue; });
+    return ['A','B','C'].map(k => ({ name:k, value:groups[k].revenue, count:groups[k].count }));
+  }, [customers]);
+
+  const productsByCustomer = useMemo(() => {
+    const map = {};
+    productData.forEach(d => {
+      if (!map[d.customer]) map[d.customer] = [];
+      map[d.customer].push(d);
+    });
+    Object.values(map).forEach(arr => arr.sort((a,b)=>b.revenue-a.revenue));
+    return map;
+  }, [productData]);
+
+  const topProductsOverall = useMemo(() => {
+    const map = {};
+    productData.forEach(d => { map[d.product] = (map[d.product]||0) + d.revenue; });
+    return Object.entries(map).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([name,total])=>({name,total}));
+  }, [productData]);
+
+  const kpis = useMemo(() => {
+    const totalRevenue = customers.reduce((s,c)=>s+c.totalRevenue,0);
+    const newCount = customers.filter(c=>c.status==='new').length;
+    const churnedCount = customers.filter(c=>c.status==='churned').length;
+    const top1Pct = customers[0]?.revPct||0;
+    const top5Pct = customers.slice(0,5).reduce((s,c)=>s+c.revPct,0);
+    return { totalRevenue, newCount, churnedCount, top1Pct, top5Pct, count: customers.length };
+  }, [customers]);
+
+  const filtered = useMemo(() => {
+    let data = customers;
+    if (search) data = data.filter(c=>smartMatch(c.name, search));
+    return [...data].sort((a,b)=>{
+      const va=a[sortConfig.key], vb=b[sortConfig.key];
+      if (typeof va==='string') {
+        const cmp = va.localeCompare(vb,'he');
+        return sortConfig.direction==='asc'?cmp:-cmp;
+      }
+      return sortConfig.direction==='asc'?(va-vb):(vb-va);
+    });
+  }, [customers, search, sortConfig]);
+
+  const reqSort = (key) => setSortConfig(p=>({ key, direction:p.key===key&&p.direction==='asc'?'desc':'asc' }));
+
+  const statusBadge = (status) => {
+    if (status==='new') return <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-100 text-blue-700'}`}>חדש</span>;
+    if (status==='churned') return <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${isDarkMode?'bg-red-500/20 text-red-300':'bg-red-100 text-red-700'}`}>נטש</span>;
+    return <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${isDarkMode?'bg-emerald-500/20 text-emerald-300':'bg-emerald-100 text-emerald-700'}`}>פעיל</span>;
+  };
+
+  // Per-customer monthly revenue chart, opened by clicking the trend % badge.
+  // Uses the customer's own `months`/`monthly` map already computed above — no
+  // re-scanning needed, and shows the FULL history available for that customer.
+  const CustomerTrendButton = (c) => {
+    const isOpen = trendHover?.key===c.name;
+    const series = c.months.map(m => ({ month:m, revenue:c.monthly[m]||0 }));
+    const avg = c.avgMonthly||0;
+    return (
+      <span className="relative inline-block" style={{lineHeight:0}}>
+        <button
+          onClick={e=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setTrendHover(prev=>prev?.key===c.name?null:{key:c.name,rect:r});}}
+          className={`flex items-center gap-1 text-xs font-bold whitespace-nowrap rounded px-1 -mx-1 transition-opacity ${!c.trend?(isDarkMode?'text-slate-500':'text-slate-400'):c.trend>0?'text-emerald-500':'text-red-500'} ${isOpen?'opacity-100 underline':'hover:opacity-70'}`}
+          title="לחץ לגרף הכנסה חודשי">
+          {c.trend>5?<ArrowUpRight className="w-3.5 h-3.5"/>:c.trend<-5?<ArrowDownRight className="w-3.5 h-3.5"/>:<Minus className="w-3.5 h-3.5"/>}
+          {c.trend?`${Math.abs(c.trend).toFixed(0)}%`:'—'}
+        </button>
+        {isOpen && (
+          <div className={`rounded-2xl border shadow-2xl text-right ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}
+            onClick={e=>e.stopPropagation()}
+            style={{
+              position:'fixed', zIndex:9999, width: Math.min(440, window.innerWidth-16), padding:'16px', lineHeight:'normal',
+              ...(trendHover?.rect ? {
+                ...(trendHover.rect.top > 350
+                  ? { bottom: window.innerHeight - trendHover.rect.top + 8 }
+                  : { top: trendHover.rect.bottom + 8 }),
+                ...(()=>{
+                  const popupW = Math.min(440, window.innerWidth - 16);
+                  const wantedRight = window.innerWidth - trendHover.rect.right + 8;
+                  const right = Math.max(8, Math.min(wantedRight, window.innerWidth - popupW - 8));
+                  return { right };
+                })(),
+              } : { top:100, right:8 })
+            }}>
+            <div className="flex items-center justify-between mb-2 gap-3">
+              <p className={`text-sm font-bold shrink-0 ${isDarkMode?'text-white':'text-slate-800'}`}>📈 הכנסה חודשית</p>
+              <button onClick={e=>{e.stopPropagation();setTrendHover(null);}}
+                className={`shrink-0 p-1 rounded-full transition-colors ${isDarkMode?'hover:bg-slate-700 text-slate-400 hover:text-white':'hover:bg-slate-100 text-slate-400 hover:text-slate-700'}`}>
+                <X className="w-4 h-4"/>
+              </button>
+            </div>
+            <p className={`text-xs truncate mb-3 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{c.name}</p>
+            {series.length<2 ? (
+              <p className={`text-xs py-8 text-center ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין מספיק נתונים להצגת גרף</p>
+            ) : (
+              <>
+                <div style={{width: Math.min(408, window.innerWidth-48), height:200}}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={series} margin={{top:5,right:5,bottom:0,left:-15}}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode?'#334155':'#e2e8f0'} vertical={false}/>
+                      <XAxis dataKey="month" tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false}/>
+                      <YAxis tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false} width={32} tickFormatter={v=>`${(v/1000).toFixed(0)}k`}/>
+                      <RechartsTooltip
+                        content={({active, payload, label}) => {
+                          if (!active || !payload?.length) return null;
+                          const row = payload[0]?.payload;
+                          if (!row) return null;
+                          const rev = row.revenue||0;
+                          const diff = avg>0 ? Math.round((rev/avg - 1)*100) : null;
+                          return (
+                            <div style={{background:isDarkMode?'#1e293b':'#fff', border:`1px solid ${isDarkMode?'#334155':'#e2e8f0'}`, borderRadius:8, fontSize:12, padding:'8px 10px', direction:'rtl'}}>
+                              <p style={{color:isDarkMode?'#e2e8f0':'#1e293b', fontWeight:'bold', marginBottom:4}}>{label}</p>
+                              <p style={{color:isDarkMode?'#cbd5e1':'#334155'}}>{formatCurrency(rev)}</p>
+                              {diff!=null && <p style={{color: diff>=0?'#10b981':'#ef4444', fontSize:11, marginTop:2}}>{diff>=0?'+':''}{diff}% מהממוצע ({formatShort(avg)})</p>}
+                            </div>
+                          );
+                        }}
+                      />
+                      <Bar dataKey="revenue" name="הכנסה" radius={[4,4,0,0]}>
+                        {series.map((d,i)=>(
+                          <Cell key={i} fill={d.revenue >= avg ? '#ec4899' : (isDarkMode?'#475569':'#cbd5e1')}/>
+                        ))}
+                      </Bar>
+                      {avg>0 && <Line type="monotone" dataKey={()=>avg} stroke="#3b82f6" strokeWidth={1.5} strokeDasharray="4 3" dot={false} activeDot={false} name="ממוצע" isAnimationActive={false}/>}
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className={`flex items-center justify-between mt-2 text-[11px] ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+                  <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm" style={{background:'#ec4899'}}/>מעל הממוצע</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-4 border-t border-dashed" style={{borderColor:'#3b82f6'}}/>ממוצע ({formatShort(avg)})</span>
+                  <span className={`font-bold ${c.trend>0?'text-emerald-500':c.trend<0?'text-red-500':''}`}>מגמה: {c.trend?`${c.trend>0?'+':''}${c.trend.toFixed(0)}%`:'—'}</span>
+                </div>
+              </>
+            )}
+          </div>
+        )}
+      </span>
+    );
+  };
+
+  const hasAnyData = monthlyData.length>0 || productData.length>0;
+
+  const uploadCards = (
+    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+      {[
+        { label:'מכירות ללקוח בחתך חודשי', sub:'מגמה, נטישה, לקוחות חדשים', fileName:fileNames.monthly, onUpload:onUploadMonthly, onClear:onClearMonthly, isLoading:loading.monthly, count:monthlyData.length },
+        { label:'מכירות ללקוח לפי מוצר', sub:'תמהיל מוצרים, Cross-sell', fileName:fileNames.product, onUpload:onUploadProduct, onClear:onClearProduct, isLoading:loading.product, count:productData.length },
+      ].map((card,i) => (
+        <div key={i} className={`p-4 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+          <p className={`text-sm font-bold mb-0.5 ${isDarkMode?'text-white':'text-slate-800'}`}>{card.label}</p>
+          <p className={`text-xs mb-3 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{card.sub}</p>
+          {card.fileName ? (
+            <div className="flex items-center gap-2">
+              <div className={`flex-1 flex items-center gap-2 px-3 py-2 rounded-xl ${isDarkMode?'bg-slate-700/50':'bg-slate-50'}`}>
+                <FileSpreadsheet className="w-4 h-4 text-emerald-500 shrink-0"/>
+                <span className={`text-xs truncate ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{card.fileName}</span>
+                <span className={`text-xs shrink-0 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>({card.count.toLocaleString()})</span>
+              </div>
+              <button onClick={card.onClear} className={`p-2 rounded-lg ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-500 hover:bg-red-50'}`}><Trash2 className="w-4 h-4"/></button>
+            </div>
+          ) : (
+            <label className={`flex items-center justify-center gap-2 py-2.5 rounded-xl border-dashed border-2 cursor-pointer text-xs font-medium transition-colors ${isDarkMode?'border-slate-600 text-slate-400 hover:border-pink-500 hover:text-pink-400':'border-slate-200 text-slate-500 hover:border-pink-400 hover:text-pink-600'}`}>
+              {card.isLoading?<Loader2 className="w-4 h-4 animate-spin"/>:<Upload className="w-4 h-4"/>} העלה קובץ
+              <input type="file" accept=".xlsx,.xls" onChange={card.onUpload} className="hidden" disabled={card.isLoading}/>
+            </label>
+          )}
+        </div>
+      ))}
+    </div>
+  );
+
+  if (!hasAnyData) {
+    return (
+      <div className="space-y-6 animate-in fade-in duration-400">
+        <div className="flex flex-col items-center justify-center py-12 text-center">
+          <div className="relative mb-4">
+            <div className={`absolute inset-0 rounded-full blur-2xl opacity-40 ${isDarkMode?'bg-pink-600':'bg-pink-300'}`}/>
+            <div className={`relative p-6 rounded-full ${isDarkMode?'bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700':'bg-gradient-to-br from-slate-50 to-white border border-slate-100'}`}><User className={`w-12 h-12 ${isDarkMode?'text-slate-500':'text-slate-300'}`}/></div>
+          </div>
+          <h3 className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>אין נתוני לקוחות עדיין</h3>
+          <p className={`mt-2 max-w-sm ${isDarkMode?'text-slate-400':'text-slate-500'}`}>טען קובץ "מכירות ללקוח בחתך חודשי" ו/או "מכירות ללקוח לפי מוצר" כדי להתחיל</p>
+        </div>
+        {uploadCards}
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-6 animate-in fade-in duration-400">
+      {uploadCards}
+
+      {monthlyData.length>0 && (
+        <>
+          {/* Period filter */}
+          {availableMonths.length>0 && (
+            <div className={`flex items-center gap-3 px-4 py-3 rounded-2xl border flex-wrap ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+              <div className={`p-2 rounded-xl ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}><Filter className={`w-4 h-4 ${isDarkMode?'text-slate-300':'text-slate-500'}`}/></div>
+              <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border text-sm ${isDarkMode?'bg-slate-900 border-slate-700':'bg-slate-50 border-slate-200'}`}>
+                <Calendar className={`w-4 h-4 ${isDarkMode?'text-slate-500':'text-slate-400'}`}/>
+                <select value={periodFilter.start} onChange={e=>setPeriodFilter(p=>({...p,start:e.target.value}))}
+                  style={isDarkMode?{background:'#0f172a',color:'#f8fafc'}:{}}
+                  className={`text-xs font-medium border-none focus:ring-0 p-0 cursor-pointer rounded ${isDarkMode?'text-white':'text-slate-700 bg-transparent'}`}>
+                  {availableMonths.map(d=><option key={d} value={d}>{d}</option>)}
+                </select>
+                <span className={isDarkMode?'text-slate-600':'text-slate-300'}>—</span>
+                <select value={periodFilter.end} onChange={e=>setPeriodFilter(p=>({...p,end:e.target.value}))}
+                  style={isDarkMode?{background:'#0f172a',color:'#f8fafc'}:{}}
+                  className={`text-xs font-medium border-none focus:ring-0 p-0 cursor-pointer rounded ${isDarkMode?'text-white':'text-slate-700 bg-transparent'}`}>
+                  {availableMonths.map(d=><option key={d} value={d}>{d}</option>)}
+                </select>
+              </div>
+              {(periodFilter.start!==availableMonths[0]||periodFilter.end!==availableMonths[availableMonths.length-1]) && (
+                <button onClick={()=>setPeriodFilter({start:availableMonths[0],end:availableMonths[availableMonths.length-1]})} className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium transition-colors ${isDarkMode?'bg-red-500/10 text-red-400 hover:bg-red-500/20':'bg-red-50 text-red-600 hover:bg-red-100'}`}>
+                  <X className="w-3.5 h-3.5"/> אפס לכל הטווח
+                </button>
+              )}
+            </div>
+          )}
+
+          <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+            <KPICard title="לקוחות" formatted={kpis.count.toLocaleString()} icon={User} color="purple" isDarkMode={isDarkMode}/>
+            <KPICard title="הכנסה כוללת" formatted={formatShort(kpis.totalRevenue)} icon={DollarSign} color="blue" isDarkMode={isDarkMode}/>
+            <KPICard title="לקוחות חדשים" formatted={kpis.newCount.toString()} icon={ArrowUpRight} color="green" isDarkMode={isDarkMode}/>
+            <KPICard title="לקוחות שנטשו" formatted={kpis.churnedCount.toString()} icon={ArrowDownRight} color="red" subtext={excludeCurrentMonth?"0 הכנסה ב-2 חודשים (לא כולל החודש הנוכחי)":"0 הכנסה ב-2 החודשים האחרונים"} isDarkMode={isDarkMode}/>
+            <KPICard title="ריכוזיות (5 מובילים)" formatted={`${kpis.top5Pct.toFixed(0)}%`} icon={TriangleAlert} color={kpis.top5Pct>50?'amber':'cyan'} subtext={`לקוח בודד: ${kpis.top1Pct.toFixed(0)}%`} isDarkMode={isDarkMode}/>
+          </div>
+
+          <div className={`p-6 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+            <h3 className={`font-bold flex items-center gap-2 mb-4 ${isDarkMode?'text-white':'text-slate-800'}`}><PieChartIcon className="w-5 h-5 text-pink-500"/>פילוח לקוחות (ABC לפי הכנסה)</h3>
+            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 items-center">
+              <ResponsiveContainer width="100%" height={240}>
+                <PieChart>
+                  <Pie data={abcSegments} cx="50%" cy="50%" innerRadius={55} outerRadius={85} paddingAngle={3} dataKey="value" stroke="none">
+                    {abcSegments.map((seg,i) => (
+                      <Cell key={i} fill={seg.name==='A'?'#f59e0b':seg.name==='B'?'#3b82f6':(isDarkMode?'#475569':'#cbd5e1')}/>
+                    ))}
+                  </Pie>
+                  <RechartsTooltip
+                    formatter={(v,n,p)=>[`${formatCurrency(v)} (${p.payload.count} לקוחות)`, `קבוצה ${p.payload.name}`]}
+                    contentStyle={{backgroundColor:isDarkMode?'#1e293b':'#fff',borderColor:isDarkMode?'#334155':'#e2e8f0',borderRadius:'12px',color:isDarkMode?'#f1f5f9':'#0f172a'}}
+                  />
+                </PieChart>
+              </ResponsiveContainer>
+              <div className="space-y-2">
+                {abcSegments.map((seg,i) => (
+                  <div key={i} className={`flex items-center justify-between px-3 py-2.5 rounded-xl ${isDarkMode?'bg-slate-700/30':'bg-slate-50'}`}>
+                    <div className="flex items-center gap-2">
+                      <span className="w-2.5 h-2.5 rounded-full shrink-0" style={{background: seg.name==='A'?'#f59e0b':seg.name==='B'?'#3b82f6':(isDarkMode?'#475569':'#cbd5e1')}}/>
+                      <span className={`text-sm font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>קבוצה {seg.name}</span>
+                      <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{seg.count} לקוחות</span>
+                    </div>
+                    <span className={`text-sm font-bold ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>{formatShort(seg.value)}</span>
+                  </div>
+                ))}
+                <p className={`text-[11px] mt-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>A = 80% מההכנסה · B = עד 95% · C = שאר 5%</p>
+              </div>
+            </div>
+          </div>
+
+          <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+            <div className={`px-5 py-4 border-b flex flex-wrap justify-between items-center gap-3 ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+              <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><User className="w-4 h-4 text-slate-400"/>לקוחות <span className={`text-xs font-normal px-2 py-0.5 rounded-full ${isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500'}`}>{filtered.length.toLocaleString()}</span></h3>
+              <div className="relative">
+                <Search className={`absolute right-3 top-2.5 w-3.5 h-3.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}/>
+                <input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="חיפוש לקוח..."
+                  className={`pr-9 pl-3 py-2 border rounded-xl text-xs w-48 focus:outline-none focus:ring-2 focus:ring-pink-500 ${isDarkMode?'bg-slate-900 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
+              </div>
+            </div>
+            <div className="overflow-x-auto max-h-[460px]">
+              <table className={`w-full text-sm text-right ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                <thead className={`text-[11px] font-semibold uppercase tracking-widest sticky top-0 z-10 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
+                  <tr>
+                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" onClick={()=>reqSort('name')}>לקוח</th>
+                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" onClick={()=>reqSort('abc')}>ABC</th>
+                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" onClick={()=>reqSort('totalRevenue')}>הכנסה כוללת</th>
+                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" onClick={()=>reqSort('avgMonthly')}>ממוצע חודשי</th>
+                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" onClick={()=>reqSort('trend')}>מגמה</th>
+                    <th className="px-4 py-3">סטטוס</th>
+                    {productData.length>0 && <th className="px-4 py-3"></th>}
+                  </tr>
+                </thead>
+                <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                  {filtered.map(c => {
+                    const isOpen = expandedCustomer===c.name;
+                    const myProducts = productsByCustomer[c.name];
+                    return (
+                      <React.Fragment key={c.name}>
+                        <tr className={`transition-colors ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50/80'}`}>
+                          <td className={`px-4 py-3 font-medium ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{c.name}</td>
+                          <td className="px-4 py-3">
+                            <span className={`inline-flex items-center justify-center w-6 h-6 rounded-lg text-xs font-bold ${c.abc==='A'?(isDarkMode?'bg-amber-500/20 text-amber-400':'bg-amber-100 text-amber-700'):c.abc==='B'?(isDarkMode?'bg-blue-500/20 text-blue-400':'bg-blue-100 text-blue-700'):(isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500')}`} title={`${c.revPct.toFixed(1)}% מההכנסות`}>{c.abc}</span>
+                          </td>
+                          <td className={`px-4 py-3 font-bold tabular-nums ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>{formatCurrency(c.totalRevenue)}</td>
+                          <td className="px-4 py-3">{formatShort(c.avgMonthly)}</td>
+                          <td className="px-4 py-3">
+                            {CustomerTrendButton(c)}
+                          </td>
+                          <td className="px-4 py-3">{statusBadge(c.status)}</td>
+                          {productData.length>0 && (
+                            <td className="px-4 py-3">
+                              {myProducts?.length>0 && (
+                                <button onClick={()=>setExpandedCustomer(isOpen?null:c.name)} className={`p-1 rounded ${isDarkMode?'text-slate-400 hover:text-pink-400':'text-slate-500 hover:text-pink-600'}`}>
+                                  <ChevronDown className={`w-4 h-4 transition-transform ${isOpen?'rotate-180':''}`}/>
+                                </button>
+                              )}
+                            </td>
+                          )}
+                        </tr>
+                        {isOpen && myProducts?.length>0 && (() => {
+                          const myTotal = myProducts.reduce((s,p)=>s+p.revenue,0);
+                          return (
+                          <tr>
+                            <td colSpan={7} className={`px-4 py-3 ${isDarkMode?'bg-slate-900/40':'bg-slate-50'}`}>
+                              <div className="flex items-center justify-between mb-2">
+                                <p className={`text-xs font-bold ${isDarkMode?'text-slate-400':'text-slate-500'}`}>מוצרים שנרכשו — {c.name} ({myProducts.length} מוצרים שונים)</p>
+                                <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>סה"כ {formatCurrency(myTotal)}</p>
+                              </div>
+                              <div className="overflow-x-auto max-h-64">
+                                <table className="w-full text-xs text-right">
+                                  <thead className={`${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+                                    <tr>
+                                      <th className="px-2 py-1.5 font-medium">מוצר</th>
+                                      <th className="px-2 py-1.5 font-medium">מק"ט</th>
+                                      <th className="px-2 py-1.5 font-medium">כמות</th>
+                                      <th className="px-2 py-1.5 font-medium">הכנסה</th>
+                                      <th className="px-2 py-1.5 font-medium">% מהלקוח</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-200'}`}>
+                                    {myProducts.map((p,i) => (
+                                      <tr key={i}>
+                                        <td className={`px-2 py-1.5 ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{p.product}</td>
+                                        <td className={`px-2 py-1.5 font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.sku}</td>
+                                        <td className={`px-2 py-1.5 ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{p.quantity.toLocaleString()}</td>
+                                        <td className={`px-2 py-1.5 font-bold ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>{formatCurrency(p.revenue)}</td>
+                                        <td className={`px-2 py-1.5 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{myTotal>0?((p.revenue/myTotal)*100).toFixed(1):'0'}%</td>
+                                      </tr>
+                                    ))}
+                                  </tbody>
+                                </table>
+                              </div>
+                            </td>
+                          </tr>
+                          );
+                        })()}
+                      </React.Fragment>
+                    );
+                  })}
+                  {filtered.length===0 && <tr><td colSpan={7} className={`px-4 py-16 text-center text-sm ${isDarkMode?'text-slate-600':'text-slate-400'}`}>לא נמצאו לקוחות</td></tr>}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </>
+      )}
+
+      {productData.length>0 && (
+        <div className={`p-6 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+          <h3 className={`font-bold flex items-center gap-2 mb-4 ${isDarkMode?'text-white':'text-slate-800'}`}><Box className="w-5 h-5 text-pink-500"/>מוצרים מובילים (כל הלקוחות)</h3>
+          <div className="space-y-1.5">
+            {topProductsOverall.map((p,i) => (
+              <div key={i} className={`flex items-center justify-between text-sm px-3 py-2 rounded-lg ${isDarkMode?'bg-slate-700/30':'bg-slate-50'}`}>
+                <span className={`truncate ${isDarkMode?'text-slate-300':'text-slate-700'}`}>{p.name}</span>
+                <span className={`font-bold shrink-0 ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>{formatShort(p.total)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+};
+
+const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, isDarkMode, setActiveTab, excludeCurrentMonth }) => {
   const startVal = dateFilter.start ? getDateVal(dateFilter.start) : 0;
   const endVal = dateFilter.end ? getDateVal(dateFilter.end) : 999999;
   const inRange = (d) => { const v=getDateVal(d.date); return v>=startVal && v<=endVal; };
@@ -326,7 +769,8 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
 
   // Trend calc
   const calcTrend = (data, key) => {
-    const months = [...new Set(data.map(d=>d.date))].sort((a,b)=>getDateVal(a)-getDateVal(b));
+    let months = [...new Set(data.map(d=>d.date))].sort((a,b)=>getDateVal(a)-getDateVal(b));
+    if (excludeCurrentMonth && months.length>2) months = months.slice(0,-1);
     if (months.length < 2) return 0;
     const last = data.filter(d=>d.date===months[months.length-1]).reduce((a,c)=>a+c[key],0);
     const prev = data.filter(d=>d.date===months[months.length-2]).reduce((a,c)=>a+c[key],0);
@@ -334,7 +778,8 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
   };
 
   const revTrend = calcTrend(filteredSales, 'total');
-  const profitTrend = monthlyData.length>=2 ? (monthlyData[monthlyData.length-1].profit - monthlyData[monthlyData.length-2].profit) / Math.abs(monthlyData[monthlyData.length-2].profit||1) * 100 : 0;
+  const profitTrendMonths = excludeCurrentMonth && monthlyData.length>2 ? monthlyData.slice(0,-1) : monthlyData;
+  const profitTrend = profitTrendMonths.length>=2 ? (profitTrendMonths[profitTrendMonths.length-1].profit - profitTrendMonths[profitTrendMonths.length-2].profit) / Math.abs(profitTrendMonths[profitTrendMonths.length-2].profit||1) * 100 : 0;
 
   const sparkRevenue = monthlyData.slice(-8).map(m => ({ value: m.revenue }));
   const sparkProfit = monthlyData.slice(-8).map(m => ({ value: m.profit }));
@@ -910,12 +1355,85 @@ const parseInventoryFile = (rows) => {
   return result;
 };
 
+// ─── CUSTOMER FILES ─────────────────────────────────────
+// File 1: "מכירות ללקוח" — customer × month, no product breakdown.
+// Gives the time dimension: trend, churn, new customers.
+const parseCustomerMonthlyFile = (rows) => {
+  if (!rows.length) return [];
+  const norm = (s) => (s||'').toString().trim();
+  const headers = Object.keys(rows[0]).map(norm);
+  const findCol = (variants) => {
+    for (const v of variants) { const idx = headers.findIndex(h => h === v); if (idx !== -1) return idx; }
+    for (const v of variants) { const idx = headers.findIndex(h => h.includes(v)); if (idx !== -1) return idx; }
+    return -1;
+  };
+  const idIdx     = findCol(['מס. לקוח','מספר לקוח','מס לקוח','קוד לקוח']);
+  const nameIdx    = findCol(['שם לקוח','לקוח']);
+  const monthIdx   = findCol(['חודש']);
+  const revIdx     = findCol(['הכנסה משוערכת','הכנסה']); // prefer the normalized/revalued figure if present
+  const revInclIdx = findCol(["הכנסה כולל מע'מ","הכנסה כולל מעמ"]);
+  const result = [];
+  rows.forEach(row => {
+    const vals = Object.values(row).map(v => norm(String(v)));
+    const name = nameIdx !== -1 ? vals[nameIdx] : '';
+    const month = monthIdx !== -1 ? vals[monthIdx] : '';
+    if (!name || !month) return;
+    const revenue = revIdx !== -1 ? parseFloat(vals[revIdx].replace(/[^\d.-]/g,'')) : NaN;
+    const revenueIncl = revInclIdx !== -1 ? parseFloat(vals[revInclIdx].replace(/[^\d.-]/g,'')) : NaN;
+    result.push({
+      customerId: idIdx !== -1 ? vals[idIdx] : name,
+      customer: name,
+      date: month,
+      revenue: isNaN(revenue) ? 0 : revenue,
+      revenueIncl: isNaN(revenueIncl) ? null : revenueIncl,
+    });
+  });
+  return result;
+};
+
+// File 2: "מכירות מוצר ללקוח" — customer × product, totals over the whole period (no month).
+// Gives the breadth dimension: product mix, cross-sell, customer-product concentration.
+const parseCustomerProductFile = (rows) => {
+  if (!rows.length) return [];
+  const norm = (s) => (s||'').toString().trim();
+  const headers = Object.keys(rows[0]).map(norm);
+  const findCol = (variants) => {
+    for (const v of variants) { const idx = headers.findIndex(h => h === v); if (idx !== -1) return idx; }
+    for (const v of variants) { const idx = headers.findIndex(h => h.includes(v)); if (idx !== -1) return idx; }
+    return -1;
+  };
+  const idIdx   = findCol(['מס. לקוח','מספר לקוח','מס לקוח','קוד לקוח']);
+  const nameIdx  = findCol(['שם לקוח','לקוח']);
+  const skuIdx   = findCol(["מק'ט",'מק"ט','מקט']);
+  const prodIdx  = findCol(['תאור מוצר','תיאור מוצר','תאור','תיאור']);
+  const qtyIdx   = findCol(['כמות']);
+  const revIdx   = findCol(['הכנסה משוערכת','הכנסה']);
+  const result = [];
+  rows.forEach(row => {
+    const vals = Object.values(row).map(v => norm(String(v)));
+    const name = nameIdx !== -1 ? vals[nameIdx] : '';
+    const product = prodIdx !== -1 ? vals[prodIdx] : '';
+    if (!name || !product) return;
+    const qty = qtyIdx !== -1 ? parseFloat(vals[qtyIdx].replace(/[^\d.-]/g,'')) : NaN;
+    const revenue = revIdx !== -1 ? parseFloat(vals[revIdx].replace(/[^\d.-]/g,'')) : NaN;
+    result.push({
+      customerId: idIdx !== -1 ? vals[idIdx] : name,
+      customer: name,
+      sku: skuIdx !== -1 ? vals[skuIdx] : '',
+      product,
+      quantity: isNaN(qty) ? 0 : qty,
+      revenue: isNaN(revenue) ? 0 : revenue,
+    });
+  });
+  return result;
+};
+
 // ─── PROCUREMENT PAGE ──────────────────────────────────
 const MONTH_FULL_LABELS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
 const MONTH_ABBR_LABELS_SHORT = ['ינו','פבר','מרץ','אפר','מאי','יונ','יול','אוג','ספט','אוק','נוב','דצמ'];
 
 // ─── PROCUREMENT PAGE ──────────────────────────────────
-const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, jumpTo, onJumpToSales }) => {
+const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, jumpTo, onJumpToSales, excludeCurrentMonth }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
   const [minStockMap, setMinStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementMinStock')||'{}'); } catch { return {}; } });
   const [supplierMap, setSupplierMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementSupplier')||'{}'); } catch { return {}; } });
@@ -1240,7 +1758,13 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
       if (row.date) map[key].monthlyData[row.date] = (map[key].monthlyData[row.date]||0)+(row.quantity||0);
     });
     // All months in dataset (used for sparkline / seasonality base)
-    const allMonthsFull = [...new Set(salesData.map(d=>d.date).filter(Boolean))].sort((a,b)=>getDateVal(a)-getDateVal(b));
+    // Most customers are invoiced only at month-end/start of next month, so the
+    // single most recent calendar month is almost always incomplete. When the
+    // global toggle is on, drop it everywhere here — sparklines, seasonality,
+    // averages, trend, forecast — rather than let a partial month masquerade as
+    // a real data point (which would otherwise look like a false decline).
+    let allMonthsFull = [...new Set(salesData.map(d=>d.date).filter(Boolean))].sort((a,b)=>getDateVal(a)-getDateVal(b));
+    if (excludeCurrentMonth && allMonthsFull.length > 1) allMonthsFull = allMonthsFull.slice(0, -1);
     // Window months — for average calculation (default: last 12 months)
     const allMonths = avgWindowMonths === 0
       ? allMonthsFull
@@ -1395,7 +1919,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
         : 'unknown';
       return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, suggestedOrderRaw, orderCost, risk };
     });
-  }, [salesData, stockMap, costMap, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, avgWindowMonths]);
+  }, [salesData, stockMap, costMap, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, avgWindowMonths, excludeCurrentMonth]);
 
   const filtered = useMemo(() => {
     let data = products;
@@ -3385,6 +3909,12 @@ const App = () => {
   }, []);
 
   const [salesData, setSalesData] = useState(() => { try { return JSON.parse(localStorage.getItem('dashboardSalesData')||'[]'); } catch { return []; } });
+  // Customer data — two independent, optional files (see parseCustomerMonthlyFile/
+  // parseCustomerProductFile): one gives the time dimension, the other the product mix.
+  const [customerMonthlyData, setCustomerMonthlyData] = useState(() => { try { return JSON.parse(localStorage.getItem('customerMonthlyData')||'[]'); } catch { return []; } });
+  const [customerProductData, setCustomerProductData] = useState(() => { try { return JSON.parse(localStorage.getItem('customerProductData')||'[]'); } catch { return []; } });
+  const [customerMonthlyFileName, setCustomerMonthlyFileName] = useState(() => localStorage.getItem('customerMonthlyFileName')||'');
+  const [customerProductFileName, setCustomerProductFileName] = useState(() => localStorage.getItem('customerProductFileName')||'');
   // Cost & currency per SKU — owned here (not inside ProcurementPage) so the
   // "מכירות" tab can compute margin/profit using the same data Procurement imports.
   const [costMap, setCostMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementCost')||'{}'); } catch { return {}; } });
@@ -3438,6 +3968,17 @@ const App = () => {
   const [clearModalOpen, setClearModalOpen] = useState(false);
 
   const [showNotifications, setShowNotifications] = useState(false);
+  // Global setting: most customers are invoiced only at month-end/start of next
+  // month, so the most recent calendar month is structurally incomplete at any
+  // point before that invoicing run finishes. When on, this excludes the latest
+  // month from average/trend/forecast/churn math everywhere — Sales, Procurement,
+  // and Customers — while still showing it in tables/charts (just not letting it
+  // skew calculations that assume a complete month).
+  const [excludeCurrentMonth, setExcludeCurrentMonth] = useState(() => {
+    const v = localStorage.getItem('excludeCurrentMonth');
+    return v===null ? true : v==='true';
+  });
+  useEffect(() => { localStorage.setItem('excludeCurrentMonth', String(excludeCurrentMonth)); }, [excludeCurrentMonth]);
   const [notifications, setNotifications] = useState([]);
   const [showColumnMenu, setShowColumnMenu] = useState(false);
   const [visibleColumns, setVisibleColumns] = useState({ date:true, sku:true, description:true, quantity:true, total:true });
@@ -3562,6 +4103,57 @@ const App = () => {
     setSearchTerm(''); setSelectedProduct([]); setSelectedSku(''); setSelectedSupplier(''); setDrillDownMonth(null);
   };
 
+  // ─── Customer file uploads (independent, optional) ───
+  const [customerUploadLoading, setCustomerUploadLoading] = useState({ monthly:false, product:false });
+  const readXlsxRows = (file) => new Promise((resolve, reject) => {
+    if (!window.XLSX) { reject(new Error('XLSX not loaded')); return; }
+    const r = new FileReader();
+    r.onload = (e) => {
+      try {
+        const wb = window.XLSX.read(e.target.result, {type:'binary'});
+        resolve(window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], {defval:''}));
+      } catch (err) { reject(err); }
+    };
+    r.onerror = reject;
+    r.readAsBinaryString(file);
+  });
+  const handleCustomerMonthlyUpload = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    setCustomerUploadLoading(p=>({...p, monthly:true}));
+    try {
+      const rows = await readXlsxRows(file);
+      const parsed = parseCustomerMonthlyFile(rows);
+      setCustomerMonthlyData(parsed);
+      setCustomerMonthlyFileName(file.name);
+      localStorage.setItem('customerMonthlyData', JSON.stringify(parsed));
+      localStorage.setItem('customerMonthlyFileName', file.name);
+    } catch {}
+    setCustomerUploadLoading(p=>({...p, monthly:false}));
+    e.target.value = '';
+  };
+  const handleCustomerProductUpload = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    setCustomerUploadLoading(p=>({...p, product:true}));
+    try {
+      const rows = await readXlsxRows(file);
+      const parsed = parseCustomerProductFile(rows);
+      setCustomerProductData(parsed);
+      setCustomerProductFileName(file.name);
+      localStorage.setItem('customerProductData', JSON.stringify(parsed));
+      localStorage.setItem('customerProductFileName', file.name);
+    } catch {}
+    setCustomerUploadLoading(p=>({...p, product:false}));
+    e.target.value = '';
+  };
+  const clearCustomerMonthly = () => {
+    setCustomerMonthlyData([]); setCustomerMonthlyFileName('');
+    localStorage.removeItem('customerMonthlyData'); localStorage.removeItem('customerMonthlyFileName');
+  };
+  const clearCustomerProduct = () => {
+    setCustomerProductData([]); setCustomerProductFileName('');
+    localStorage.removeItem('customerProductData'); localStorage.removeItem('customerProductFileName');
+  };
+
   // ─── Saved views — remembers a filter combo (tab + date range + product/supplier) ───
   const [savedViews, setSavedViews] = useState(() => { try { return JSON.parse(localStorage.getItem('savedViews')||'[]'); } catch { return []; } });
   const [showSavedViews, setShowSavedViews] = useState(false);
@@ -3666,7 +4258,10 @@ const App = () => {
   useEffect(() => setCurrentPage(1), [activeTab, searchTerm, dateFilter, selectedProduct, selectedSku, selectedSupplier, drillDownMonth]);
 
   const calcTrend = (data) => {
-    const months=[...new Set(data.map(d=>d.date))].sort((a,b)=>getDateVal(a)-getDateVal(b));
+    let months=[...new Set(data.map(d=>d.date))].sort((a,b)=>getDateVal(a)-getDateVal(b));
+    // Skip the latest month if it's flagged as not-yet-fully-invoiced — comparing
+    // a partial month against a complete one would show a false decline.
+    if (excludeCurrentMonth && months.length>2) months = months.slice(0,-1);
     if (months.length<2) return 0;
     const last=data.filter(d=>d.date===months[months.length-1]).reduce((a,c)=>a+c.total,0);
     const prev=data.filter(d=>d.date===months[months.length-2]).reduce((a,c)=>a+c.total,0);
@@ -3684,7 +4279,7 @@ const App = () => {
     if (trend>20) alerts.push({id:1,type:'success',text:`עלייה של ${trend.toFixed(0)}% החודש!`});
     if (trend<-20) alerts.push({id:2,type:'warning',text:`ירידה של ${Math.abs(trend).toFixed(0)}% החודש`});
     return { totalAmount, totalQuantity, uniqueCount, avgAmount:mc>0?totalAmount/mc:0, avgQuantity:mc>0?totalQuantity/mc:0, monthsCount:mc, trend, alerts };
-  }, [filteredData, dateFilter, availableDates, activeTab]);
+  }, [filteredData, dateFilter, availableDates, activeTab, excludeCurrentMonth]);
 
   useEffect(() => { if (stats?.alerts) setNotifications(stats.alerts); }, [stats]);
 
@@ -4082,6 +4677,7 @@ const App = () => {
   const navItems = [
     { id:'overview', label:'סקירה כללית', icon:Home, color:'text-sky-400' },
     { id:'sales', label:'מכירות', icon:TrendingUp, color:'text-blue-400' },
+    { id:'customers', label:'לקוחות', icon:User, color:'text-pink-400' },
     { id:'suppliers', label:'רכש וספקים', icon:Truck, color:'text-emerald-400' },
     { id:'procurement', label:'תכנון רכש', icon:ShoppingCart, color:'text-amber-400' },
     { id:'summary', label:'רווח והפסד', icon:BarChart3, color:'text-violet-400' },
@@ -4214,6 +4810,15 @@ const App = () => {
                 ))}
               </div>
             )}
+            <button onClick={()=>setExcludeCurrentMonth(p=>!p)}
+              title="חלק מהלקוחות מתחייבים רק בסוף/תחילת חודש, אז החודש הנוכחי בדרך כלל חסר. כשמופעל, האפליקציה מתעלמת מהחודש האחרון בחישובי ממוצע/מגמה/תחזית/נטישה (אבל עדיין מציגה אותו בטבלאות וגרפים)."
+              className={`flex items-center gap-2 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${excludeCurrentMonth?(isDarkMode?'bg-amber-500/10 border-amber-500/30 text-amber-300':'bg-amber-50 border-amber-200 text-amber-700'):(isDarkMode?'border-slate-700 text-slate-500 hover:text-slate-300':'border-slate-200 text-slate-400 hover:text-slate-600')}`}>
+              <Calendar className="w-3.5 h-3.5 shrink-0"/>
+              <span className="hidden sm:inline whitespace-nowrap">חודש נוכחי לא סופי</span>
+              <div className={`relative w-7 h-4 rounded-full shrink-0 transition-colors ${excludeCurrentMonth?'bg-amber-500':(isDarkMode?'bg-slate-600':'bg-slate-300')}`}>
+                <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${excludeCurrentMonth?'translate-x-0.5':'translate-x-3.5'}`}/>
+              </div>
+            </button>
             <button onClick={toggleTheme} className={`p-2.5 rounded-xl transition-all ${isDarkMode?'bg-slate-800 text-yellow-400 hover:bg-slate-700':'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
               {isDarkMode?<Sun className="w-4 h-4"/>:<Moon className="w-4 h-4"/>}
             </button>
@@ -4252,12 +4857,28 @@ const App = () => {
         <main className="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
           {/* Overview */}
           {activeTab==='overview' && (
-            <OverviewPage salesData={salesData} suppliersData={suppliersData} dateFilter={dateFilter} availableDates={availableDates} isDarkMode={isDarkMode} setActiveTab={setActiveTab}/>
+            <OverviewPage salesData={salesData} suppliersData={suppliersData} dateFilter={dateFilter} availableDates={availableDates} isDarkMode={isDarkMode} setActiveTab={setActiveTab} excludeCurrentMonth={excludeCurrentMonth}/>
+          )}
+
+          {/* Customers */}
+          {activeTab==='customers' && (
+            <CustomersPage
+              monthlyData={customerMonthlyData}
+              productData={customerProductData}
+              isDarkMode={isDarkMode}
+              fileNames={{ monthly:customerMonthlyFileName, product:customerProductFileName }}
+              onUploadMonthly={handleCustomerMonthlyUpload}
+              onUploadProduct={handleCustomerProductUpload}
+              onClearMonthly={clearCustomerMonthly}
+              onClearProduct={clearCustomerProduct}
+              loading={customerUploadLoading}
+              excludeCurrentMonth={excludeCurrentMonth}
+            />
           )}
 
           {/* Procurement Planning */}
           {activeTab==='procurement' && (
-            <ProcurementPage salesData={salesData} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} />
+            <ProcurementPage salesData={salesData} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} />
           )}
 
           {/* Summary */}
@@ -4530,29 +5151,37 @@ const App = () => {
                         </div>
                       ))}
                     </div>
-                    <div className="grid grid-cols-2 gap-4 mb-5">
-                      <div className={`p-4 rounded-xl border ${isDarkMode?'bg-slate-900/50 border-slate-700':'bg-slate-50 border-slate-200'}`}>
-                        <p className={`text-xs mb-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{activeTab==='sales'?'הכנסה':'הוצאה'}</p>
-                        <div className="flex items-end gap-2">
-                          <span className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>{formatShort(freeCompareStats.a.revenue)}</span>
-                          <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>מול {formatShort(freeCompareStats.b.revenue)}</span>
-                        </div>
-                        <span className={`text-xs font-bold flex items-center gap-1 mt-1 ${freeCompareStats.revDelta>=0?'text-emerald-500':'text-red-500'}`}>
-                          {freeCompareStats.revDelta>=0?<ArrowUpRight className="w-3 h-3"/>:<ArrowDownRight className="w-3 h-3"/>}
-                          {Math.abs(freeCompareStats.revDelta).toFixed(0)}% {freeCompareStats.revDelta>=0?'יותר':'פחות'} מתקופה ב'
-                        </span>
-                      </div>
-                      <div className={`p-4 rounded-xl border ${isDarkMode?'bg-slate-900/50 border-slate-700':'bg-slate-50 border-slate-200'}`}>
-                        <p className={`text-xs mb-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>כמות</p>
-                        <div className="flex items-end gap-2">
-                          <span className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>{freeCompareStats.a.qty.toLocaleString()}</span>
-                          <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>מול {freeCompareStats.b.qty.toLocaleString()}</span>
-                        </div>
-                        <span className={`text-xs font-bold flex items-center gap-1 mt-1 ${freeCompareStats.qtyDelta>=0?'text-emerald-500':'text-red-500'}`}>
-                          {freeCompareStats.qtyDelta>=0?<ArrowUpRight className="w-3 h-3"/>:<ArrowDownRight className="w-3 h-3"/>}
-                          {Math.abs(freeCompareStats.qtyDelta).toFixed(0)}% {freeCompareStats.qtyDelta>=0?'יותר':'פחות'} מתקופה ב'
-                        </span>
-                      </div>
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+                      {[
+                        { label:'א', data:freeCompareStats.a, otherData:freeCompareStats.b, color:'blue' },
+                        { label:'ב', data:freeCompareStats.b, otherData:freeCompareStats.a, color:'slate' },
+                      ].map(({label,data,otherData,color}) => {
+                        const revDelta = otherData.revenue>0 ? ((data.revenue-otherData.revenue)/otherData.revenue*100) : (data.revenue>0?100:0);
+                        const qtyDelta = otherData.qty>0 ? ((data.qty-otherData.qty)/otherData.qty*100) : (data.qty>0?100:0);
+                        return (
+                          <div key={label} className={`p-4 rounded-xl border ${isDarkMode?'bg-slate-900/50 border-slate-700':'bg-slate-50 border-slate-200'}`}>
+                            <span className={`text-xs font-bold px-2 py-1 rounded-lg ${color==='blue'?(isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-100 text-blue-700'):(isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-200 text-slate-600')}`}>תקופה {label}</span>
+                            <div className="flex items-center justify-between mt-3">
+                              <div>
+                                <p className={`text-xs mb-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{activeTab==='sales'?'הכנסה':'הוצאה'}</p>
+                                <span className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>{formatShort(data.revenue)}</span>
+                                <span className={`text-xs font-bold flex items-center gap-1 mt-0.5 ${revDelta>=0?'text-emerald-500':'text-red-500'}`}>
+                                  {revDelta>=0?<ArrowUpRight className="w-3 h-3"/>:<ArrowDownRight className="w-3 h-3"/>}
+                                  {Math.abs(revDelta).toFixed(0)}%
+                                </span>
+                              </div>
+                              <div className="text-left">
+                                <p className={`text-xs mb-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>כמות</p>
+                                <span className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>{data.qty.toLocaleString()}</span>
+                                <span className={`text-xs font-bold flex items-center gap-1 mt-0.5 justify-end ${qtyDelta>=0?'text-emerald-500':'text-red-500'}`}>
+                                  {qtyDelta>=0?<ArrowUpRight className="w-3 h-3"/>:<ArrowDownRight className="w-3 h-3"/>}
+                                  {Math.abs(qtyDelta).toFixed(0)}%
+                                </span>
+                              </div>
+                            </div>
+                          </div>
+                        );
+                      })}
                     </div>
                     <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                       {[['א',freeCompareStats.a],['ב',freeCompareStats.b]].map(([label,data])=>(
