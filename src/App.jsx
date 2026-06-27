@@ -226,9 +226,19 @@ const Sparkline = ({ data, color = '#3b82f6', positive = true }) => {
   const min = Math.min(...vals), max = Math.max(...vals);
   const range = max - min || 1;
   const w = 80, h = 32;
-  const points = vals.map((v, i) => `${(i / (vals.length - 1)) * w},${h - ((v - min) / range) * h}`).join(' ');
+  const coords = vals.map((v, i) => [(i / (vals.length - 1)) * w, h - ((v - min) / range) * h]);
+  const points = coords.map(([x,y]) => `${x},${y}`).join(' ');
+  const areaPoints = `0,${h} ${points} ${w},${h}`;
+  const gradId = `sparkGrad-${color.replace('#','')}`;
   return (
-    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="opacity-80">
+    <svg width={w} height={h} viewBox={`0 0 ${w} ${h}`} className="opacity-90">
+      <defs>
+        <linearGradient id={gradId} x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0%" stopColor={color} stopOpacity={0.35}/>
+          <stop offset="100%" stopColor={color} stopOpacity={0}/>
+        </linearGradient>
+      </defs>
+      <polygon points={areaPoints} fill={`url(#${gradId})`} stroke="none"/>
       <polyline points={points} fill="none" stroke={color} strokeWidth="2" strokeLinejoin="round" strokeLinecap="round" />
     </svg>
   );
@@ -356,8 +366,11 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
 
   if (noData) return (
     <div className="flex flex-col items-center justify-center h-96 text-center animate-in fade-in zoom-in">
-      <div className={`p-6 rounded-full mb-4 ${isDarkMode?'bg-slate-800':'bg-slate-100'}`}>
-        <Home className={`w-12 h-12 ${isDarkMode?'text-slate-600':'text-slate-300'}`} />
+      <div className="relative mb-4">
+        <div className={`absolute inset-0 rounded-full blur-2xl opacity-40 ${isDarkMode?'bg-blue-600':'bg-blue-300'}`}/>
+        <div className={`relative p-6 rounded-full ${isDarkMode?'bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700':'bg-gradient-to-br from-slate-50 to-white border border-slate-100'}`}>
+          <Home className={`w-12 h-12 ${isDarkMode?'text-slate-500':'text-slate-300'}`} />
+        </div>
       </div>
       <h3 className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>ברוך הבא ל-BizData Pro</h3>
       <p className={`mt-2 max-w-sm ${isDarkMode?'text-slate-400':'text-slate-500'}`}>טען קבצים בלשוניות מכירות או ספקים כדי לראות את ה-Overview המלא</p>
@@ -537,19 +550,26 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
 // Empty State
 const EmptyState = ({ onUpload, loading, isDarkMode }) => (
   <div className="flex flex-col items-center justify-center h-full text-center p-8 animate-in fade-in zoom-in duration-500">
-    <div className={`p-8 rounded-3xl mb-6 ${isDarkMode?'bg-slate-800':'bg-slate-100'}`}>
-      <FileSpreadsheet className={`w-14 h-14 ${isDarkMode?'text-slate-600':'text-slate-300'}`} />
+    <div className="relative mb-6">
+      <div className={`absolute inset-0 rounded-3xl blur-2xl opacity-40 ${isDarkMode?'bg-blue-600':'bg-blue-300'}`}/>
+      <div className={`relative p-8 rounded-3xl ${isDarkMode?'bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700':'bg-gradient-to-br from-slate-50 to-white border border-slate-100'}`}>
+        <FileSpreadsheet className={`w-14 h-14 ${isDarkMode?'text-slate-500':'text-slate-300'}`} />
+      </div>
     </div>
     <h3 className={`text-2xl font-bold mb-2 ${isDarkMode?'text-white':'text-slate-800'}`}>אין נתונים עדיין</h3>
     <p className={`max-w-xs mb-8 text-sm leading-relaxed ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
       טען קבצי Excel או CSV של מכירות / ספקים כדי להתחיל
     </p>
-    <label className="group flex items-center gap-3 px-7 py-3.5 bg-blue-600 hover:bg-blue-700 text-white rounded-2xl cursor-pointer transition-all hover:scale-105 shadow-lg shadow-blue-500/25 font-medium">
+    <label className="group flex items-center gap-3 px-7 py-3.5 bg-gradient-to-l from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white rounded-2xl cursor-pointer transition-all hover:scale-105 shadow-lg shadow-blue-500/25 font-medium">
       {loading ? <Loader2 className="w-5 h-5 animate-spin"/> : <Upload className="w-5 h-5"/>}
       בחר קבצים
       <input type="file" accept=".csv,.xlsx,.xls" multiple onChange={onUpload} className="hidden" disabled={loading}/>
     </label>
-    <p className="mt-3 text-xs text-slate-400">.xlsx, .xls, .csv</p>
+    <div className="flex items-center gap-1.5 mt-4">
+      {['.xlsx','.xls','.csv'].map(ext => (
+        <span key={ext} className={`px-2 py-0.5 rounded-md text-[11px] font-mono ${isDarkMode?'bg-slate-800 text-slate-400 border border-slate-700':'bg-slate-100 text-slate-500 border border-slate-200'}`}>{ext}</span>
+      ))}
+    </div>
   </div>
 );
 
@@ -2001,8 +2021,11 @@ const renderProductRow = (p) => {
 
 
   if (!salesData.length) return (
-    <div className="flex flex-col items-center justify-center h-96 text-center">
-      <div className={`p-6 rounded-full mb-4 ${isDarkMode?'bg-slate-800':'bg-slate-100'}`}><ShoppingCart className={`w-12 h-12 ${isDarkMode?'text-slate-600':'text-slate-300'}`}/></div>
+    <div className="flex flex-col items-center justify-center h-96 text-center animate-in fade-in zoom-in duration-500">
+      <div className="relative mb-4">
+        <div className={`absolute inset-0 rounded-full blur-2xl opacity-40 ${isDarkMode?'bg-blue-600':'bg-blue-300'}`}/>
+        <div className={`relative p-6 rounded-full ${isDarkMode?'bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700':'bg-gradient-to-br from-slate-50 to-white border border-slate-100'}`}><ShoppingCart className={`w-12 h-12 ${isDarkMode?'text-slate-500':'text-slate-300'}`}/></div>
+      </div>
       <h3 className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>אין נתוני מכירות</h3>
       <p className={`mt-2 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>טען קבצי מכירות כדי לתכנן את הרכש</p>
     </div>
@@ -4134,8 +4157,11 @@ const App = () => {
                 </div>
               </div>
             ) : (
-              <div className="flex flex-col items-center justify-center h-96 text-center">
-                <div className={`p-6 rounded-full mb-4 ${isDarkMode?'bg-slate-800':'bg-slate-100'}`}><BarChart3 className={`w-12 h-12 ${isDarkMode?'text-slate-600':'text-slate-300'}`}/></div>
+              <div className="flex flex-col items-center justify-center h-96 text-center animate-in fade-in zoom-in duration-500">
+                <div className="relative mb-4">
+                  <div className={`absolute inset-0 rounded-full blur-2xl opacity-40 ${isDarkMode?'bg-blue-600':'bg-blue-300'}`}/>
+                  <div className={`relative p-6 rounded-full ${isDarkMode?'bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700':'bg-gradient-to-br from-slate-50 to-white border border-slate-100'}`}><BarChart3 className={`w-12 h-12 ${isDarkMode?'text-slate-500':'text-slate-300'}`}/></div>
+                </div>
                 <h3 className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>אין נתונים לסיכום</h3>
                 <p className={`mt-2 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>טען קבצי מכירות וספקים כדי לראות סיכום פיננסי.</p>
               </div>
@@ -4307,13 +4333,21 @@ const App = () => {
                         {chartData.pie.length>0 ? (
                           <ResponsiveContainer width="100%" height="100%">
                             <PieChart>
+                              <defs>
+                                {COLORS.map((c,i) => (
+                                  <linearGradient key={i} id={`pieGrad${i}`} x1="0" y1="0" x2="0" y2="1">
+                                    <stop offset="0%" stopColor={c} stopOpacity={1}/>
+                                    <stop offset="100%" stopColor={c} stopOpacity={0.65}/>
+                                  </linearGradient>
+                                ))}
+                              </defs>
                               <Pie data={chartData.pie} cx="50%" cy="45%" innerRadius={60} outerRadius={90} paddingAngle={3} dataKey="value" stroke="none" style={{cursor:'pointer'}}
                                 onClick={(d)=>{
                                   if (!d?.name) return;
                                   if (activeTab==='sales') setSelectedProduct(prev => prev.length===1&&prev[0]===d.name ? [] : [d.name]);
                                   else setSelectedSupplier(prev => prev===d.name ? '' : d.name);
                                 }}>
-                                {chartData.pie.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
+                                {chartData.pie.map((_,i)=><Cell key={i} fill={`url(#pieGrad${i%COLORS.length})`}/>)}
                               </Pie>
                               <RechartsTooltip
                                 formatter={(v,n,p)=>[p.payload.total?formatCurrency(p.payload.total):'', p.payload.name]}
