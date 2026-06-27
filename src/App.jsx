@@ -857,13 +857,11 @@ const MONTH_FULL_LABELS = ['ינואר','פברואר','מרץ','אפריל','מ
 const MONTH_ABBR_LABELS_SHORT = ['ינו','פבר','מרץ','אפר','מאי','יונ','יול','אוג','ספט','אוק','נוב','דצמ'];
 
 // ─── PROCUREMENT PAGE ──────────────────────────────────
-const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
+const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, jumpTo, onJumpToSales }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
-  const [costMap,  setCostMap]  = useState(() => { try { return JSON.parse(localStorage.getItem('procurementCost') ||'{}'); } catch { return {}; } });
   const [minStockMap, setMinStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementMinStock')||'{}'); } catch { return {}; } });
   const [supplierMap, setSupplierMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementSupplier')||'{}'); } catch { return {}; } });
   const [moqMap, setMoqMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementMOQ')||'{}'); } catch { return {}; } });
-  const [currencyMap, setCurrencyMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementCurrency')||'{}'); } catch { return {}; } });
   const [colWidths, setColWidths] = useState(() => {
     try { return { ...PROC_COL_DEFAULTS, ...JSON.parse(localStorage.getItem('procurementColWidths')||'{}') }; }
     catch { return { ...PROC_COL_DEFAULTS }; }
@@ -921,6 +919,9 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
   const [abcFilter, setAbcFilter] = useState('all');
   const [riskFilter, setRiskFilter] = useState('all'); // 'all'|'critical'|'low'|'ok'|'unknown'
   const [searchTerm, setSearchTerm] = useState('');
+  // Arrived here via a "jump to procurement" link from the Sales tab — drop the
+  // product name straight into this page's own search box.
+  useEffect(() => { if (jumpTo?.term) setSearchTerm(jumpTo.term); }, [jumpTo]);
   const [sortConfig, setSortConfig] = useState({ key:'totalRev', direction:'desc' });
   const [editingStock, setEditingStock] = useState(null);
   const [editingMOQ, setEditingMOQ] = useState(null);
@@ -1816,6 +1817,12 @@ const renderProductRow = (p) => {
                         </div>
                       )}
                       {SeasonalityButton(p)}
+                      {onJumpToSales && (
+                        <button onClick={e=>{e.stopPropagation();onJumpToSales(p.name);}} title="עבור למכירות למוצר הזה — הכנסה, מגמה ו-ABC"
+                          className={`p-1 rounded text-xs transition-opacity opacity-40 hover:opacity-100 ${isDarkMode?'text-blue-400':'text-blue-500'}`}>
+                          <TrendingUp className="w-3.5 h-3.5"/>
+                        </button>
+                      )}
                     </td>
                     <td className="px-4 py-3 overflow-hidden">
                       <span className={`text-sm truncate block ${isDarkMode?'text-slate-300':'text-slate-600'}`} title={p.supplier||''}>{p.supplier||'—'}</span>
@@ -3276,6 +3283,10 @@ const App = () => {
   }, []);
 
   const [salesData, setSalesData] = useState(() => { try { return JSON.parse(localStorage.getItem('dashboardSalesData')||'[]'); } catch { return []; } });
+  // Cost & currency per SKU — owned here (not inside ProcurementPage) so the
+  // "מכירות" tab can compute margin/profit using the same data Procurement imports.
+  const [costMap, setCostMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementCost')||'{}'); } catch { return {}; } });
+  const [currencyMap, setCurrencyMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementCurrency')||'{}'); } catch { return {}; } });
   const [suppliersData, setSuppliersData] = useState(() => { try { return JSON.parse(localStorage.getItem('dashboardSuppliersData')||'[]'); } catch { return []; } });
   const [salesFileNames, setSalesFileNames] = useState(() => { try { return JSON.parse(localStorage.getItem('salesFileNames')||'[]'); } catch { return []; } });
   const [suppliersFileNames, setSuppliersFileNames] = useState(() => { try { return JSON.parse(localStorage.getItem('suppliersFileNames')||'[]'); } catch { return []; } });
@@ -3289,6 +3300,12 @@ const App = () => {
   const [sortConfig, setSortConfig] = useState({ key:'total', direction:'desc' });
   const [currentPage, setCurrentPage] = useState(1);
   const itemsPerPage = 50;
+  // One-shot handoff: lets the Sales tab send a product name to ProcurementPage's
+  // own search box and jump there, so users can go straight from "what sold well"
+  // to "what's its ABC/seasonality/reorder status" without retyping anything.
+  const [procurementJumpTo, setProcurementJumpTo] = useState(null); // {term, ts}
+  const jumpToProcurement = (name) => { setProcurementJumpTo({ term:name, ts:Date.now() }); setActiveTab('procurement'); };
+  const jumpToSales = (name) => { setActiveTab('sales'); setSalesViewMode('byProduct'); setSearchTerm(name); };
 
   const [aiModalOpen, setAiModalOpen] = useState(false);
   const [aiLoading, setAiLoading] = useState(false);
@@ -3307,6 +3324,8 @@ const App = () => {
   const [dateFilter, setDateFilter] = useState({ start:'', end:'' });
   const [drillDownMonth, setDrillDownMonth] = useState(null);
   const [showYoY, setShowYoY] = useState(false);
+  const [chartMetricRight, setChartMetricRight] = useState('quantity'); // 'quantity' | 'margin' (sales only)
+  const [chartGranularity, setChartGranularity] = useState('month'); // 'month' | 'quarter'
 
   const [selectedProduct, setSelectedProduct] = useState([]);
   const [selectedSku, setSelectedSku] = useState('');
@@ -3502,18 +3521,57 @@ const App = () => {
   const chartData = useMemo(() => {
     if (activeTab==='summary'||activeTab==='overview') return null;
     const mm={};
-    filteredData.forEach(d=>{ if(!d.date)return; mm[d.date]=mm[d.date]||{total:0,quantity:0}; mm[d.date].total+=d.total; mm[d.date].quantity+=d.quantity;
+    filteredData.forEach(d=>{ if(!d.date)return; mm[d.date]=mm[d.date]||{total:0,quantity:0,costKnownRev:0,costKnownCost:0}; mm[d.date].total+=d.total; mm[d.date].quantity+=d.quantity;
       if(activeTab==='sales'&&selectedProduct.length>0){ mm[d.date][d.description]=(mm[d.date][d.description]||0)+d.total; mm[d.date][`${d.description}_q`]=(mm[d.date][`${d.description}_q`]||0)+d.quantity; }
+      if(activeTab==='sales') {
+        const unitCost = costMap[d.sku]??costMap[d.description]??null;
+        const currency = currencyMap[d.sku]??currencyMap[d.description]??null;
+        if (unitCost!=null && (!currency||currency==='ILS')) {
+          mm[d.date].costKnownRev += d.total;
+          mm[d.date].costKnownCost += (d.quantity||0)*unitCost;
+        }
+      }
     });
-    const monthly = Object.entries(mm).map(([name,v])=>({name,...v,order:getDateVal(name),...(selectedProduct.length>0?selectedProduct.reduce((a,p)=>({...a,[p]:v[p]||0,[`${p}_q`]:v[`${p}_q`]||0}),{}):{})  })).sort((a,b)=>a.order-b.order);
+    const monthly = Object.entries(mm).map(([name,v])=>({
+      name, ...v, order:getDateVal(name),
+      marginPct: v.costKnownRev>0 ? ((v.costKnownRev-v.costKnownCost)/v.costKnownRev*100) : null,
+      ...(selectedProduct.length>0?selectedProduct.reduce((a,p)=>({...a,[p]:v[p]||0,[`${p}_q`]:v[`${p}_q`]||0}),{}):{})
+    })).sort((a,b)=>a.order-b.order);
+    const avgTotal = monthly.length ? monthly.reduce((s,m)=>s+m.total,0)/monthly.length : 0;
     const em={};
     const kf=activeTab==='sales'?'description':'supplier';
     filteredData.forEach(d=>{ const n=d[kf]; em[n]=em[n]||{total:0,quantity:0}; em[n].total+=d.total; em[n].quantity+=d.quantity; });
     const vk=(activeTab==='suppliers'||pieMetric==='total')?'total':'quantity';
     let pie=Object.entries(em).map(([name,v])=>({name,...v,value:v[vk]})).sort((a,b)=>b.value-a.value);
     if(!selectedProduct.length&&!selectedSupplier) pie=pie.slice(0,5);
-    return { monthly, pie };
-  }, [filteredData, activeTab, selectedProduct, selectedSupplier, pieMetric]);
+    return { monthly, pie, avgTotal };
+  }, [filteredData, activeTab, selectedProduct, selectedSupplier, pieMetric, costMap, currencyMap]);
+
+  // Main trend chart can show monthly or quarterly grouping (selected products
+  // breakdown only really makes sense monthly, so quarterly falls back to the
+  // simple total/quantity/margin view).
+  const chartDisplayData = useMemo(() => {
+    if (!chartData) return null;
+    if (chartGranularity==='month' || (activeTab==='sales'&&selectedProduct.length>0)) return chartData.monthly;
+    const qMap = {};
+    chartData.monthly.forEach(m => {
+      const parts = m.name.split('-');
+      if (parts.length<2) return;
+      const mNum = HebrewMonthsReverse[parts[0]];
+      const year = parseInt(parts[1]) + 2000;
+      if (!mNum || isNaN(year)) return;
+      const q = Math.ceil(mNum/3);
+      const key = year+'-Q'+q;
+      if (!qMap[key]) qMap[key] = { name:key, total:0, quantity:0, costKnownRev:0, costKnownCost:0, order:year*10+q };
+      qMap[key].total += m.total||0;
+      qMap[key].quantity += m.quantity||0;
+      qMap[key].costKnownRev += m.costKnownRev||0;
+      qMap[key].costKnownCost += m.costKnownCost||0;
+    });
+    return Object.values(qMap).sort((a,b)=>a.order-b.order).map(q=>({
+      ...q, marginPct: q.costKnownRev>0 ? ((q.costKnownRev-q.costKnownCost)/q.costKnownRev*100) : null,
+    }));
+  }, [chartData, chartGranularity, activeTab, selectedProduct]);
 
   const generateAI = async () => {
     setAiModalOpen(true); setAiLoading(true); setAiReport('');
@@ -3588,13 +3646,13 @@ const App = () => {
   }, [salesData, suppliersData, apiKey]);
 
 
-  // YoY comparison data
+  // YoY comparison data — works for both "מכירות" and "רכש וספקים"
   const yoyData = useMemo(() => {
-    if (!showYoY || activeTab !== 'sales') return null;
+    if (!showYoY || (activeTab !== 'sales' && activeTab !== 'suppliers')) return null;
     const startVal = dateFilter.start ? getDateVal(dateFilter.start) : 0;
     const endVal   = dateFilter.end   ? getDateVal(dateFilter.end)   : 999999;
     const inR = d => { const v = getDateVal(d.date); return v >= startVal && v <= endVal; };
-    const data = salesData.filter(inR);
+    const data = activeData.filter(inR);
     const yearMap = {};
     data.forEach(item => {
       if (!item.date) return;
@@ -3613,7 +3671,7 @@ const App = () => {
       [prevY]: yearMap[prevY]?.[m] || 0,
     })).filter(d => d[curY] > 0 || d[prevY] > 0);
     return { rows, curY, prevY };
-  }, [showYoY, activeTab, salesData, dateFilter]);
+  }, [showYoY, activeTab, activeData, dateFilter]);
 
   // Quarterly analysis
   const quarterlyData = useMemo(() => {
@@ -3647,6 +3705,187 @@ const App = () => {
     const growth = totals[prevY] > 0 ? ((totals[curY]-totals[prevY])/totals[prevY]*100) : 0;
     return { rows, curY, prevY, totals, growth };
   }, [activeTab, salesData, dateFilter]);
+
+  // ─── Aggregated "by product" view for the Sales tab ─────────────
+  // Same revenue-Pareto ABC + coefficient-of-variation XYZ methodology used in
+  // ProcurementPage, computed independently here over the currently filtered
+  // sales rows — so this works even without ever opening "תכנון רכש".
+  const productAggregates = useMemo(() => {
+    if (activeTab !== 'sales') return [];
+    const map = {};
+    filteredData.forEach(row => {
+      const key = row.sku||row.description; if (!key) return;
+      if (!map[key]) map[key] = { sku:row.sku||'', name:row.description||key, monthlyData:{}, totalQty:0, totalRev:0 };
+      map[key].totalQty += row.quantity||0;
+      map[key].totalRev += row.total||0;
+      if (row.date) map[key].monthlyData[row.date] = (map[key].monthlyData[row.date]||0)+(row.total||0);
+    });
+    const list = Object.values(map);
+    const totalRev = list.reduce((a,c)=>a+c.totalRev,0);
+    const sorted = [...list].sort((a,b)=>b.totalRev-a.totalRev);
+    let cumulative = 0;
+    sorted.forEach(p => {
+      const pct = totalRev>0 ? (p.totalRev/totalRev)*100 : 0;
+      cumulative += pct;
+      p.revPct = pct;
+      p.abc = cumulative<=80 ? 'A' : cumulative<=95 ? 'B' : 'C';
+      const vals = Object.values(p.monthlyData);
+      const months = Object.keys(p.monthlyData).sort((a,b)=>getDateVal(a)-getDateVal(b));
+      const mean = vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : 0;
+      const variance = vals.length>1 ? vals.reduce((s,v)=>s+Math.pow(v-mean,2),0)/vals.length : 0;
+      const cv = mean>0 ? Math.sqrt(variance)/mean : 0;
+      p.xyz = cv<=0.5 ? 'X' : cv<=1.0 ? 'Y' : 'Z';
+      const recent = months.slice(-3).reduce((s,m)=>s+p.monthlyData[m],0);
+      const prev   = months.slice(-6,-3).reduce((s,m)=>s+p.monthlyData[m],0);
+      p.trend = prev>0 ? ((recent-prev)/prev*100) : (recent>0 ? 100 : 0);
+      p.avgMonthly = months.length ? p.totalRev/months.length : 0;
+      // Margin — only when we have a cost AND it's in ILS (or currency unspecified).
+      // Mixing currencies into one ₪ margin would be silently wrong, so we
+      // flag it instead of guessing an exchange rate.
+      const unitCost = costMap[p.sku]??costMap[p.name]??null;
+      const currency = currencyMap[p.sku]??currencyMap[p.name]??null;
+      const costUsable = unitCost!=null && (!currency || currency==='ILS');
+      p.unitCost = costUsable ? unitCost : null;
+      p.costCurrencyBlocked = unitCost!=null && currency && currency!=='ILS' ? currency : null;
+      p.margin = costUsable ? p.totalRev - p.totalQty*unitCost : null;
+      p.marginPct = (costUsable && p.totalRev>0) ? (p.margin/p.totalRev*100) : null;
+    });
+    return sorted;
+  }, [activeTab, filteredData, costMap, currencyMap]);
+
+  const [salesViewMode, setSalesViewMode] = useState('transactions'); // 'transactions' | 'byProduct'
+  const [productAbcFilter, setProductAbcFilter] = useState('all'); // 'all'|'A'|'B'|'C'
+  const [productSortConfig, setProductSortConfig] = useState({ key:'totalRev', direction:'desc' });
+  const sortedProductAggregates = useMemo(() => {
+    const base = productAbcFilter==='all' ? productAggregates : productAggregates.filter(p=>p.abc===productAbcFilter);
+    return [...base].sort((a,b)=>{
+      const va=a[productSortConfig.key], vb=b[productSortConfig.key];
+      const aEmpty = va===null||va===undefined; const bEmpty = vb===null||vb===undefined;
+      if (aEmpty && bEmpty) return 0;
+      if (aEmpty) return 1;
+      if (bEmpty) return -1;
+      if (typeof va==='string'||typeof vb==='string') {
+        const cmp = String(va).localeCompare(String(vb),'he');
+        return productSortConfig.direction==='asc' ? cmp : -cmp;
+      }
+      return productSortConfig.direction==='asc' ? (va<vb?-1:va>vb?1:0) : (va>vb?-1:va<vb?1:0);
+    });
+  }, [productAggregates, productSortConfig, productAbcFilter]);
+  const [productPage, setProductPage] = useState(1);
+  useEffect(() => setProductPage(1), [productAggregates, productAbcFilter]);
+  const productTotalPages = Math.ceil(sortedProductAggregates.length / itemsPerPage) || 1;
+  const paginatedProducts = useMemo(() => sortedProductAggregates.slice((productPage-1)*itemsPerPage, productPage*itemsPerPage), [sortedProductAggregates, productPage]);
+  const requestProductSort = (key) => setProductSortConfig(p=>({ key, direction:p.key===key&&p.direction==='asc'?'desc':'asc' }));
+  // Trend chart popup for the "by product" sales view — built from full salesData
+  // (not the currently filtered rows), so the chart always shows up to 12 months
+  // of real history regardless of whatever date range is active in the table.
+  const [salesTrendHover, setSalesTrendHover] = useState(null); // {key, rect}
+  useEffect(() => {
+    if (!salesTrendHover) return;
+    const close = () => setSalesTrendHover(null);
+    document.addEventListener('click', close);
+    return () => document.removeEventListener('click', close);
+  }, [salesTrendHover]);
+  const getProductMonthlyRevenue = useCallback((p) => {
+    const rows = salesData.filter(d => (p.sku && d.sku===p.sku) || (!p.sku && d.description===p.name));
+    const byMonth = {};
+    rows.forEach(d => { if (!d.date) return; byMonth[d.date]=(byMonth[d.date]||0)+(d.total||0); });
+    const months = Object.keys(byMonth).sort((a,b)=>getDateVal(a)-getDateVal(b)).slice(-12);
+    return months.map(m=>({ month:m, total:byMonth[m] }));
+  }, [salesData]);
+  const SalesTrendButton = (p) => {
+    const trendCls = !p.trend?(isDarkMode?'text-slate-500':'text-slate-400'):p.trend>0?'text-emerald-500':'text-red-500';
+    const isOpen = salesTrendHover?.key===(p.sku||p.name);
+    return (
+      <span className="relative inline-block" style={{lineHeight:0}}>
+        <button
+          onClick={e=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();const k=p.sku||p.name;setSalesTrendHover(prev=>prev?.key===k?null:{key:k,rect:r});}}
+          className={`flex items-center gap-1 text-xs font-bold whitespace-nowrap rounded px-1 -mx-1 transition-opacity ${trendCls} ${isOpen?'opacity-100 underline':'hover:opacity-70'}`}
+          title="לחץ לגרף מגמה">
+          {p.trend>5?<ArrowUpRight className="w-3.5 h-3.5"/>:p.trend<-5?<ArrowDownRight className="w-3.5 h-3.5"/>:<Minus className="w-3.5 h-3.5"/>}
+          {p.trend?`${Math.abs(p.trend).toFixed(0)}%`:'—'}
+        </button>
+        {isOpen && (() => {
+          const series = getProductMonthlyRevenue(p);
+          const avg = series.length ? series.reduce((s,d)=>s+d.total,0)/series.length : 0;
+          return (
+          <div className={`rounded-2xl border shadow-2xl text-right ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}
+            onClick={e=>e.stopPropagation()}
+            style={{
+              position:'fixed', zIndex:9999, width: Math.min(440, window.innerWidth-16), padding:'16px', lineHeight:'normal',
+              ...(salesTrendHover?.rect ? {
+                ...(salesTrendHover.rect.top > 350
+                  ? { bottom: window.innerHeight - salesTrendHover.rect.top + 8 }
+                  : { top: salesTrendHover.rect.bottom + 8 }),
+                ...(()=>{
+                  const popupW = Math.min(440, window.innerWidth - 16);
+                  const wantedRight = window.innerWidth - salesTrendHover.rect.right + 8;
+                  const right = Math.max(8, Math.min(wantedRight, window.innerWidth - popupW - 8));
+                  return { right };
+                })(),
+              } : { top:100, right:8 })
+            }}>
+            <div className="flex items-center justify-between mb-2 gap-3">
+              <p className={`text-sm font-bold shrink-0 ${isDarkMode?'text-white':'text-slate-800'}`}>📈 גרף הכנסה — 12 חודשים</p>
+              <button onClick={e=>{e.stopPropagation();setSalesTrendHover(null);}}
+                className={`shrink-0 p-1 rounded-full transition-colors ${isDarkMode?'hover:bg-slate-700 text-slate-400 hover:text-white':'hover:bg-slate-100 text-slate-400 hover:text-slate-700'}`}>
+                <X className="w-4 h-4"/>
+              </button>
+            </div>
+            <p className={`text-xs truncate mb-3 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{p.name}</p>
+            {!series.length ? (
+              <p className={`text-xs py-8 text-center ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין מספיק נתונים להצגת גרף</p>
+            ) : (
+              <>
+                <div style={{width: Math.min(408, window.innerWidth-48), height:200}}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={series} margin={{top:5,right:5,bottom:0,left:-15}}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode?'#334155':'#e2e8f0'} vertical={false}/>
+                      <XAxis dataKey="month" tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false}/>
+                      <YAxis tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false} width={32} tickFormatter={v=>`${(v/1000).toFixed(0)}k`}/>
+                      <RechartsTooltip
+                        content={({active, payload, label}) => {
+                          if (!active || !payload?.length) return null;
+                          const row = payload[0]?.payload;
+                          if (!row) return null;
+                          const diff = avg>0 ? Math.round((row.total/avg - 1)*100) : null;
+                          return (
+                            <div style={{background:isDarkMode?'#1e293b':'#fff', border:`1px solid ${isDarkMode?'#334155':'#e2e8f0'}`, borderRadius:8, fontSize:12, padding:'8px 10px', direction:'rtl'}}>
+                              <p style={{color:isDarkMode?'#e2e8f0':'#1e293b', fontWeight:'bold', marginBottom:4}}>{label}</p>
+                              <p style={{color:isDarkMode?'#cbd5e1':'#334155'}}>{formatCurrency(row.total)}</p>
+                              {diff!=null && <p style={{color: diff>=0?'#10b981':'#ef4444', fontSize:11, marginTop:2}}>{diff>=0?'+':''}{diff}% מהממוצע ({formatShort(avg)})</p>}
+                            </div>
+                          );
+                        }}
+                      />
+                      <Bar dataKey="total" name="הכנסה" radius={[4,4,0,0]}>
+                        {series.map((d,i)=>(
+                          <Cell key={i} fill={d.total >= avg ? '#10b981' : (isDarkMode?'#475569':'#cbd5e1')}/>
+                        ))}
+                      </Bar>
+                      {avg>0 && <Line type="monotone" dataKey={()=>avg} stroke="#3b82f6" strokeWidth={1.5} strokeDasharray="4 3" dot={false} activeDot={false} name="ממוצע" isAnimationActive={false}/>}
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+                <div className={`flex items-center justify-between mt-2 text-[11px] ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+                  <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm" style={{background:'#10b981'}}/>מעל הממוצע</span>
+                  <span className="flex items-center gap-1"><span className="inline-block w-4 border-t border-dashed" style={{borderColor:'#3b82f6'}}/>ממוצע ({formatShort(avg)})</span>
+                </div>
+              </>
+            )}
+          </div>
+          );
+        })()}
+      </span>
+    );
+  };
+  const hasAnyMargin = productAggregates.some(p=>p.margin!=null);
+  const productAbcCounts = useMemo(() => ({
+    A: productAggregates.filter(p=>p.abc==='A').length,
+    B: productAggregates.filter(p=>p.abc==='B').length,
+    C: productAggregates.filter(p=>p.abc==='C').length,
+  }), [productAggregates]);
+  const hasBlockedCurrency = productAggregates.some(p=>p.costCurrencyBlocked);
 
   const requestSort = (key) => setSortConfig(p=>({ key, direction:p.key===key&&p.direction==='asc'?'desc':'asc' }));
 
@@ -3785,7 +4024,7 @@ const App = () => {
 
           {/* Procurement Planning */}
           {activeTab==='procurement' && (
-            <ProcurementPage salesData={salesData} isDarkMode={isDarkMode} apiKey={apiKey} />
+            <ProcurementPage salesData={salesData} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} />
           )}
 
           {/* Summary */}
@@ -3883,10 +4122,24 @@ const App = () => {
                   <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
                     {/* Trend Chart */}
                     <div className={`lg:col-span-2 p-6 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-                      <div className="flex justify-between items-center mb-5">
+                      <div className="flex justify-between items-center mb-5 flex-wrap gap-2">
                         <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Calendar className="w-5 h-5 text-blue-500"/>{activeTab==='sales'?'מגמות מכירות':'מגמות הוצאות'}</h3>
-                        <div className="flex items-center gap-2">
-                          {activeTab==='sales' && (
+                        <div className="flex items-center gap-2 flex-wrap">
+                          {!showYoY && !(activeTab==='sales'&&selectedProduct.length>0) && (
+                            <div className={`flex rounded-lg p-1 text-xs ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
+                              {[['month','חודשי'],['quarter','רבעוני']].map(([k,l])=>(
+                                <button key={k} onClick={()=>setChartGranularity(k)} className={`px-2.5 py-1 rounded-md transition-all ${chartGranularity===k?(isDarkMode?'bg-slate-600 text-white shadow':'bg-white shadow text-blue-700'):'text-slate-500'}`}>{l}</button>
+                              ))}
+                            </div>
+                          )}
+                          {activeTab==='sales' && hasAnyMargin && !showYoY && (
+                            <div className={`flex rounded-lg p-1 text-xs ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
+                              {[['quantity','כמות'],['margin','רווח %']].map(([k,l])=>(
+                                <button key={k} onClick={()=>setChartMetricRight(k)} className={`px-2.5 py-1 rounded-md transition-all ${chartMetricRight===k?(isDarkMode?'bg-slate-600 text-white shadow':'bg-white shadow text-blue-700'):'text-slate-500'}`}>{l}</button>
+                              ))}
+                            </div>
+                          )}
+                          {(activeTab==='sales'||activeTab==='suppliers') && (
                             <button onClick={()=>setShowYoY(p=>!p)} className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${showYoY?(isDarkMode?'bg-blue-500/20 border-blue-500/30 text-blue-300':'bg-blue-50 border-blue-200 text-blue-700'):(isDarkMode?'border-slate-700 text-slate-400 hover:text-white':'border-slate-200 text-slate-500 hover:text-slate-700')}`}>
                               <BarChart3 className="w-3.5 h-3.5"/> שנה/שנה
                             </button>
@@ -3906,12 +4159,12 @@ const App = () => {
                             {yoyData.prevY && <Bar dataKey={yoyData.prevY} name={`${yoyData.prevY}`} fill={isDarkMode?'#475569':'#cbd5e1'} radius={[4,4,0,0]} barSize={18}/>}
                           </ComposedChart>
                         ) : (
-                        <ComposedChart data={chartData.monthly} onClick={d=>{ if(d?.activeLabel) setDrillDownMonth(p=>p===d.activeLabel?null:d.activeLabel); }} style={{cursor:'pointer'}}>
+                        <ComposedChart data={chartDisplayData} onClick={d=>{ if(d?.activeLabel && chartGranularity==='month') setDrillDownMonth(p=>p===d.activeLabel?null:d.activeLabel); }} style={{cursor: chartGranularity==='month'?'pointer':'default'}}>
                           <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDarkMode?'#334155':'#f1f5f9'}/>
                           <XAxis dataKey="name" stroke={isDarkMode?'#94a3b8':'#94a3b8'} tick={{fontSize:11}} axisLine={false} tickLine={false} tickMargin={8}/>
                           <YAxis yAxisId="left" stroke={isDarkMode?'#94a3b8':'#94a3b8'} tick={{fontSize:11}} axisLine={false} tickLine={false} tickFormatter={v=>`₪${v/1000}k`}/>
-                          {activeTab==='sales' && <YAxis yAxisId="right" orientation="right" stroke="#10b981" tick={{fontSize:11}} axisLine={false} tickLine={false}/>}
-                          <RechartsTooltip cursor={{fill:isDarkMode?'#334155':'#f8fafc',opacity:0.5}} formatter={(v,n)=>n.includes('כמות')?v.toLocaleString():formatCurrency(v)} contentStyle={{backgroundColor:isDarkMode?'#1e293b':'#fff',borderColor:isDarkMode?'#334155':'#e2e8f0',borderRadius:'12px',color:isDarkMode?'#fff':'#0f172a'}}/>
+                          {activeTab==='sales' && <YAxis yAxisId="right" orientation="right" stroke={chartMetricRight==='margin'?'#a855f7':'#10b981'} tick={{fontSize:11}} axisLine={false} tickLine={false} tickFormatter={chartMetricRight==='margin'?(v=>`${v}%`):undefined}/>}
+                          <RechartsTooltip cursor={{fill:isDarkMode?'#334155':'#f8fafc',opacity:0.5}} formatter={(v,n)=>n.includes('כמות')?v.toLocaleString():n==='רווח %'?(v!=null?`${v.toFixed(1)}%`:'—'):n==='ממוצע'?formatCurrency(v):formatCurrency(v)} contentStyle={{backgroundColor:isDarkMode?'#1e293b':'#fff',borderColor:isDarkMode?'#334155':'#e2e8f0',borderRadius:'12px',color:isDarkMode?'#fff':'#0f172a'}}/>
                           <Legend iconType="circle" wrapperStyle={{paddingTop:'12px',fontSize:'12px'}}/>
                           {activeTab==='sales'&&selectedProduct.length>0 ? selectedProduct.map((p,i)=>(
                             <React.Fragment key={p}>
@@ -3921,7 +4174,9 @@ const App = () => {
                           )) : activeTab==='sales' ? (
                             <>
                               <Bar yAxisId="left" dataKey="total" name="סכום" fill="#3b82f6" radius={[4,4,0,0]} barSize={28}/>
-                              <Line yAxisId="right" type="monotone" dataKey="quantity" name="כמות" stroke="#10b981" strokeWidth={2.5} dot={false} activeDot={{r:5}}/>
+                              {chartMetricRight==='margin' && hasAnyMargin
+                                ? <Line yAxisId="right" type="monotone" dataKey="marginPct" name="רווח %" stroke="#a855f7" strokeWidth={2.5} dot={false} activeDot={{r:5}} connectNulls/>
+                                : <Line yAxisId="right" type="monotone" dataKey="quantity" name="כמות" stroke="#10b981" strokeWidth={2.5} dot={false} activeDot={{r:5}}/>}
                             </>
                           ) : (
                             <Bar yAxisId="left" dataKey="total" name="סכום" fill="#ef4444" radius={[4,4,0,0]} barSize={28}/>
@@ -3947,7 +4202,12 @@ const App = () => {
                         {chartData.pie.length>0 ? (
                           <ResponsiveContainer width="100%" height="100%">
                             <PieChart>
-                              <Pie data={chartData.pie} cx="50%" cy="45%" innerRadius={60} outerRadius={90} paddingAngle={3} dataKey="value" stroke="none">
+                              <Pie data={chartData.pie} cx="50%" cy="45%" innerRadius={60} outerRadius={90} paddingAngle={3} dataKey="value" stroke="none" style={{cursor:'pointer'}}
+                                onClick={(d)=>{
+                                  if (!d?.name) return;
+                                  if (activeTab==='sales') setSelectedProduct(prev => prev.length===1&&prev[0]===d.name ? [] : [d.name]);
+                                  else setSelectedSupplier(prev => prev===d.name ? '' : d.name);
+                                }}>
                                 {chartData.pie.map((_,i)=><Cell key={i} fill={COLORS[i%COLORS.length]}/>)}
                               </Pie>
                               <RechartsTooltip
@@ -3956,11 +4216,16 @@ const App = () => {
                                 itemStyle={{color:isDarkMode?'#94a3b8':'#64748b'}}
                                 labelStyle={{color:isDarkMode?'#f1f5f9':'#0f172a',fontWeight:500}}
                               />
-                              <Legend layout="horizontal" verticalAlign="bottom" align="center" wrapperStyle={{fontSize:'11px',paddingTop:'12px'}}/>
+                              <Legend layout="horizontal" verticalAlign="bottom" align="center" wrapperStyle={{fontSize:'11px',paddingTop:'12px',cursor:'pointer'}} onClick={(d)=>{
+                                if (!d?.value) return;
+                                if (activeTab==='sales') setSelectedProduct(prev => prev.length===1&&prev[0]===d.value ? [] : [d.value]);
+                                else setSelectedSupplier(prev => prev===d.value ? '' : d.value);
+                              }}/>
                             </PieChart>
                           </ResponsiveContainer>
                         ) : <div className="flex items-center justify-center h-full text-slate-400"><PieChartIcon className="w-10 h-10 opacity-20"/></div>}
                       </div>
+                      <p className={`text-[11px] text-center mt-2 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>לחיצה על פרוסה מסננת את הטבלה</p>
                     </div>
                   </div>
                 )}
@@ -4023,7 +4288,20 @@ const App = () => {
                   </div>
                 )}
 
-                {/* Table */}
+                {/* View toggle — only relevant for sales (margin/ABC needs cost data, suppliers tab has no margin concept) */}
+                {activeTab==='sales' && (
+                  <div className="flex items-center gap-2">
+                    <button onClick={()=>setSalesViewMode('transactions')} className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${salesViewMode==='transactions'?(isDarkMode?'bg-blue-500/20 border-blue-500/30 text-blue-300':'bg-blue-50 border-blue-200 text-blue-700'):(isDarkMode?'border-slate-700 text-slate-400 hover:text-white':'border-slate-200 text-slate-500 hover:text-slate-700')}`}>
+                      <FileText className="w-3.5 h-3.5"/> פירוט עסקאות
+                    </button>
+                    <button onClick={()=>setSalesViewMode('byProduct')} className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${salesViewMode==='byProduct'?(isDarkMode?'bg-blue-500/20 border-blue-500/30 text-blue-300':'bg-blue-50 border-blue-200 text-blue-700'):(isDarkMode?'border-slate-700 text-slate-400 hover:text-white':'border-slate-200 text-slate-500 hover:text-slate-700')}`}>
+                      <Box className="w-3.5 h-3.5"/> לפי מוצר
+                    </button>
+                  </div>
+                )}
+
+                {/* Table — raw transactions */}
+                {!(activeTab==='sales' && salesViewMode==='byProduct') && (
                 <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
                   <div className={`px-5 py-4 border-b flex flex-wrap justify-between items-center gap-3 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
                     <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><FileText className="w-4 h-4 text-slate-400"/> פירוט עסקאות <span className={`text-xs font-normal px-2 py-0.5 rounded-full ${isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500'}`}>{filteredData.length.toLocaleString()}</span></h3>
@@ -4084,6 +4362,90 @@ const App = () => {
                     </div>
                   </div>
                 </div>
+                )}
+
+                {/* Table — aggregated by product (ABC-XYZ, trend, margin) */}
+                {activeTab==='sales' && salesViewMode==='byProduct' && (
+                <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+                  <div className={`px-5 py-4 border-b flex flex-wrap justify-between items-center gap-3 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+                    <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Box className="w-4 h-4 text-slate-400"/> מוצרים <span className={`text-xs font-normal px-2 py-0.5 rounded-full ${isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500'}`}>{sortedProductAggregates.length.toLocaleString()}</span></h3>
+                    <div className="flex items-center gap-2 flex-wrap">
+                      <div className={`flex rounded-lg p-1 text-xs ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
+                        {[['all','הכל',null],['A','A',productAbcCounts.A],['B','B',productAbcCounts.B],['C','C',productAbcCounts.C]].map(([k,l,count])=>(
+                          <button key={k} onClick={()=>setProductAbcFilter(k)} className={`px-2.5 py-1 rounded-md transition-all ${productAbcFilter===k?(isDarkMode?'bg-slate-600 text-white shadow':'bg-white shadow text-blue-700'):'text-slate-500'}`}>{l}{count!=null?` (${count})`:''}</button>
+                        ))}
+                      </div>
+                      <div className="relative">
+                        <Search className={`absolute right-3 top-2.5 w-3.5 h-3.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}/>
+                        <input type="text" placeholder="חיפוש מוצר..." value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}
+                          className={`pl-4 pr-9 py-2 border rounded-xl text-xs w-40 focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'bg-slate-900 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
+                      </div>
+                    </div>
+                  </div>
+                  {hasBlockedCurrency && (
+                    <div className={`px-5 py-2 text-xs flex items-center gap-2 ${isDarkMode?'bg-amber-500/10 text-amber-400':'bg-amber-50 text-amber-700'}`}>
+                      <TriangleAlert className="w-3.5 h-3.5"/> חלק מהמוצרים מיובאים בעלות במטבע שאינו ₪ — הרווח לא חושב להם כדי לא לערבב מטבעות
+                    </div>
+                  )}
+                  {/* Legend — explains ABC/XYZ, margin, and the time scope behind the numbers */}
+                  <div className={`px-5 py-2.5 border-b flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] ${isDarkMode?'border-slate-700 text-slate-500':'border-slate-100 text-slate-400'}`}>
+                    <span><span className="font-bold text-amber-500">A</span>=80% מההכנסה · <span className="font-bold text-blue-500">B</span>=עד 95% · <span className="font-bold text-slate-400">C</span>=שאר 5%</span>
+                    <span>X/Y/Z = יציבות ביקוש (יציב→לא צפוי)</span>
+                    {hasAnyMargin && <span>רווח = הכנסה − (כמות × עלות) · תיאורטי, לא כולל הוצאות תפעול</span>}
+                    <span>כמות והכנסה: לפי טווח התאריכים שנבחר מעל הטבלה · גרף המגמה (בלחיצה על %) מציג תמיד 12 חודשים אחרונים בפועל</span>
+                  </div>
+                  <div className="overflow-x-auto max-h-[460px]">
+                    <table className={`w-full text-sm text-right ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                      <thead className={`text-[11px] font-semibold uppercase tracking-widest sticky top-0 z-10 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
+                        <tr>
+                          <th className="px-5 py-3.5 cursor-pointer select-none hover:text-blue-500" onClick={()=>requestProductSort('name')}>מוצר<SortIcon colKey="name" sortConfig={productSortConfig}/></th>
+                          <th className="px-5 py-3.5 cursor-pointer select-none hover:text-blue-500" onClick={()=>requestProductSort('abc')}>ABC<SortIcon colKey="abc" sortConfig={productSortConfig}/></th>
+                          <th className="px-5 py-3.5 cursor-pointer select-none hover:text-blue-500" onClick={()=>requestProductSort('totalQty')}>כמות<SortIcon colKey="totalQty" sortConfig={productSortConfig}/></th>
+                          <th className="px-5 py-3.5 cursor-pointer select-none hover:text-blue-500" onClick={()=>requestProductSort('totalRev')}>הכנסה<SortIcon colKey="totalRev" sortConfig={productSortConfig}/></th>
+                          <th className="px-5 py-3.5 cursor-pointer select-none hover:text-blue-500" onClick={()=>requestProductSort('trend')}>מגמה<SortIcon colKey="trend" sortConfig={productSortConfig}/></th>
+                          {hasAnyMargin && <th className="px-5 py-3.5 cursor-pointer select-none hover:text-blue-500" onClick={()=>requestProductSort('margin')}>רווח גולמי<SortIcon colKey="margin" sortConfig={productSortConfig}/></th>}
+                          {hasAnyMargin && <th className="px-5 py-3.5 cursor-pointer select-none hover:text-blue-500" onClick={()=>requestProductSort('marginPct')}>% רווח<SortIcon colKey="marginPct" sortConfig={productSortConfig}/></th>}
+                          <th className="px-5 py-3.5"></th>
+                        </tr>
+                      </thead>
+                      <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                        {paginatedProducts.length>0 ? paginatedProducts.map(p=>(
+                          <tr key={p.sku||p.name} className={`transition-colors ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50/80'}`}>
+                            <td className={`px-5 py-3.5 font-medium ${isDarkMode?'text-slate-100':'text-slate-800'}`}>
+                              {p.name}
+                              {p.sku && <span className={`ml-2 text-xs font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.sku}</span>}
+                            </td>
+                            <td className="px-5 py-3.5">
+                              <span className={`inline-flex items-center justify-center px-1.5 h-6 rounded-lg text-xs font-bold ${p.abc==='A'?(isDarkMode?'bg-amber-500/20 text-amber-400':'bg-amber-100 text-amber-700'):p.abc==='B'?(isDarkMode?'bg-blue-500/20 text-blue-400':'bg-blue-100 text-blue-700'):(isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500')}`} title={`${p.revPct.toFixed(1)}% מההכנסות · ${p.xyz==='X'?'ביקוש יציב':p.xyz==='Y'?'ביקוש משתנה':'ביקוש לא צפוי'} (CV)`}>{p.abc}{p.xyz}</span>
+                            </td>
+                            <td className="px-5 py-3.5">{p.totalQty.toLocaleString()}</td>
+                            <td className={`px-5 py-3.5 font-bold tabular-nums ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>{formatCurrency(p.totalRev)}</td>
+                            <td className="px-5 py-3.5">
+                              {SalesTrendButton(p)}
+                            </td>
+                            {hasAnyMargin && <td className={`px-5 py-3.5 font-bold tabular-nums ${p.margin==null?(isDarkMode?'text-slate-600':'text-slate-300'):p.margin>=0?(isDarkMode?'text-emerald-400':'text-emerald-600'):'text-red-500'}`}>{p.margin!=null?formatCurrency(p.margin):(p.costCurrencyBlocked?`⚠ ${p.costCurrencyBlocked}`:'—')}</td>}
+                            {hasAnyMargin && <td className={`px-5 py-3.5 text-xs font-medium ${p.marginPct==null?(isDarkMode?'text-slate-600':'text-slate-300'):p.marginPct>=0?'text-emerald-500':'text-red-500'}`}>{p.marginPct!=null?`${p.marginPct.toFixed(1)}%`:'—'}</td>}
+                            <td className="px-5 py-3.5">
+                              <button onClick={()=>jumpToProcurement(p.name)} title="עבור לתכנון רכש למוצר הזה — מלאי, כיסוי, תחזית ועונתיות"
+                                className={`flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-colors ${isDarkMode?'text-amber-400 hover:bg-amber-500/10':'text-amber-600 hover:bg-amber-50'}`}>
+                                <ShoppingCart className="w-3.5 h-3.5"/> רכש
+                              </button>
+                            </td>
+                          </tr>
+                        )) : <tr><td colSpan={hasAnyMargin?8:6} className={`px-5 py-16 text-center text-sm ${isDarkMode?'text-slate-600':'text-slate-400'}`}>לא נמצאו נתונים</td></tr>}
+                      </tbody>
+                    </table>
+                  </div>
+                  <div className={`px-5 py-3.5 border-t flex justify-between items-center text-xs ${isDarkMode?'bg-slate-900/30 border-slate-700 text-slate-500':'bg-slate-50 border-slate-100 text-slate-500'}`}>
+                    <span>מציג {sortedProductAggregates.length>0?(productPage-1)*itemsPerPage+1:0}–{Math.min(productPage*itemsPerPage,sortedProductAggregates.length)} מתוך {sortedProductAggregates.length.toLocaleString()}</span>
+                    <div className="flex items-center gap-2">
+                      <button onClick={()=>setProductPage(p=>Math.max(1,p-1))} disabled={productPage===1} className={`p-1.5 rounded-lg disabled:opacity-30 ${isDarkMode?'hover:bg-slate-700':'hover:bg-slate-200'}`}><ChevronRight className="w-3.5 h-3.5"/></button>
+                      <span className="font-mono px-2">{productPage}/{productTotalPages||1}</span>
+                      <button onClick={()=>setProductPage(p=>Math.min(productTotalPages,p+1))} disabled={productPage===productTotalPages||!productTotalPages} className={`p-1.5 rounded-lg disabled:opacity-30 ${isDarkMode?'hover:bg-slate-700':'hover:bg-slate-200'}`}><ChevronLeft className="w-3.5 h-3.5"/></button>
+                    </div>
+                  </div>
+                </div>
+                )}
               </div>
             )
           )}
