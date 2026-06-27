@@ -995,7 +995,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey }) => {
   };
 
   const generateProcurementInsight = async () => {
-    if (!apiKey) { setAiInsightText('⚠️ הוסף API Key של Gemini בתחילת הקובץ.'); setAiInsightOpen(true); return; }
+    if (!apiKey) { setAiInsightText('⚠️ הוסף API Key של Gemini ב-⚙️ הגדרות.'); setAiInsightOpen(true); return; }
     setAiInsightOpen(true); setAiInsightLoading(true); setAiInsightText('');
     try {
       const critical = products.filter(p=>p.risk==='critical'&&p.suggestedOrder>0).slice(0,8);
@@ -3495,14 +3495,14 @@ const App = () => {
           +'=================\n'
         : '';
       if (!apiKey) {
-        setChatMessages(p=>[...p,{role:'assistant',content:'⚠️ לא הוגדר API Key. הוסף את מפתח Gemini בשורה apiKey בתחילת הקובץ.'}]);
+        setChatMessages(p=>[...p,{role:'assistant',content:'⚠️ לא הוגדר API Key. פתח ⚙️ הגדרות והכנס מפתח Gemini.'}]);
         setChatThinking(false); return;
       }
       const prompt = dataCtx + 'שאלת המשתמש: ' + text + '\nענה בעברית בצורה ברורה וקצרה. אם הנתונים רלוונטיים לשאלה — השתמש בהם.';
       const reply = await callGemini(prompt, apiKey);
       setChatMessages(p=>[...p,{role:'assistant',content:reply}]);
     } catch(e) { setChatMessages(p=>[...p,{role:'assistant',content:'❌ '+e.message}]); } finally { setChatThinking(false); }
-  }, [salesData, suppliersData]);
+  }, [salesData, suppliersData, apiKey]);
 
 
   // YoY comparison data
