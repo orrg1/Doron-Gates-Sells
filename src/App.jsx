@@ -671,10 +671,11 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
                           return (
                           <tr>
                             <td colSpan={7} className={`px-4 py-3 ${isDarkMode?'bg-slate-900/40':'bg-slate-50'}`}>
-                              <div className="flex items-center justify-between mb-2">
+                              <div className="flex items-center justify-between mb-1">
                                 <p className={`text-xs font-bold ${isDarkMode?'text-slate-400':'text-slate-500'}`}>מוצרים שנרכשו — {c.name} ({myProducts.length} מוצרים שונים)</p>
                                 <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>סה"כ {formatCurrency(myTotal)}</p>
                               </div>
+                              <p className={`text-[10px] mb-2 ${isDarkMode?'text-slate-600':'text-slate-400'}`}>על כל התקופה בקובץ — לא ניתן לסינון לפי תאריך</p>
                               <div className="overflow-x-auto max-h-64">
                                 <table className="w-full text-xs text-right">
                                   <thead className={`${isDarkMode?'text-slate-500':'text-slate-400'}`}>
@@ -716,7 +717,11 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
 
       {productData.length>0 && (
         <div className={`p-6 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-          <h3 className={`font-bold flex items-center gap-2 mb-4 ${isDarkMode?'text-white':'text-slate-800'}`}><Box className="w-5 h-5 text-pink-500"/>מוצרים מובילים (כל הלקוחות)</h3>
+          <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
+            <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Box className="w-5 h-5 text-pink-500"/>מוצרים מובילים (כל הלקוחות)</h3>
+            <span className={`text-[11px] px-2 py-1 rounded-lg ${isDarkMode?'bg-amber-500/10 text-amber-400':'bg-amber-50 text-amber-700'}`}>על כל התקופה בקובץ — לא ניתן לסינון לפי תאריך</span>
+          </div>
+          <p className={`text-xs mb-4 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>קובץ "מכירות ללקוח לפי מוצר" לא כולל עמודת חודש — הסכומים כאן הם סכום מצטבר על כל מה שיובא, בלי קשר לבורר התאריכים שמעל.</p>
           <div className="space-y-1.5">
             {topProductsOverall.map((p,i) => (
               <div key={i} className={`flex items-center justify-between text-sm px-3 py-2 rounded-lg ${isDarkMode?'bg-slate-700/30':'bg-slate-50'}`}>
@@ -3737,8 +3742,52 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
   const [localKey, setLocalKey] = useState(apiKey);
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
+  const [importStatus, setImportStatus] = useState(null); // {type:'success'|'error', text}
 
   useEffect(() => { setLocalKey(apiKey); }, [apiKey, isOpen]);
+
+  // All localStorage keys this app writes to — kept as one explicit list so
+  // backup/restore is a single, predictable operation instead of needing to
+  // know which keys exist. (Deliberately excludes nothing — including the
+  // Gemini key, since the person who can already open Settings already has it.)
+  const BACKUP_KEYS = [
+    'dashboardSalesData','dashboardSuppliersData','salesFileNames','suppliersFileNames',
+    'procurementStock','procurementCost','procurementMinStock','procurementSupplier',
+    'procurementMOQ','procurementCurrency','procurementLeadTime','procurementColWidths',
+    'procurementImportedFiles','inventoryFileName','openOrders',
+    'customerMonthlyData','customerProductData','customerMonthlyFileName','customerProductFileName',
+    'savedViews','excludeCurrentMonth','theme','geminiApiKey',
+  ];
+
+  const handleExportAll = () => {
+    const data = {};
+    BACKUP_KEYS.forEach(k => { const v = localStorage.getItem(k); if (v!==null) data[k] = v; });
+    const payload = { app:'BizDataPro', version:1, exportedAt:new Date().toISOString(), data };
+    const blob = new Blob([JSON.stringify(payload)], {type:'application/json;charset=utf-8'});
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a'); a.style.display='none'; a.href=url;
+    a.setAttribute('download', 'BizDataPro_גיבוי_'+new Date().toLocaleDateString('he-IL').replace(/\//g,'-')+'.json');
+    document.body.appendChild(a); a.click();
+    setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 200);
+  };
+
+  const handleImportAll = (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const parsed = JSON.parse(ev.target.result);
+        if (!parsed?.data || typeof parsed.data !== 'object') throw new Error('invalid');
+        Object.entries(parsed.data).forEach(([k,v]) => { if (BACKUP_KEYS.includes(k)) localStorage.setItem(k, v); });
+        setImportStatus({ type:'success', text:'הנתונים יובאו! טוען מחדש...' });
+        setTimeout(() => window.location.reload(), 1200);
+      } catch {
+        setImportStatus({ type:'error', text:'קובץ לא תקין — זה לא קובץ גיבוי של BizData Pro' });
+      }
+    };
+    reader.readAsText(file);
+    e.target.value = '';
+  };
 
   const handleSave = () => {
     const trimmed = localKey.trim();
@@ -3815,6 +3864,35 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
               <p>3. מעתיקים והודבקים כאן</p>
               <p className="mt-1 opacity-70">Gemini API חינמי עד מגבלה נדיבה מאוד לשימוש אישי.</p>
             </div>
+          </div>
+
+          {/* Backup & Restore */}
+          <div className={`pt-5 border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+            <div className="flex items-center gap-2 mb-2">
+              <FileSpreadsheet className={`w-4 h-4 ${isDarkMode?'text-purple-400':'text-purple-600'}`}/>
+              <label className={`text-sm font-medium ${isDarkMode?'text-slate-200':'text-slate-700'}`}>גיבוי ושחזור נתונים</label>
+            </div>
+            <p className={`text-xs leading-relaxed mb-3 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+              שומר את כל הנתונים (מכירות, רכש, לקוחות, הגדרות) לקובץ אחד. שמור אותו בגוגל דרייב (או כל מקום אחר), וייבא אותו במחשב אחר כדי לקבל את כל המידע שלך בלי קשר ל-localStorage של אותו מחשב.
+            </p>
+            <div className="flex gap-2">
+              <button onClick={handleExportAll}
+                className={`flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium border transition-colors ${isDarkMode?'bg-purple-500/10 border-purple-500/30 text-purple-300 hover:bg-purple-500/20':'bg-purple-50 border-purple-200 text-purple-700 hover:bg-purple-100'}`}>
+                <Download className="w-4 h-4"/> ייצוא לקובץ
+              </button>
+              <label className={`flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium border cursor-pointer transition-colors ${isDarkMode?'bg-slate-700/50 border-slate-600 text-slate-300 hover:bg-slate-700':'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'}`}>
+                <Upload className="w-4 h-4"/> ייבוא מקובץ
+                <input type="file" accept=".json" onChange={handleImportAll} className="hidden"/>
+              </label>
+            </div>
+            {importStatus && (
+              <p className={`text-xs mt-2 font-medium ${importStatus.type==='success'?(isDarkMode?'text-emerald-400':'text-emerald-600'):(isDarkMode?'text-red-400':'text-red-600')}`}>
+                {importStatus.text}
+              </p>
+            )}
+            <p className={`text-[11px] mt-2 ${isDarkMode?'text-slate-600':'text-slate-400'}`}>
+              ⚠ ייבוא קובץ גיבוי מחליף את הנתונים הקיימים במחשב הזה.
+            </p>
           </div>
         </div>
 
