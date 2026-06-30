@@ -1300,10 +1300,11 @@ const parsePriorityOrders = (rows) => {
 
   const colPO    = findCol('הזמנה', 'מספר הזמנה', 'PO', 'po number');
   const colSKU   = findCol('מק"ט', "מק'ט", 'מקט', 'sku', 'item number');
-  const colName  = findCol('תאור מוצר', 'תיאור מוצר', 'שם מוצר');
+  const colName  = findCol('תאור מוצר', 'תיאור מוצר', 'תאור פריט', 'תיאור פריט', 'שם מוצר');
   const colQty   = findCol('יתרה לאספקה', 'יתרה');
   const colVal   = findCol('שווי יתרה', 'שווי');
-  const colDate  = findCol('ת. הזמנה', 'תאריך הזמנה', 'ת.הזמנה');
+  const colDate  = findCol('ת. הזמנה', 'תאריך הזמנה', 'ת.הזמנה', 'תאריך');
+  const colExpDate = findCol('ת. אספקה', 'תאריך אספקה', 'ת.אספקה', 'תאריך אספקה צפוי');
   const colSup   = findCol('שם ספק', 'ספק', 'שם יצרן');
 
   // Convert Excel serial date → dd/mm/yyyy
@@ -1335,7 +1336,7 @@ const parsePriorityOrders = (rows) => {
       supplier:    colSup  !== -1 ? vals[colSup]  : '',
       orderedQty:  qty,
       orderDate:   colDate !== -1 ? excelToDate(vals[colDate]) : '',
-      expectedDate:'',
+      expectedDate: colExpDate !== -1 ? excelToDate(vals[colExpDate]) : '',
       status:      'ordered',
       notes:       '',
       value:       isNaN(valRaw) ? 0 : valRaw,
@@ -1610,6 +1611,8 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
   const [openOrders, setOpenOrders] = useState(() => {
     try { return JSON.parse(localStorage.getItem('openOrders')||'[]'); } catch { return []; }
   });
+  const [ordersFileName, setOrdersFileName] = useState(() => localStorage.getItem('ordersFileName')||'');
+  const [ordersSortConfig, setOrdersSortConfig] = useState({ key:null, direction:'asc' });
   const [showAddOrder, setShowAddOrder] = useState(false);
   const [editOrderId, setEditOrderId] = useState(null);
   const [orderForm, setOrderForm] = useState({ productKey:'', productName:'', supplier:'', orderedQty:'', orderDate:'', expectedDate:'', status:'ordered', poNumber:'', notes:'' });
@@ -1626,16 +1629,24 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
   });
 
   // ── Import open orders from Priority Excel ──────────────────────
+  const [ordersUploadError, setOrdersUploadError] = useState(null);
   const handlePriorityOrdersUpload = async (e) => {
     const file = e.target.files?.[0]; if (!file) return;
     setOrdersLoading(true);
+    setOrdersUploadError(null);
     const process = (rows) => {
       const parsed = parsePriorityOrders(rows);
-      if (!parsed.length) { setOrdersLoading(false); return; }
+      if (!parsed.length) {
+        setOrdersUploadError('לא זוהו שורות בקובץ — ודא שזה קובץ "הזמנות רכש פתוחות" מ-Priority עם עמודות מק"ט/יתרה לאספקה.');
+        setOrdersLoading(false);
+        return;
+      }
       // Remove existing fromPriority orders and replace with new import
       const manual = openOrders.filter(o => !o.fromPriority);
       const merged = [...manual, ...parsed];
       saveOrders(merged);
+      setOrdersFileName(file.name);
+      localStorage.setItem('ordersFileName', file.name);
       setImportBanner({ count: parsed.length, skipped: rows.length - parsed.length });
       setTimeout(() => setImportBanner(null), 6000);
       setOrdersLoading(false);
@@ -1648,14 +1659,14 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
           const wb = window.XLSX.read(ev.target.result, { type: 'binary' });
           const rows = window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { defval: '' });
           process(rows);
-        } catch { setOrdersLoading(false); }
+        } catch { setOrdersUploadError('לא הצלחתי לקרוא את הקובץ — ודא שזה קובץ Excel (.xlsx/.xls) תקין.'); setOrdersLoading(false); }
       };
       r.readAsBinaryString(file);
     } else {
       const r = new FileReader();
       r.onload = ev => {
         const lines = ev.target.result.split('\n').filter(l => l.trim());
-        if (!lines.length) { setOrdersLoading(false); return; }
+        if (!lines.length) { setOrdersUploadError('הקובץ ריק.'); setOrdersLoading(false); return; }
         const headers = parseCSVLine(lines[0]).map(c => c.replace(/^"|"$/g,'').trim());
         const rows = lines.slice(1).map(line => {
           const vals = parseCSVLine(line).map(c => c.replace(/^"|"$/g,'').trim());
@@ -1667,6 +1678,27 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     }
     e.target.value = '';
   };
+
+  // Clears only the Priority-imported orders + filename, keeping manually
+  // added ones intact (mirrors the "fromPriority" split already used on import).
+  const clearPriorityOrders = () => {
+    const manual = openOrders.filter(o => !o.fromPriority);
+    saveOrders(manual);
+    setOrdersFileName('');
+    localStorage.removeItem('ordersFileName');
+  };
+
+  const sortedOpenOrders = useMemo(() => {
+    if (!ordersSortConfig.key) return openOrders;
+    return [...openOrders].sort((a,b) => {
+      const va = a[ordersSortConfig.key] ?? '', vb = b[ordersSortConfig.key] ?? '';
+      let cmp;
+      if (typeof va === 'number' || typeof vb === 'number') cmp = (va||0) - (vb||0);
+      else cmp = String(va).localeCompare(String(vb), 'he');
+      return ordersSortConfig.direction === 'asc' ? cmp : -cmp;
+    });
+  }, [openOrders, ordersSortConfig]);
+  const reqOrdersSort = (key) => setOrdersSortConfig(p => ({ key, direction: p.key===key && p.direction==='asc' ? 'desc' : 'asc' }));
 
   const saveStock = (key, val) => {
     const n = parseFloat(val);
@@ -1758,7 +1790,11 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     setInvLoading(true);
     const applyRows = (rows) => {
       const parsed = parseInventoryFile(rows);
-      if (!parsed.length) { setInvLoading(false); return; }
+      if (!parsed.length) {
+        setInvUploadError('לא זוהו שורות בקובץ — ודא שיש בו עמודות מק"ט/שם מוצר וכמות/עלות.');
+        setInvLoading(false);
+        return;
+      }
       const ns = {...stockMap}, nc = {...costMap}, nm = {...minStockMap}, nsup = {...supplierMap}, nmoq = {...moqMap}, ncur = {...currencyMap};
       parsed.forEach(item => {
         const k = item.sku||item.name;
@@ -1804,13 +1840,13 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     };
     if (file.name.match(/\.xlsx?$/) && window.XLSX) {
       const r = new FileReader();
-      r.onload = (ev) => { try { const wb=window.XLSX.read(ev.target.result,{type:'binary'}); applyRows(window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''})); } catch { setInvLoading(false); } };
+      r.onload = (ev) => { try { const wb=window.XLSX.read(ev.target.result,{type:'binary'}); applyRows(window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]],{defval:''})); } catch { setInvUploadError('לא הצלחתי לקרוא את הקובץ — ודא שזה קובץ Excel (.xlsx/.xls) תקין.'); setInvLoading(false); } };
       r.readAsBinaryString(file);
     } else {
       const r = new FileReader();
       r.onload = (ev) => {
         const lines = ev.target.result.split('\n').filter(l=>l.trim());
-        if (!lines.length) { setInvLoading(false); return; }
+        if (!lines.length) { setInvUploadError('הקובץ ריק.'); setInvLoading(false); return; }
         const headers = parseCSVLine(lines[0]).map(c=>c.replace(/^"|"$/g,'').trim());
         const rows = lines.slice(1).map(line => {
           const vals = parseCSVLine(line).map(c=>c.replace(/^"|"$/g,'').trim());
@@ -3153,18 +3189,42 @@ const renderProductRow = (p) => {
               </div>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              {/* Import from Priority */}
-              <label className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border cursor-pointer transition-colors ${isDarkMode?'border-emerald-700 bg-emerald-900/20 text-emerald-400 hover:bg-emerald-900/40':'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'}`}>
-                {ordersLoading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Upload className="w-4 h-4"/>}
-                ייבוא מ-Priority
-                <input type="file" accept=".xlsx,.xls,.csv" onChange={handlePriorityOrdersUpload} className="hidden" disabled={ordersLoading}/>
-              </label>
+              {/* Import from Priority — shows filename when present, with replace/remove */}
+              {ordersFileName ? (
+                <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border ${isDarkMode?'border-emerald-700 bg-emerald-900/20':'border-emerald-200 bg-emerald-50'}`}>
+                  <FileSpreadsheet className="w-4 h-4 text-emerald-500 shrink-0"/>
+                  <div className="min-w-0">
+                    <p className={`text-xs font-medium truncate max-w-[200px] ${isDarkMode?'text-emerald-300':'text-emerald-700'}`}>{ordersFileName}</p>
+                    <p className={`text-[10px] ${isDarkMode?'text-emerald-500/70':'text-emerald-600/70'}`}>{openOrders.filter(o=>o.fromPriority).length} הזמנות מ-Priority</p>
+                  </div>
+                  <label className={`p-1.5 rounded-lg cursor-pointer transition-colors shrink-0 ${isDarkMode?'text-slate-400 hover:bg-slate-700':'text-slate-500 hover:bg-slate-100'}`} title="החלף קובץ">
+                    {ordersLoading?<Loader2 className="w-4 h-4 animate-spin"/>:<RefreshCw className="w-4 h-4"/>}
+                    <input type="file" accept=".xlsx,.xls,.csv" onChange={handlePriorityOrdersUpload} className="hidden" disabled={ordersLoading}/>
+                  </label>
+                  <button onClick={clearPriorityOrders} title="הסר הזמנות שיובאו מ-Priority (הזמנות שהוספו ידנית יישארו)" className={`p-1.5 rounded-lg shrink-0 ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-500 hover:bg-red-50'}`}><Trash2 className="w-4 h-4"/></button>
+                </div>
+              ) : (
+                <label className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border cursor-pointer transition-colors ${isDarkMode?'border-emerald-700 bg-emerald-900/20 text-emerald-400 hover:bg-emerald-900/40':'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'}`}>
+                  {ordersLoading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Upload className="w-4 h-4"/>}
+                  ייבוא מ-Priority
+                  <input type="file" accept=".xlsx,.xls,.csv" onChange={handlePriorityOrdersUpload} className="hidden" disabled={ordersLoading}/>
+                </label>
+              )}
               <button onClick={()=>{setShowAddOrder(true);setEditOrderId(null);setOrderForm({productKey:'',productName:'',supplier:'',orderedQty:'',orderDate:new Date().toISOString().slice(0,10),expectedDate:'',status:'ordered',poNumber:'',notes:''}); }}
                 className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-medium transition-colors shadow-lg shadow-blue-500/20">
                 <Check className="w-4 h-4"/> + הוסף ידנית
               </button>
             </div>
           </div>
+
+          {/* Upload error */}
+          {ordersUploadError && (
+            <div className={`flex items-start gap-2 px-4 py-3 rounded-xl text-xs font-medium ${isDarkMode?'bg-red-500/10 text-red-300 border border-red-500/20':'bg-red-50 text-red-700 border border-red-200'}`}>
+              <TriangleAlert className="w-4 h-4 shrink-0 mt-0.5"/>
+              <span className="flex-1">{ordersUploadError}</span>
+              <button onClick={()=>setOrdersUploadError(null)} className="shrink-0 opacity-60 hover:opacity-100"><X className="w-3.5 h-3.5"/></button>
+            </div>
+          )}
 
           {/* Priority import banner */}
           {importBanner && (
@@ -3270,22 +3330,23 @@ const renderProductRow = (p) => {
                 </div>
               </div>
               <div className="overflow-x-auto">
-                <table className={`w-full text-sm text-right min-w-[700px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                <table className={`w-full text-sm text-right min-w-[780px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
                   <thead className={`text-[11px] font-semibold uppercase tracking-widest ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
                     <tr>
-                      <th className="px-4 py-3 min-w-[160px]">מוצר</th>
+                      <th className="px-4 py-3 min-w-[160px] cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('productName')}>מוצר ↕</th>
                       <th className="px-4 py-3">מק"ט</th>
+                      <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('supplier')}>ספק ↕</th>
                       <th className="px-4 py-3">PO</th>
-                      <th className="px-4 py-3">יתרה לאספקה</th>
-                      <th className="px-4 py-3">שווי ₪</th>
-                      <th className="px-4 py-3">הוזמן</th>
-                      <th className="px-4 py-3">אספקה צפויה</th>
+                      <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('orderedQty')}>יתרה לאספקה ↕</th>
+                      <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('value')}>שווי ₪ ↕</th>
+                      <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('orderDate')}>הוזמן ↕</th>
+                      <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('expectedDate')}>אספקה צפויה ↕</th>
                       <th className="px-4 py-3">סטטוס</th>
                       <th className="px-4 py-3">פעולות</th>
                     </tr>
                   </thead>
                   <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-                    {openOrders.map(order => {
+                    {sortedOpenOrders.map(order => {
                       const statusStyle = {
                         ordered:    isDarkMode?'bg-blue-500/20 text-blue-300 border-blue-500/30':'bg-blue-50 text-blue-700 border-blue-200',
                         in_transit: isDarkMode?'bg-emerald-500/20 text-emerald-300 border-emerald-500/30':'bg-emerald-50 text-emerald-700 border-emerald-200',
@@ -3300,6 +3361,7 @@ const renderProductRow = (p) => {
                             {order.notes && <p className={`text-xs mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{order.notes}</p>}
                           </td>
                           <td className={`px-4 py-3.5 text-xs font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{order.productKey!==order.productName?order.productKey:'—'}</td>
+                          <td className={`px-4 py-3.5 text-sm ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{order.supplier||'—'}</td>
                           <td className={`px-4 py-3.5 text-xs font-mono font-bold ${isDarkMode?'text-blue-400':'text-blue-700'}`}>{order.poNumber||'—'}</td>
                           <td className="px-4 py-3.5">
                             <span className={`font-bold text-sm tabular-nums ${isDarkMode?'text-blue-300':'text-blue-700'}`}>{order.orderedQty.toLocaleString()}</span>
@@ -3869,7 +3931,7 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
     'salesFileNames','suppliersFileNames',
     'procurementStock','procurementCost','procurementMinStock','procurementSupplier',
     'procurementMOQ','procurementCurrency','procurementLeadTime','procurementColWidths',
-    'procurementInvSlots','procurementImportedFiles','inventoryFileName','openOrders',
+    'procurementInvSlots','procurementImportedFiles','inventoryFileName','openOrders','ordersFileName',
     'customerMonthlyFileName','customerProductFileName',
     'savedViews','excludeCurrentMonth','theme','geminiApiKey',
   ];
@@ -3885,7 +3947,7 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
     procurementSupplier:'ספק לכל מוצר (רכש)', procurementMOQ:'MOQ (רכש)', procurementCurrency:'מטבע (רכש)',
     procurementLeadTime:'זמן אספקה (רכש)', procurementColWidths:'רוחב עמודות (רכש)',
     procurementInvSlots:'קבצי מלאי שיובאו (רכש)', procurementImportedFiles:'(ישן — לא בשימוש)',
-    inventoryFileName:'שם קובץ מלאי', openOrders:'הזמנות פתוחות',
+    inventoryFileName:'שם קובץ מלאי', openOrders:'הזמנות פתוחות', ordersFileName:'שם קובץ הזמנות פתוחות',
     customerMonthlyData:'מכירות ללקוח בחתך חודשי', customerProductData:'מכירות ללקוח לפי מוצר',
     customerMonthlyFileName:'שם קובץ לקוחות חודשי', customerProductFileName:'שם קובץ לקוחות-מוצר',
     savedViews:'תצוגות שמורות', excludeCurrentMonth:'הגדרת חודש נוכחי', theme:'ערכת נושא', geminiApiKey:'מפתח Gemini',
@@ -4490,22 +4552,28 @@ const App = () => {
     try {
       const rows = await readXlsxRows(file);
       const parsed = parseCustomerMonthlyFile(rows);
-      setCustomerMonthlyData(parsed);
-      setCustomerMonthlyFileName(file.name);
-      // Persisting can fail independently of parsing (most often the storage
-      // quota being full) — that must NOT be silently swallowed, or the data
-      // looks fine on screen right now but is actually gone on next
-      // refresh/export, with no warning at all. This now goes to IndexedDB
-      // (much larger quota than localStorage) rather than localStorage.
-      try {
-        await idbSet('customerMonthlyData', parsed);
-        localStorage.setItem('customerMonthlyFileName', file.name);
-        setCustomerUploadSuccess('monthly');
-        setTimeout(() => setCustomerUploadSuccess(s => s==='monthly' ? null : s), 4000);
-      } catch {
-        setCustomerUploadError({ slot:'monthly', text:'הקובץ נטען למסך אבל לא נשמר בדפדפן — נסה שוב או נקה מקום בדיסק.' });
+      if (!parsed.length) {
+        setCustomerUploadError({ slot:'monthly', text:'לא זוהו שורות בקובץ — ודא שזה הקובץ "מכירות ללקוח בחתך חודשי" ושיש בו עמודות שם לקוח, חודש והכנסה.' });
+      } else {
+        setCustomerMonthlyData(parsed);
+        setCustomerMonthlyFileName(file.name);
+        // Persisting can fail independently of parsing (most often the storage
+        // quota being full) — that must NOT be silently swallowed, or the data
+        // looks fine on screen right now but is actually gone on next
+        // refresh/export, with no warning at all. This now goes to IndexedDB
+        // (much larger quota than localStorage) rather than localStorage.
+        try {
+          await idbSet('customerMonthlyData', parsed);
+          localStorage.setItem('customerMonthlyFileName', file.name);
+          setCustomerUploadSuccess('monthly');
+          setTimeout(() => setCustomerUploadSuccess(s => s==='monthly' ? null : s), 4000);
+        } catch {
+          setCustomerUploadError({ slot:'monthly', text:'הקובץ נטען למסך אבל לא נשמר בדפדפן — נסה שוב או נקה מקום בדיסק.' });
+        }
       }
-    } catch {}
+    } catch {
+      setCustomerUploadError({ slot:'monthly', text:'לא הצלחתי לקרוא את הקובץ — ודא שזה קובץ Excel (.xlsx/.xls) תקין.' });
+    }
     setCustomerUploadLoading(p=>({...p, monthly:false}));
     e.target.value = '';
   };
@@ -4516,17 +4584,23 @@ const App = () => {
     try {
       const rows = await readXlsxRows(file);
       const parsed = parseCustomerProductFile(rows);
-      setCustomerProductData(parsed);
-      setCustomerProductFileName(file.name);
-      try {
-        await idbSet('customerProductData', parsed);
-        localStorage.setItem('customerProductFileName', file.name);
-        setCustomerUploadSuccess('product');
-        setTimeout(() => setCustomerUploadSuccess(s => s==='product' ? null : s), 4000);
-      } catch {
-        setCustomerUploadError({ slot:'product', text:'הקובץ נטען למסך אבל לא נשמר בדפדפן — נסה שוב או נקה מקום בדיסק.' });
+      if (!parsed.length) {
+        setCustomerUploadError({ slot:'product', text:'לא זוהו שורות בקובץ — ודא שזה הקובץ "מכירות ללקוח לפי מוצר" ושיש בו עמודות שם לקוח, מוצר וכמות/הכנסה.' });
+      } else {
+        setCustomerProductData(parsed);
+        setCustomerProductFileName(file.name);
+        try {
+          await idbSet('customerProductData', parsed);
+          localStorage.setItem('customerProductFileName', file.name);
+          setCustomerUploadSuccess('product');
+          setTimeout(() => setCustomerUploadSuccess(s => s==='product' ? null : s), 4000);
+        } catch {
+          setCustomerUploadError({ slot:'product', text:'הקובץ נטען למסך אבל לא נשמר בדפדפן — נסה שוב או נקה מקום בדיסק.' });
+        }
       }
-    } catch {}
+    } catch {
+      setCustomerUploadError({ slot:'product', text:'לא הצלחתי לקרוא את הקובץ — ודא שזה קובץ Excel (.xlsx/.xls) תקין.' });
+    }
     setCustomerUploadLoading(p=>({...p, product:false}));
     e.target.value = '';
   };
