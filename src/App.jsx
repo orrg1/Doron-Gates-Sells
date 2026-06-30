@@ -1520,17 +1520,15 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
   const [exporting, setExporting] = useState(false);
   const [invFileName, setInvFileName] = useState(() => localStorage.getItem('inventoryFileName')||'');
   const [importStats, setImportStats] = useState(null);
-  // History of every file imported into "מלאי נוכחי" — kept as a list so uploading
-  // a second file (e.g. כרטיס פריט after יתרות מלאי) doesn't make the first one
-  // disappear from view, even though their data was already merged together.
-  const [importedFiles, setImportedFiles] = useState(() => {
-    try {
-      const list = JSON.parse(localStorage.getItem('procurementImportedFiles')||'[]');
-      if (list.length) return list;
-    } catch {}
-    // Migrate legacy single-filename storage from before this list existed
-    const legacyName = localStorage.getItem('inventoryFileName');
-    return legacyName ? [{ name: legacyName, total:null, withQty:null, withCost:null, withMinStock:null }] : [];
+  // Two independent, optional upload slots — mirrors the "לקוחות" tab UX: each
+  // slot shows its own filename/stats when filled, or an upload prompt when
+  // empty, so it's obvious at a glance which of the two expected files is
+  // still missing. Both slots feed into the SAME shared maps (stockMap, costMap,
+  // etc.) since both file types carry the same per-item columns — the split is
+  // purely about which file the person needs to go find, not about the data model.
+  const [invSlots, setInvSlots] = useState(() => {
+    try { return JSON.parse(localStorage.getItem('procurementInvSlots')||'null') || { product:null, masterCard:null }; }
+    catch { return { product:null, masterCard:null }; }
   });
   const [showBanner, setShowBanner] = useState(false);
   const [importBanner, setImportBanner] = useState(null); // {count, skipped}
@@ -1686,7 +1684,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     return map;
   }, [openOrders]);
 
-  const handleInvUpload = async (e) => {
+  const handleInvUpload = async (e, slotKey) => {
     const file = e.target.files?.[0]; if (!file) return;
     setInvLoading(true);
     const applyRows = (rows) => {
@@ -1716,9 +1714,9 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
       const withMinStock = parsed.filter(p=>p.minStock!==null).length;
       const withSupplier = parsed.filter(p=>p.supplier).length;
       setImportStats({ total: parsed.length, withQty, withCost, withMinStock });
-      setImportedFiles(prev => {
-        const next = [...prev, { name: file.name, total: parsed.length, withQty, withCost, withMinStock, withSupplier, importedAt: Date.now() }];
-        localStorage.setItem('procurementImportedFiles', JSON.stringify(next));
+      setInvSlots(prev => {
+        const next = { ...prev, [slotKey]: { name: file.name, total: parsed.length, withQty, withCost, withMinStock, withSupplier, importedAt: Date.now() } };
+        localStorage.setItem('procurementInvSlots', JSON.stringify(next));
         return next;
       });
       setShowBanner(true);
@@ -1746,14 +1744,27 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     e.target.value='';
   };
 
+  // Clears just this slot's displayed filename/stats — NOT the merged inventory
+  // data itself (stockMap/costMap/etc), since both files write into the same
+  // shared maps and there's no reliable way to "un-merge" one file's contribution.
+  // Use "נקה את כל נתוני המלאי" below for a true full reset.
+  const clearInvSlot = (slotKey) => {
+    setInvSlots(prev => {
+      const next = { ...prev, [slotKey]: null };
+      localStorage.setItem('procurementInvSlots', JSON.stringify(next));
+      return next;
+    });
+  };
+
   const clearInventory = () => {
     setStockMap({}); setCostMap({}); setMinStockMap({}); setSupplierMap({}); setMoqMap({}); setCurrencyMap({});
-    setInvFileName(''); setImportStats(null); setImportedFiles([]);
+    setInvFileName(''); setImportStats(null); setInvSlots({ product:null, masterCard:null });
     localStorage.removeItem('procurementStock'); localStorage.removeItem('procurementCost');
     localStorage.removeItem('procurementMinStock'); localStorage.removeItem('procurementSupplier');
     localStorage.removeItem('procurementMOQ');
     localStorage.removeItem('procurementCurrency');
     localStorage.removeItem('inventoryFileName');
+    localStorage.removeItem('procurementInvSlots');
     localStorage.removeItem('procurementImportedFiles');
   };
 
@@ -2635,55 +2646,60 @@ const renderProductRow = (p) => {
 
       {/* Top row: upload + config */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Inventory upload */}
+        {/* Inventory upload — two independent, optional slots */}
         <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-          <h3 className={`font-bold text-sm mb-1 flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Package className="w-4 h-4 text-amber-500"/> מלאי נוכחי</h3>
-          <p className={`text-xs mb-3 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
-            שמות הקבצים הנדרשים: <span className="font-bold">מלאי נוכחי לפי מוצר</span> ו/או <span className="font-bold">כרטיס פריט</span>
-          </p>
-          {importedFiles.length > 0 ? (
-            <div className="space-y-3">
-              <div className="space-y-2">
-                {importedFiles.map((f, i) => (
-                  <div key={i} className={`flex items-center gap-3 p-3 rounded-xl ${isDarkMode?'bg-slate-700/50':'bg-slate-50'}`}>
-                    <FileSpreadsheet className="w-5 h-5 text-emerald-500 shrink-0"/>
-                    <div className="flex-1 min-w-0">
-                      <p className={`text-sm font-medium truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{f.name}</p>
-                      {f.total!=null ? (
-                        <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
-                          {f.total} פריטים
-                          {f.withQty>0 && ` · ${f.withQty} עם כמות`}
-                          {f.withCost>0 && ` · ${f.withCost} עם עלות`}
-                          {f.withSupplier>0 && ` · ${f.withSupplier} עם ספק`}
-                        </p>
-                      ) : <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>יובא בעבר</p>}
+          <h3 className={`font-bold text-sm mb-3 flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Package className="w-4 h-4 text-amber-500"/> מלאי נוכחי</h3>
+          <div className="space-y-3">
+            {[
+              { key:'product', label:'מלאי נוכחי לפי מוצר', sub:'יתרות, מק"ט, כמות' },
+              { key:'masterCard', label:'כרטיס פריט', sub:'ספק, עלות, מטבע, MOQ, זמן אספקה' },
+            ].map(slot => {
+              const f = invSlots[slot.key];
+              return (
+                <div key={slot.key}>
+                  <p className={`text-xs font-medium mb-1.5 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{slot.label} <span className={isDarkMode?'text-slate-600':'text-slate-300'}>· {slot.sub}</span></p>
+                  {f ? (
+                    <div className="flex items-center gap-2">
+                      <div className={`flex-1 flex items-center gap-2 px-3 py-2.5 rounded-xl ${isDarkMode?'bg-slate-700/50':'bg-slate-50'}`}>
+                        <FileSpreadsheet className="w-4 h-4 text-emerald-500 shrink-0"/>
+                        <div className="flex-1 min-w-0">
+                          <p className={`text-sm font-medium truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{f.name}</p>
+                          <p className={`text-[11px] ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+                            {f.total} פריטים
+                            {f.withQty>0 && ` · ${f.withQty} כמות`}
+                            {f.withCost>0 && ` · ${f.withCost} עלות`}
+                            {f.withSupplier>0 && ` · ${f.withSupplier} ספק`}
+                          </p>
+                        </div>
+                      </div>
+                      <label className={`p-2.5 rounded-lg cursor-pointer transition-colors ${isDarkMode?'text-slate-400 hover:bg-slate-700':'text-slate-500 hover:bg-slate-100'}`} title="החלף קובץ">
+                        {invLoading?<Loader2 className="w-4 h-4 animate-spin"/>:<RefreshCw className="w-4 h-4"/>}
+                        <input type="file" accept=".csv,.xlsx,.xls" onChange={e=>handleInvUpload(e, slot.key)} className="hidden" disabled={invLoading}/>
+                      </label>
+                      <button onClick={()=>clearInvSlot(slot.key)} title="הסר תווית קובץ זה (לא מוחק את הנתונים שכבר מוזגו)" className={`p-2.5 rounded-lg ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-500 hover:bg-red-50'}`}><Trash2 className="w-4 h-4"/></button>
                     </div>
-                  </div>
-                ))}
-              </div>
-              <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>סה"כ {stockedCount} מוצרים עם מלאי מכל הקבצים שיובאו</p>
-              <label className={`flex items-center justify-center gap-2 py-2.5 rounded-xl border-dashed border-2 cursor-pointer text-xs font-medium transition-colors ${isDarkMode?'border-slate-600 text-slate-400 hover:border-blue-500 hover:text-blue-400':'border-slate-200 text-slate-500 hover:border-blue-400 hover:text-blue-600'}`}>
-                {invLoading?<Loader2 className="w-4 h-4 animate-spin"/>:<Upload className="w-4 h-4"/>} העלה קובץ נוסף (מתמזג עם הקיים)
-                <input type="file" accept=".csv,.xlsx,.xls" onChange={handleInvUpload} className="hidden" disabled={invLoading}/>
-              </label>
-              <button onClick={clearInventory} className={`w-full text-xs flex items-center justify-center gap-1.5 py-2 rounded-lg ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-500 hover:bg-red-50'}`}>
+                  ) : (
+                    <label className={`flex items-center gap-3 px-3 py-3 rounded-xl border-2 border-dashed cursor-pointer transition-all group ${isDarkMode?'border-slate-600 hover:border-amber-500/50 hover:bg-amber-500/5':'border-slate-200 hover:border-amber-400 hover:bg-amber-50'}`}>
+                      {invLoading ? <Loader2 className="w-5 h-5 animate-spin text-amber-500 shrink-0"/> : (
+                        <div className={`p-2 rounded-lg shrink-0 ${isDarkMode?'bg-slate-700 group-hover:bg-amber-500/20':'bg-slate-100 group-hover:bg-amber-100'}`}><Upload className={`w-4 h-4 ${isDarkMode?'text-slate-400 group-hover:text-amber-400':'text-slate-400 group-hover:text-amber-600'}`}/></div>
+                      )}
+                      <span className={`text-xs font-medium ${isDarkMode?'text-slate-400 group-hover:text-amber-300':'text-slate-500 group-hover:text-amber-700'}`}>חסר — לחץ להעלאה</span>
+                      <input type="file" accept=".csv,.xlsx,.xls" onChange={e=>handleInvUpload(e, slot.key)} className="hidden" disabled={invLoading}/>
+                    </label>
+                  )}
+                </div>
+              );
+            })}
+          </div>
+          {(invSlots.product || invSlots.masterCard) && (
+            <>
+              <p className={`text-xs mt-3 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>סה"כ {stockedCount} מוצרים עם מלאי מכל הקבצים שיובאו</p>
+              <button onClick={clearInventory} className={`w-full mt-2 text-xs flex items-center justify-center gap-1.5 py-2 rounded-lg ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-500 hover:bg-red-50'}`}>
                 <Trash2 className="w-3.5 h-3.5"/> נקה את כל נתוני המלאי שיובאו
               </button>
-            </div>
-          ) : (
-            <label className={`flex flex-col items-center justify-center gap-3 p-6 rounded-xl border-2 border-dashed cursor-pointer transition-all group ${isDarkMode?'border-slate-600 hover:border-amber-500/50 hover:bg-amber-500/5':'border-slate-200 hover:border-amber-400 hover:bg-amber-50'}`}>
-              {invLoading ? <Loader2 className="w-8 h-8 animate-spin text-amber-500"/> : (
-                <div className={`p-3 rounded-xl ${isDarkMode?'bg-slate-700 group-hover:bg-amber-500/20':'bg-slate-100 group-hover:bg-amber-100'}`}><Upload className={`w-6 h-6 ${isDarkMode?'text-slate-400 group-hover:text-amber-400':'text-slate-400 group-hover:text-amber-600'}`}/></div>
-              )}
-              <div className="text-center">
-                <p className={`font-medium text-sm ${isDarkMode?'text-slate-300':'text-slate-700'}`}>העלה קובץ מלאי</p>
-                <p className={`text-xs mt-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>Excel / CSV · זיהוי אוטומטי של עמודות</p>
-                <p className={`text-xs mt-0.5 ${isDarkMode?'text-slate-600':'text-slate-300'}`}>מק"ט / שם מוצר / כמות / מחיר עלות</p>
-              </div>
-              <input type="file" accept=".csv,.xlsx,.xls" onChange={handleInvUpload} className="hidden" disabled={invLoading}/>
-            </label>
+            </>
           )}
-          {!importedFiles.length && <p className={`text-xs mt-2 text-center ${isDarkMode?'text-slate-600':'text-slate-400'}`}>אפשר גם להזין ידנית — לחץ על שדה בטבלה</p>}
+          {!invSlots.product && !invSlots.masterCard && <p className={`text-xs mt-3 text-center ${isDarkMode?'text-slate-600':'text-slate-400'}`}>אפשר גם להזין ידנית — לחץ על שדה בטבלה</p>}
         </div>
 
         {/* Planning config */}
@@ -3765,7 +3781,7 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
     'dashboardSalesData','dashboardSuppliersData','salesFileNames','suppliersFileNames',
     'procurementStock','procurementCost','procurementMinStock','procurementSupplier',
     'procurementMOQ','procurementCurrency','procurementLeadTime','procurementColWidths',
-    'procurementImportedFiles','inventoryFileName','openOrders',
+    'procurementInvSlots','procurementImportedFiles','inventoryFileName','openOrders',
     'customerMonthlyData','customerProductData','customerMonthlyFileName','customerProductFileName',
     'savedViews','excludeCurrentMonth','theme','geminiApiKey',
   ];
@@ -3786,14 +3802,29 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
     const file = e.target.files[0]; if (!file) return;
     const reader = new FileReader();
     reader.onload = (ev) => {
+      let parsed;
       try {
-        const parsed = JSON.parse(ev.target.result);
+        parsed = JSON.parse(ev.target.result);
         if (!parsed?.data || typeof parsed.data !== 'object') throw new Error('invalid');
-        Object.entries(parsed.data).forEach(([k,v]) => { if (BACKUP_KEYS.includes(k)) localStorage.setItem(k, v); });
-        setImportStatus({ type:'success', text:'הנתונים יובאו! טוען מחדש...' });
-        setTimeout(() => window.location.reload(), 1200);
       } catch {
         setImportStatus({ type:'error', text:'קובץ לא תקין — זה לא קובץ גיבוי של BizData Pro' });
+        return;
+      }
+      // Each key is written independently — a failure on one (e.g. browser storage
+      // quota exceeded on a large dataset) must not silently abort the rest, and
+      // the person needs to actually see what didn't make it rather than just
+      // getting a generic success message while data quietly went missing.
+      const failed = [];
+      Object.entries(parsed.data).forEach(([k,v]) => {
+        if (!BACKUP_KEYS.includes(k)) return;
+        try { localStorage.setItem(k, v); }
+        catch { failed.push(k); }
+      });
+      if (failed.length === 0) {
+        setImportStatus({ type:'success', text:'הנתונים יובאו! טוען מחדש...' });
+        setTimeout(() => window.location.reload(), 1200);
+      } else {
+        setImportStatus({ type:'error', text:`חלק מהנתונים לא יובאו (כנראה אחסון הדפדפן מלא): ${failed.join(', ')}. נסה לפנות מקום (נקה דאטה לא נחוצה) ולייבא שוב.` });
       }
     };
     reader.readAsText(file);
