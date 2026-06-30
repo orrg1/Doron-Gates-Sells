@@ -114,6 +114,59 @@ const getProcColValue = (key, p) => {
 // aren't captured by a plain text measurement (varies per column).
 const PROC_COL_EXTRA_PADDING = { name:70, supplier:30, abc:40, avg:40, trend:30, stock:40, coverage:40, order:50 };
 
+// ─── IndexedDB storage for large datasets ──────────────────────
+// localStorage caps out at ~5-10MB per origin (hard browser limit, not
+// something the app can raise). Heavy datasets — raw sales/suppliers
+// transactions and customer files — can outgrow that on real businesses with
+// years of history. IndexedDB has a much larger quota (typically tied to
+// available disk space), so those specific datasets live there instead.
+// Everything else (settings, filenames, per-SKU procurement maps) stays in
+// localStorage since it's small, bounded, and benefits from staying
+// synchronous (simpler useState initializers, no loading flicker).
+const IDB_NAME = 'BizDataProDB';
+const IDB_STORE = 'kv';
+let _idbPromise = null;
+const openIDB = () => {
+  if (_idbPromise) return _idbPromise;
+  _idbPromise = new Promise((resolve, reject) => {
+    if (!window.indexedDB) { reject(new Error('IndexedDB not supported')); return; }
+    const req = window.indexedDB.open(IDB_NAME, 1);
+    req.onupgradeneeded = () => { req.result.createObjectStore(IDB_STORE); };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return _idbPromise;
+};
+const idbGet = async (key) => {
+  const db = await openIDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readonly');
+    const req = tx.objectStore(IDB_STORE).get(key);
+    req.onsuccess = () => resolve(req.result ?? null);
+    req.onerror = () => reject(req.error);
+  });
+};
+const idbSet = async (key, value) => {
+  const db = await openIDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).put(value, key);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+};
+const idbDelete = async (key) => {
+  const db = await openIDB();
+  return new Promise((resolve, reject) => {
+    const tx = db.transaction(IDB_STORE, 'readwrite');
+    tx.objectStore(IDB_STORE).delete(key);
+    tx.oncomplete = () => resolve(true);
+    tx.onerror = () => reject(tx.error);
+  });
+};
+// Keys that live in IndexedDB instead of localStorage (the heavy datasets).
+const IDB_KEYS = ['dashboardSalesData','dashboardSuppliersData','customerMonthlyData','customerProductData'];
+
 const excelDateToJS = (serial) => new Date((Math.floor(serial - 25569)) * 86400 * 1000);
 
 const normalizeDate = (val) => {
@@ -3809,19 +3862,80 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
   // backup/restore is a single, predictable operation instead of needing to
   // know which keys exist. (Deliberately excludes nothing — including the
   // Gemini key, since the person who can already open Settings already has it.)
+  // localStorage-only keys. The four heaviest datasets (IDB_KEYS) live in
+  // IndexedDB instead — see the IndexedDB section near the top of the file —
+  // and are handled separately below in diagnostics/export/import.
   const BACKUP_KEYS = [
-    'dashboardSalesData','dashboardSuppliersData','salesFileNames','suppliersFileNames',
+    'salesFileNames','suppliersFileNames',
     'procurementStock','procurementCost','procurementMinStock','procurementSupplier',
     'procurementMOQ','procurementCurrency','procurementLeadTime','procurementColWidths',
     'procurementInvSlots','procurementImportedFiles','inventoryFileName','openOrders',
-    'customerMonthlyData','customerProductData','customerMonthlyFileName','customerProductFileName',
+    'customerMonthlyFileName','customerProductFileName',
     'savedViews','excludeCurrentMonth','theme','geminiApiKey',
   ];
 
-  const handleExportAll = () => {
+  // Storage diagnostic — shows exactly what's eating into storage, split
+  // between localStorage (small settings/maps) and IndexedDB (the heavy
+  // datasets), since "it's full" is otherwise a black box with no way to
+  // tell what to clear.
+  const KEY_LABELS = {
+    dashboardSalesData:'מכירות', dashboardSuppliersData:'ספקים (טבלת רכש)',
+    salesFileNames:'שמות קובצי מכירות', suppliersFileNames:'שמות קובצי ספקים',
+    procurementStock:'מלאי (רכש)', procurementCost:'עלות (רכש)', procurementMinStock:'מלאי מינ\' (רכש)',
+    procurementSupplier:'ספק לכל מוצר (רכש)', procurementMOQ:'MOQ (רכש)', procurementCurrency:'מטבע (רכש)',
+    procurementLeadTime:'זמן אספקה (רכש)', procurementColWidths:'רוחב עמודות (רכש)',
+    procurementInvSlots:'קבצי מלאי שיובאו (רכש)', procurementImportedFiles:'(ישן — לא בשימוש)',
+    inventoryFileName:'שם קובץ מלאי', openOrders:'הזמנות פתוחות',
+    customerMonthlyData:'מכירות ללקוח בחתך חודשי', customerProductData:'מכירות ללקוח לפי מוצר',
+    customerMonthlyFileName:'שם קובץ לקוחות חודשי', customerProductFileName:'שם קובץ לקוחות-מוצר',
+    savedViews:'תצוגות שמורות', excludeCurrentMonth:'הגדרת חודש נוכחי', theme:'ערכת נושא', geminiApiKey:'מפתח Gemini',
+  };
+  const [showStorageDetail, setShowStorageDetail] = useState(false);
+  const [idbUsage, setIdbUsage] = useState({ items: [], totalBytes: 0 });
+  useEffect(() => {
+    if (!isOpen) return;
+    (async () => {
+      const items = [];
+      let totalBytes = 0;
+      for (const key of IDB_KEYS) {
+        try {
+          const v = await idbGet(key);
+          if (v !== null) {
+            const bytes = JSON.stringify(v).length * 2;
+            totalBytes += bytes;
+            items.push({ key, label: KEY_LABELS[key]||key, bytes });
+          }
+        } catch {}
+      }
+      items.sort((a,b)=>b.bytes-a.bytes);
+      setIdbUsage({ items, totalBytes });
+    })();
+  }, [isOpen]);
+  const storageUsage = useMemo(() => {
+    const items = [];
+    let totalAppBytes = 0, totalAllBytes = 0;
+    for (let i=0; i<localStorage.length; i++) {
+      const k = localStorage.key(i);
+      const v = localStorage.getItem(k) || '';
+      const bytes = (k.length + v.length) * 2; // rough UTF-16 estimate
+      totalAllBytes += bytes;
+      if (BACKUP_KEYS.includes(k)) { totalAppBytes += bytes; items.push({ key:k, label:KEY_LABELS[k]||k, bytes }); }
+    }
+    items.sort((a,b)=>b.bytes-a.bytes);
+    return { items, totalAppBytes, totalAllBytes };
+  }, [isOpen]);
+  const formatBytes = (b) => b<1024 ? `${b}B` : b<1024*1024 ? `${(b/1024).toFixed(0)}KB` : `${(b/1024/1024).toFixed(2)}MB`;
+
+  const handleExportAll = async () => {
     const data = {};
     BACKUP_KEYS.forEach(k => { const v = localStorage.getItem(k); if (v!==null) data[k] = v; });
-    const payload = { app:'BizDataPro', version:1, exportedAt:new Date().toISOString(), data };
+    // Heavy datasets come from IndexedDB and get embedded as actual JS values
+    // (not pre-stringified) — JSON.stringify(payload) below serializes the
+    // whole thing in one pass either way.
+    for (const key of IDB_KEYS) {
+      try { const v = await idbGet(key); if (v !== null) data[key] = v; } catch {}
+    }
+    const payload = { app:'BizDataPro', version:2, exportedAt:new Date().toISOString(), data };
     const blob = new Blob([JSON.stringify(payload)], {type:'application/json;charset=utf-8'});
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a'); a.style.display='none'; a.href=url;
@@ -3833,7 +3947,7 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
   const handleImportAll = (e) => {
     const file = e.target.files[0]; if (!file) return;
     const reader = new FileReader();
-    reader.onload = (ev) => {
+    reader.onload = async (ev) => {
       let parsed;
       try {
         parsed = JSON.parse(ev.target.result);
@@ -3842,21 +3956,29 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
         setImportStatus({ type:'error', text:'קובץ לא תקין — זה לא קובץ גיבוי של BizData Pro' });
         return;
       }
-      // Each key is written independently — a failure on one (e.g. browser storage
-      // quota exceeded on a large dataset) must not silently abort the rest, and
-      // the person needs to actually see what didn't make it rather than just
-      // getting a generic success message while data quietly went missing.
+      // Each key is written independently — a failure on one must not silently
+      // abort the rest, and the person needs to actually see what didn't make
+      // it rather than just getting a generic success message while data
+      // quietly went missing. Heavy datasets (IDB_KEYS) go to IndexedDB;
+      // older backups (version 1) may have them as JSON strings in
+      // localStorage-style entries, so both string and pre-parsed forms are handled.
       const failed = [];
-      Object.entries(parsed.data).forEach(([k,v]) => {
-        if (!BACKUP_KEYS.includes(k)) return;
-        try { localStorage.setItem(k, v); }
-        catch { failed.push(k); }
-      });
+      for (const [k,v] of Object.entries(parsed.data)) {
+        if (IDB_KEYS.includes(k)) {
+          try {
+            const value = typeof v === 'string' ? JSON.parse(v) : v;
+            await idbSet(k, value);
+          } catch { failed.push(k); }
+        } else if (BACKUP_KEYS.includes(k)) {
+          try { localStorage.setItem(k, v); }
+          catch { failed.push(k); }
+        }
+      }
       if (failed.length === 0) {
         setImportStatus({ type:'success', text:'הנתונים יובאו! טוען מחדש...' });
         setTimeout(() => window.location.reload(), 1200);
       } else {
-        setImportStatus({ type:'error', text:`חלק מהנתונים לא יובאו (כנראה אחסון הדפדפן מלא): ${failed.join(', ')}. נסה לפנות מקום (נקה דאטה לא נחוצה) ולייבא שוב.` });
+        setImportStatus({ type:'error', text:`חלק מהנתונים לא יובאו: ${failed.join(', ')}. נסה לפנות מקום ולייבא שוב.` });
       }
     };
     reader.readAsText(file);
@@ -3968,6 +4090,40 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
               ⚠ ייבוא קובץ גיבוי מחליף את הנתונים הקיימים במחשב הזה.
             </p>
           </div>
+
+          {/* Storage diagnostic */}
+          <div className={`pt-5 border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+            <button onClick={()=>setShowStorageDetail(p=>!p)} className="w-full flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <BarChart3 className={`w-4 h-4 ${isDarkMode?'text-cyan-400':'text-cyan-600'}`}/>
+                <span className={`text-sm font-medium ${isDarkMode?'text-slate-200':'text-slate-700'}`}>נפח אחסון</span>
+              </div>
+              <ChevronDown className={`w-4 h-4 transition-transform ${isDarkMode?'text-slate-500':'text-slate-400'} ${showStorageDetail?'rotate-180':''}`}/>
+            </button>
+            <p className={`text-xs mt-2 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+              הגדרות (localStorage): <span className="font-bold">{formatBytes(storageUsage.totalAppBytes)}</span>
+              {' · '}נתונים כבדים (IndexedDB): <span className="font-bold">{formatBytes(idbUsage.totalBytes)}</span>
+            </p>
+            <p className={`text-[11px] mt-1 ${isDarkMode?'text-slate-600':'text-slate-500'}`}>
+              מכירות, ספקים, וקבצי לקוחות נשמרים ב-IndexedDB — אחסון בנפח גדול בהרבה (תלוי בדיסק הפנוי), שלא כפוף למגבלת ~5-10MB של localStorage.
+            </p>
+            {showStorageDetail && (
+              <div className="mt-3 space-y-1.5">
+                {idbUsage.items.map(it => (
+                  <div key={it.key} className={`flex items-center justify-between text-xs px-3 py-2 rounded-lg ${isDarkMode?'bg-cyan-500/5':'bg-cyan-50'}`}>
+                    <span className={isDarkMode?'text-slate-300':'text-slate-600'}>{it.label} <span className={`text-[10px] ${isDarkMode?'text-cyan-500':'text-cyan-600'}`}>IndexedDB</span></span>
+                    <span className={`font-bold tabular-nums ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{formatBytes(it.bytes)}</span>
+                  </div>
+                ))}
+                {storageUsage.items.filter(it=>it.bytes>0).map(it => (
+                  <div key={it.key} className={`flex items-center justify-between text-xs px-3 py-2 rounded-lg ${isDarkMode?'bg-slate-700/30':'bg-slate-50'}`}>
+                    <span className={isDarkMode?'text-slate-300':'text-slate-600'}>{it.label}</span>
+                    <span className={`font-bold tabular-nums ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{formatBytes(it.bytes)}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
         </div>
 
         {/* Footer */}
@@ -4060,20 +4216,55 @@ const App = () => {
     return () => window.removeEventListener('resize', checkMobile);
   }, []);
 
-  const [salesData, setSalesData] = useState(() => { try { return JSON.parse(localStorage.getItem('dashboardSalesData')||'[]'); } catch { return []; } });
+  // These four heavy datasets live in IndexedDB (see IDB_KEYS above), not
+  // localStorage — they're the ones that can realistically grow into the
+  // megabytes on a real business (years of transactions, hundreds of
+  // customers × products). They start empty and load asynchronously below;
+  // a short loading screen covers that gap on first paint.
+  const [salesData, setSalesData] = useState([]);
   // Customer data — two independent, optional files (see parseCustomerMonthlyFile/
   // parseCustomerProductFile): one gives the time dimension, the other the product mix.
-  const [customerMonthlyData, setCustomerMonthlyData] = useState(() => { try { return JSON.parse(localStorage.getItem('customerMonthlyData')||'[]'); } catch { return []; } });
-  const [customerProductData, setCustomerProductData] = useState(() => { try { return JSON.parse(localStorage.getItem('customerProductData')||'[]'); } catch { return []; } });
+  const [customerMonthlyData, setCustomerMonthlyData] = useState([]);
+  const [customerProductData, setCustomerProductData] = useState([]);
   const [customerMonthlyFileName, setCustomerMonthlyFileName] = useState(() => localStorage.getItem('customerMonthlyFileName')||'');
   const [customerProductFileName, setCustomerProductFileName] = useState(() => localStorage.getItem('customerProductFileName')||'');
   // Cost & currency per SKU — owned here (not inside ProcurementPage) so the
   // "מכירות" tab can compute margin/profit using the same data Procurement imports.
   const [costMap, setCostMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementCost')||'{}'); } catch { return {}; } });
   const [currencyMap, setCurrencyMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementCurrency')||'{}'); } catch { return {}; } });
-  const [suppliersData, setSuppliersData] = useState(() => { try { return JSON.parse(localStorage.getItem('dashboardSuppliersData')||'[]'); } catch { return []; } });
+  const [suppliersData, setSuppliersData] = useState([]);
   const [salesFileNames, setSalesFileNames] = useState(() => { try { return JSON.parse(localStorage.getItem('salesFileNames')||'[]'); } catch { return []; } });
   const [suppliersFileNames, setSuppliersFileNames] = useState(() => { try { return JSON.parse(localStorage.getItem('suppliersFileNames')||'[]'); } catch { return []; } });
+  const [idbReady, setIdbReady] = useState(false);
+
+  // Load the four heavy datasets from IndexedDB on mount. If they're not there
+  // yet but a legacy copy exists in localStorage (from before this migration),
+  // move it over once — this immediately frees up the localStorage quota that
+  // was the actual cause of "browser storage full" errors, without the person
+  // needing to re-upload anything.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      const setters = { dashboardSalesData:setSalesData, dashboardSuppliersData:setSuppliersData, customerMonthlyData:setCustomerMonthlyData, customerProductData:setCustomerProductData };
+      for (const key of IDB_KEYS) {
+        try {
+          let value = await idbGet(key);
+          if (value === null) {
+            const legacy = localStorage.getItem(key);
+            if (legacy !== null) {
+              try { value = JSON.parse(legacy); } catch { value = null; }
+              if (value !== null) {
+                try { await idbSet(key, value); localStorage.removeItem(key); } catch {}
+              }
+            }
+          }
+          if (!cancelled && value !== null) setters[key](value);
+        } catch {}
+      }
+      if (!cancelled) setIdbReady(true);
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
   const [activeTab, setActiveTab] = useState('overview');
   const [loading, setLoading] = useState(false);
@@ -4173,8 +4364,19 @@ const App = () => {
 
   // Persist
   const save = (key, data) => { try { localStorage.setItem(key, JSON.stringify(data)); setStorageWarning(false); } catch { setStorageWarning(true); } };
-  useEffect(() => { save('dashboardSalesData', salesData); save('salesFileNames', salesFileNames); }, [salesData, salesFileNames]);
-  useEffect(() => { save('dashboardSuppliersData', suppliersData); save('suppliersFileNames', suppliersFileNames); }, [suppliersData, suppliersFileNames]);
+  // dashboardSalesData/dashboardSuppliersData are IDB_KEYS (see IndexedDB section
+  // above) — too large for localStorage on real datasets. The filename lists
+  // stay tiny and stay in localStorage via save().
+  useEffect(() => {
+    if (!idbReady) return; // avoid overwriting IDB with the initial empty [] before the load effect has run
+    idbSet('dashboardSalesData', salesData).then(()=>setStorageWarning(false)).catch(()=>setStorageWarning(true));
+    save('salesFileNames', salesFileNames);
+  }, [salesData, salesFileNames, idbReady]);
+  useEffect(() => {
+    if (!idbReady) return;
+    idbSet('dashboardSuppliersData', suppliersData).then(()=>setStorageWarning(false)).catch(()=>setStorageWarning(true));
+    save('suppliersFileNames', suppliersFileNames);
+  }, [suppliersData, suppliersFileNames, idbReady]);
 
   // Toggle theme
   const toggleTheme = () => { const n=!isDarkMode; setIsDarkMode(n); localStorage.setItem('theme',n?'dark':'light'); };
@@ -4251,10 +4453,10 @@ const App = () => {
     keys.forEach(k => {
       if (k==='sales') {
         setSalesData([]); setSalesFileNames([]);
-        localStorage.removeItem('dashboardSalesData'); localStorage.removeItem('salesFileNames');
+        idbDelete('dashboardSalesData').catch(()=>{}); localStorage.removeItem('dashboardSalesData'); localStorage.removeItem('salesFileNames');
       } else if (k==='suppliers') {
         setSuppliersData([]); setSuppliersFileNames([]);
-        localStorage.removeItem('dashboardSuppliersData'); localStorage.removeItem('suppliersFileNames');
+        idbDelete('dashboardSuppliersData').catch(()=>{}); localStorage.removeItem('dashboardSuppliersData'); localStorage.removeItem('suppliersFileNames');
       }
     });
     setAvailableDates([]); setDateFilter({start:'',end:''}); resetFilters(); setDrillDownMonth(null);
@@ -4290,17 +4492,18 @@ const App = () => {
       const parsed = parseCustomerMonthlyFile(rows);
       setCustomerMonthlyData(parsed);
       setCustomerMonthlyFileName(file.name);
-      // Persisting to localStorage can fail independently of parsing (most often
-      // the browser's storage quota being full) — that must NOT be silently
-      // swallowed, or the data looks fine on screen right now but is actually
-      // gone on next refresh/export, with no warning at all.
+      // Persisting can fail independently of parsing (most often the storage
+      // quota being full) — that must NOT be silently swallowed, or the data
+      // looks fine on screen right now but is actually gone on next
+      // refresh/export, with no warning at all. This now goes to IndexedDB
+      // (much larger quota than localStorage) rather than localStorage.
       try {
-        localStorage.setItem('customerMonthlyData', JSON.stringify(parsed));
+        await idbSet('customerMonthlyData', parsed);
         localStorage.setItem('customerMonthlyFileName', file.name);
         setCustomerUploadSuccess('monthly');
         setTimeout(() => setCustomerUploadSuccess(s => s==='monthly' ? null : s), 4000);
       } catch {
-        setCustomerUploadError({ slot:'monthly', text:'הקובץ נטען למסך אבל לא נשמר בדפדפן — כנראה אחסון הדפדפן מלא. פנה מקום (למשל נקה נתונים ישנים) ונסה שוב, אחרת המידע ייעלם ברענון.' });
+        setCustomerUploadError({ slot:'monthly', text:'הקובץ נטען למסך אבל לא נשמר בדפדפן — נסה שוב או נקה מקום בדיסק.' });
       }
     } catch {}
     setCustomerUploadLoading(p=>({...p, monthly:false}));
@@ -4316,12 +4519,12 @@ const App = () => {
       setCustomerProductData(parsed);
       setCustomerProductFileName(file.name);
       try {
-        localStorage.setItem('customerProductData', JSON.stringify(parsed));
+        await idbSet('customerProductData', parsed);
         localStorage.setItem('customerProductFileName', file.name);
         setCustomerUploadSuccess('product');
         setTimeout(() => setCustomerUploadSuccess(s => s==='product' ? null : s), 4000);
       } catch {
-        setCustomerUploadError({ slot:'product', text:'הקובץ נטען למסך אבל לא נשמר בדפדפן — כנראה אחסון הדפדפן מלא. פנה מקום (למשל נקה נתונים ישנים) ונסה שוב, אחרת המידע ייעלם ברענון.' });
+        setCustomerUploadError({ slot:'product', text:'הקובץ נטען למסך אבל לא נשמר בדפדפן — נסה שוב או נקה מקום בדיסק.' });
       }
     } catch {}
     setCustomerUploadLoading(p=>({...p, product:false}));
@@ -4329,11 +4532,11 @@ const App = () => {
   };
   const clearCustomerMonthly = () => {
     setCustomerMonthlyData([]); setCustomerMonthlyFileName('');
-    localStorage.removeItem('customerMonthlyData'); localStorage.removeItem('customerMonthlyFileName');
+    idbDelete('customerMonthlyData').catch(()=>{}); localStorage.removeItem('customerMonthlyData'); localStorage.removeItem('customerMonthlyFileName');
   };
   const clearCustomerProduct = () => {
     setCustomerProductData([]); setCustomerProductFileName('');
-    localStorage.removeItem('customerProductData'); localStorage.removeItem('customerProductFileName');
+    idbDelete('customerProductData').catch(()=>{}); localStorage.removeItem('customerProductData'); localStorage.removeItem('customerProductFileName');
   };
 
   // ─── Saved views — remembers a filter combo (tab + date range + product/supplier) ───
@@ -4864,6 +5067,17 @@ const App = () => {
     { id:'procurement', label:'תכנון רכש', icon:ShoppingCart, color:'text-amber-400' },
     { id:'summary', label:'רווח והפסד', icon:BarChart3, color:'text-violet-400' },
   ];
+
+  if (!idbReady) {
+    return (
+      <div className={`flex items-center justify-center min-h-screen ${isDarkMode?'bg-slate-950':'bg-slate-50'}`} dir="rtl">
+        <div className="flex flex-col items-center gap-3">
+          <Loader2 className={`w-8 h-8 animate-spin ${isDarkMode?'text-blue-400':'text-blue-600'}`}/>
+          <p className={`text-sm ${isDarkMode?'text-slate-400':'text-slate-500'}`}>טוען נתונים...</p>
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className={`flex min-h-screen font-sans transition-colors duration-300 ${isDarkMode?'bg-slate-950 text-slate-100':'bg-slate-50 text-slate-800'}`} dir="rtl">
