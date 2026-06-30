@@ -998,7 +998,7 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
 };
 
 // Empty State
-const EmptyState = ({ onUpload, loading, isDarkMode }) => (
+const EmptyState = ({ onUpload, loading, isDarkMode, activeTab }) => (
   <div className="flex flex-col items-center justify-center h-full text-center p-8 animate-in fade-in zoom-in duration-500">
     <div className="relative mb-6">
       <div className={`absolute inset-0 rounded-3xl blur-2xl opacity-40 ${isDarkMode?'bg-blue-600':'bg-blue-300'}`}/>
@@ -1007,9 +1007,14 @@ const EmptyState = ({ onUpload, loading, isDarkMode }) => (
       </div>
     </div>
     <h3 className={`text-2xl font-bold mb-2 ${isDarkMode?'text-white':'text-slate-800'}`}>אין נתונים עדיין</h3>
-    <p className={`max-w-xs mb-8 text-sm leading-relaxed ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+    <p className={`max-w-xs mb-2 text-sm leading-relaxed ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
       טען קבצי Excel או CSV של מכירות / ספקים כדי להתחיל
     </p>
+    {activeTab==='sales' && (
+      <p className={`max-w-xs mb-6 text-xs px-3 py-1.5 rounded-lg ${isDarkMode?'bg-slate-800 text-slate-400 border border-slate-700':'bg-slate-100 text-slate-500 border border-slate-200'}`}>
+        שם הקובץ הנדרש: <span className="font-bold">מכירות חודשיות לפי מוצר</span>
+      </p>
+    )}
     <label className="group flex items-center gap-3 px-7 py-3.5 bg-gradient-to-l from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white rounded-2xl cursor-pointer transition-all hover:scale-105 shadow-lg shadow-blue-500/25 font-medium">
       {loading ? <Loader2 className="w-5 h-5 animate-spin"/> : <Upload className="w-5 h-5"/>}
       בחר קבצים
@@ -2577,7 +2582,10 @@ const renderProductRow = (p) => {
         <div className={`relative p-6 rounded-full ${isDarkMode?'bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700':'bg-gradient-to-br from-slate-50 to-white border border-slate-100'}`}><ShoppingCart className={`w-12 h-12 ${isDarkMode?'text-slate-500':'text-slate-300'}`}/></div>
       </div>
       <h3 className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>אין נתוני מכירות</h3>
-      <p className={`mt-2 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>טען קבצי מכירות כדי לתכנן את הרכש</p>
+      <p className={`mt-2 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>טען קבצי מכירות בלשונית "מכירות" כדי לתכנן את הרכש</p>
+      <p className={`mt-2 text-xs px-3 py-1.5 rounded-lg ${isDarkMode?'bg-slate-800 text-slate-400 border border-slate-700':'bg-slate-100 text-slate-500 border border-slate-200'}`}>
+        שם הקובץ הנדרש: <span className="font-bold">מכירות חודשיות לפי מוצר</span>
+      </p>
     </div>
   );
 
@@ -2629,7 +2637,10 @@ const renderProductRow = (p) => {
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Inventory upload */}
         <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-          <h3 className={`font-bold text-sm mb-3 flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Package className="w-4 h-4 text-amber-500"/> מלאי נוכחי</h3>
+          <h3 className={`font-bold text-sm mb-1 flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Package className="w-4 h-4 text-amber-500"/> מלאי נוכחי</h3>
+          <p className={`text-xs mb-3 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+            שמות הקבצים הנדרשים: <span className="font-bold">מלאי נוכחי לפי מוצר</span> ו/או <span className="font-bold">כרטיס פריט</span>
+          </p>
           {importedFiles.length > 0 ? (
             <div className="space-y-3">
               <div className="space-y-2">
@@ -5007,7 +5018,7 @@ const App = () => {
 
           {/* Sales / Suppliers */}
           {(activeTab==='sales'||activeTab==='suppliers') && (
-            activeData.length===0 ? <EmptyState onUpload={handleFileUpload} loading={loading} isDarkMode={isDarkMode}/> : (
+            activeData.length===0 ? <EmptyState onUpload={handleFileUpload} loading={loading} isDarkMode={isDarkMode} activeTab={activeTab}/> : (
               <div className="space-y-6 animate-in fade-in duration-400">
                 {/* Filters Bar */}
                 <div className={`p-4 rounded-2xl border flex flex-wrap gap-3 items-center ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
