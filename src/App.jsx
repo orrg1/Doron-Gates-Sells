@@ -432,6 +432,32 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
     return Object.entries(map).sort((a,b)=>b[1]-a[1]).slice(0,8).map(([name,total])=>({name,total}));
   }, [productData]);
 
+  // ─── Cross-sell — which products tend to be bought by the same customers ───
+  // For every customer, every pair of distinct products they bought together
+  // counts as one co-occurrence. Pairs are ranked by how many customers share
+  // them, which is a simple but honest proxy for "people who buy X also buy Y" —
+  // no purchase-order/timing data is available, only the customer-product file's
+  // aggregate totals, so this can't say whether purchases happened in the same
+  // transaction, only that the same customer bought both at some point.
+  const crossSellPairs = useMemo(() => {
+    const pairCounts = {};
+    Object.values(productsByCustomer).forEach(items => {
+      const uniqueProducts = [...new Set(items.map(it=>it.product))];
+      if (uniqueProducts.length < 2 || uniqueProducts.length > 60) return; // skip customers with 1 product (no pair) or absurdly many (noise, likely a distributor)
+      for (let i=0; i<uniqueProducts.length; i++) {
+        for (let j=i+1; j<uniqueProducts.length; j++) {
+          const key = [uniqueProducts[i], uniqueProducts[j]].sort().join('␟');
+          pairCounts[key] = (pairCounts[key]||0) + 1;
+        }
+      }
+    });
+    return Object.entries(pairCounts)
+      .map(([key,count]) => { const [a,b] = key.split('␟'); return { a, b, count }; })
+      .filter(p => p.count >= 2) // require at least 2 customers sharing the pair to call it a pattern, not coincidence
+      .sort((a,b) => b.count - a.count)
+      .slice(0, 15);
+  }, [productsByCustomer]);
+
   const kpis = useMemo(() => {
     const totalRevenue = customers.reduce((s,c)=>s+c.totalRevenue,0);
     const newCount = customers.filter(c=>c.status==='new').length;
@@ -795,6 +821,29 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
               <div key={i} className={`flex items-center justify-between text-sm px-3 py-2 rounded-lg ${isDarkMode?'bg-slate-700/30':'bg-slate-50'}`}>
                 <span className={`truncate ${isDarkMode?'text-slate-300':'text-slate-700'}`}>{p.name}</span>
                 <span className={`font-bold shrink-0 ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>{formatShort(p.total)}</span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+
+      {/* Cross-sell — products frequently bought by the same customers */}
+      {crossSellPairs.length>0 && (
+        <div className={`p-6 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+          <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
+            <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Box className="w-5 h-5 text-pink-500"/>נקנים יחד (Cross-sell)</h3>
+            <span className={`text-[11px] px-2 py-1 rounded-lg ${isDarkMode?'bg-amber-500/10 text-amber-400':'bg-amber-50 text-amber-700'}`}>על כל התקופה בקובץ — לא ניתן לסינון לפי תאריך</span>
+          </div>
+          <p className={`text-xs mb-4 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>זוגות מוצרים שאותו לקוח קנה את שניהם (לא בהכרח באותה עסקה). מבוסס על {Object.keys(productsByCustomer).length.toLocaleString()} לקוחות עם פירוט מוצרים.</p>
+          <div className="space-y-1.5">
+            {crossSellPairs.map((pair,i) => (
+              <div key={i} className={`flex items-center justify-between gap-3 text-sm px-3 py-2.5 rounded-lg ${isDarkMode?'bg-slate-700/30':'bg-slate-50'}`}>
+                <div className="flex items-center gap-2 min-w-0 flex-1">
+                  <span className={`truncate ${isDarkMode?'text-slate-300':'text-slate-700'}`}>{pair.a}</span>
+                  <span className={`shrink-0 ${isDarkMode?'text-slate-600':'text-slate-300'}`}>+</span>
+                  <span className={`truncate ${isDarkMode?'text-slate-300':'text-slate-700'}`}>{pair.b}</span>
+                </div>
+                <span className={`shrink-0 text-xs font-bold px-2 py-1 rounded-full ${isDarkMode?'bg-pink-500/15 text-pink-300':'bg-pink-50 text-pink-700'}`}>{pair.count} לקוחות</span>
               </div>
             ))}
           </div>
@@ -1588,6 +1637,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
   const [invLoading, setInvLoading] = useState(false);
   const [invUploadError, setInvUploadError] = useState(null);
   const [exporting, setExporting] = useState(false);
+  const [pdfGenerating, setPdfGenerating] = useState(false);
   const [invFileName, setInvFileName] = useState(() => localStorage.getItem('inventoryFileName')||'');
   const [importStats, setImportStats] = useState(null);
   // Two independent, optional upload slots — mirrors the "לקוחות" tab UX: each
@@ -1606,6 +1656,38 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
   const [showLegend, setShowLegend] = useState(false);
   const [deadStockDays, setDeadStockDays] = useState(90);
   const [avgWindowMonths, setAvgWindowMonths] = useState(12); // lookback window for avg calc // threshold in days
+  // Free period comparison — same concept as the one in "מכירות", but scoped
+  // here to inform purchasing decisions: did demand for products actually
+  // shift between two custom periods, beyond what the fixed trend window shows.
+  const [showProcCompare, setShowProcCompare] = useState(false);
+  const procAvailableMonths = useMemo(() => [...new Set(salesData.map(d=>d.date).filter(Boolean))].sort((a,b)=>getDateVal(a)-getDateVal(b)), [salesData]);
+  const [procPeriodA, setProcPeriodA] = useState({ start:'', end:'' });
+  const [procPeriodB, setProcPeriodB] = useState({ start:'', end:'' });
+  useEffect(() => {
+    if (!showProcCompare || !procAvailableMonths.length || procPeriodA.start) return;
+    const end = procAvailableMonths[procAvailableMonths.length-1];
+    const aStart = procAvailableMonths[Math.max(0, procAvailableMonths.length-3)];
+    const bEnd = procAvailableMonths[Math.max(0, procAvailableMonths.length-4)] || procAvailableMonths[0];
+    const bStart = procAvailableMonths[Math.max(0, procAvailableMonths.length-6)];
+    setProcPeriodA({ start:aStart, end });
+    setProcPeriodB({ start:bStart, end:bEnd });
+  }, [showProcCompare, procAvailableMonths]);
+  const procCompareStats = useMemo(() => {
+    if (!showProcCompare || !procPeriodA.start || !procPeriodB.start) return null;
+    const calc = (period) => {
+      const startVal = getDateVal(period.start), endVal = getDateVal(period.end||period.start);
+      const rows = salesData.filter(d => { const v=getDateVal(d.date); return v>=startVal && v<=endVal; });
+      const revenue = rows.reduce((a,c)=>a+(c.total||0),0);
+      const qty = rows.reduce((a,c)=>a+(c.quantity||0),0);
+      const byProduct = {};
+      rows.forEach(r => { const n=r.description; if(!n) return; byProduct[n]=(byProduct[n]||0)+(r.quantity||0); });
+      const top = Object.entries(byProduct).sort((a,b)=>b[1]-a[1]).slice(0,5).map(([name,qty])=>({name,qty}));
+      return { revenue, qty, top };
+    };
+    const a = calc(procPeriodA), b = calc(procPeriodB);
+    const qtyDelta = b.qty>0 ? ((a.qty-b.qty)/b.qty*100) : (a.qty>0?100:0);
+    return { a, b, qtyDelta };
+  }, [showProcCompare, procPeriodA, procPeriodB, salesData]);
   const [whatIfMultiplier, setWhatIfMultiplier] = useState(1.2); // +20% default
   const [whatIfActive, setWhatIfActive] = useState(false);
   const [openOrders, setOpenOrders] = useState(() => {
@@ -2217,6 +2299,94 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     return Object.values(groups)
       .sort((a, b) => b.totalCost - a.totalCost || b.totalUnits - a.totalUnits);
   }, [filtered]);
+
+  // ─── Manager PDF report ──────────────────────────────────────
+  // jsPDF's built-in fonts have no Hebrew glyphs, so the report is built as a
+  // styled HTML element and rasterized via html2canvas into the PDF as an
+  // image — the only reliable way to get correct Hebrew/RTL text into a PDF
+  // without embedding a custom font.
+  const generatePDFReport = async () => {
+    if (!window.jspdf || !window.html2canvas) { alert('הספריות הדרושות עדיין נטענות — נסה שוב בעוד רגע.'); return; }
+    setPdfGenerating(true);
+    try {
+      const criticalItems = products.filter(p=>p.risk==='critical').sort((a,b)=>(b.orderCost||0)-(a.orderCost||0)).slice(0,15);
+      const lowItems = products.filter(p=>p.risk==='low').sort((a,b)=>(b.orderCost||0)-(a.orderCost||0)).slice(0,15);
+      const topSuppliers = supplierGroups.filter(g=>g.totalUnits>0).slice(0,8);
+      const dateStr = new Date().toLocaleDateString('he-IL', { day:'2-digit', month:'2-digit', year:'numeric' });
+
+      const container = document.createElement('div');
+      container.style.cssText = 'position:fixed;top:-10000px;right:-10000px;width:780px;background:#fff;direction:rtl;font-family:Arial,sans-serif;color:#0f172a;padding:32px;';
+      const rowHtml = (p) => `<tr style="border-bottom:1px solid #e2e8f0;">
+        <td style="padding:6px 8px;font-size:11px;">${p.name||''}</td>
+        <td style="padding:6px 8px;font-size:11px;text-align:center;">${p.abc||''}</td>
+        <td style="padding:6px 8px;font-size:11px;text-align:center;">${p.supplier||'—'}</td>
+        <td style="padding:6px 8px;font-size:11px;text-align:center;">${p.currentStock??'—'}</td>
+        <td style="padding:6px 8px;font-size:11px;text-align:center;font-weight:bold;color:${p.risk==='critical'?'#dc2626':'#d97706'};">${p.suggestedOrder.toLocaleString()}</td>
+        <td style="padding:6px 8px;font-size:11px;text-align:center;">${p.orderCost?formatUnitCost(Math.round(p.orderCost),p.currency):'—'}</td>
+      </tr>`;
+      const tableHead = `<tr style="background:#1e293b;color:#fff;"><th style="padding:6px 8px;font-size:11px;text-align:right;">מוצר</th><th style="padding:6px 8px;font-size:11px;">ABC</th><th style="padding:6px 8px;font-size:11px;">ספק</th><th style="padding:6px 8px;font-size:11px;">מלאי</th><th style="padding:6px 8px;font-size:11px;">להזמין</th><th style="padding:6px 8px;font-size:11px;">עלות</th></tr>`;
+
+      container.innerHTML = `
+        <div style="text-align:center;margin-bottom:24px;border-bottom:3px solid #1e293b;padding-bottom:16px;">
+          <h1 style="font-size:22px;margin:0 0 4px;">דוח תכנון רכש</h1>
+          <p style="font-size:12px;color:#64748b;margin:0;">${dateStr}</p>
+        </div>
+        <div style="display:flex;gap:12px;margin-bottom:24px;">
+          <div style="flex:1;background:#fef2f2;border:1px solid #fecaca;border-radius:8px;padding:12px;text-align:center;">
+            <div style="font-size:24px;font-weight:bold;color:#dc2626;">${riskCounts.critical}</div>
+            <div style="font-size:11px;color:#7f1d1d;">קריטי — הזמן מיד</div>
+          </div>
+          <div style="flex:1;background:#fffbeb;border:1px solid #fde68a;border-radius:8px;padding:12px;text-align:center;">
+            <div style="font-size:24px;font-weight:bold;color:#d97706;">${riskCounts.low}</div>
+            <div style="font-size:11px;color:#78350f;">מלאי נמוך</div>
+          </div>
+          <div style="flex:1;background:#eff6ff;border:1px solid #bfdbfe;border-radius:8px;padding:12px;text-align:center;">
+            <div style="font-size:24px;font-weight:bold;color:#1d4ed8;">${totalOrderUnits.toLocaleString()}</div>
+            <div style="font-size:11px;color:#1e3a8a;">יח' להזמנה</div>
+          </div>
+          <div style="flex:1;background:#ecfdf5;border:1px solid #a7f3d0;border-radius:8px;padding:12px;text-align:center;">
+            <div style="font-size:20px;font-weight:bold;color:#059669;">${formatShort(totalOrderCost)}</div>
+            <div style="font-size:11px;color:#064e3b;">עלות הזמנה משוערת</div>
+          </div>
+        </div>
+        ${criticalItems.length ? `<h2 style="font-size:15px;margin:20px 0 8px;color:#dc2626;">⛔ פריטים קריטיים — הזמן מיד (${criticalItems.length})</h2>
+        <table style="width:100%;border-collapse:collapse;"><thead>${tableHead}</thead><tbody>${criticalItems.map(rowHtml).join('')}</tbody></table>` : ''}
+        ${lowItems.length ? `<h2 style="font-size:15px;margin:20px 0 8px;color:#d97706;">⚠ מלאי נמוך (${lowItems.length})</h2>
+        <table style="width:100%;border-collapse:collapse;"><thead>${tableHead}</thead><tbody>${lowItems.map(rowHtml).join('')}</tbody></table>` : ''}
+        ${topSuppliers.length ? `<h2 style="font-size:15px;margin:20px 0 8px;">📦 ספקים מובילים להזמנה</h2>
+        <table style="width:100%;border-collapse:collapse;"><thead><tr style="background:#1e293b;color:#fff;"><th style="padding:6px 8px;font-size:11px;text-align:right;">ספק</th><th style="padding:6px 8px;font-size:11px;">פריטים</th><th style="padding:6px 8px;font-size:11px;">יח'</th><th style="padding:6px 8px;font-size:11px;">עלות</th></tr></thead><tbody>
+          ${topSuppliers.map(g => `<tr style="border-bottom:1px solid #e2e8f0;"><td style="padding:6px 8px;font-size:11px;">${g.name}</td><td style="padding:6px 8px;font-size:11px;text-align:center;">${g.items.filter(p=>p.suggestedOrder>0).length}</td><td style="padding:6px 8px;font-size:11px;text-align:center;">${g.totalUnits.toLocaleString()}</td><td style="padding:6px 8px;font-size:11px;text-align:center;">${Object.entries(g.costByCurrency).map(([cur,amt])=>formatUnitCost(Math.round(amt),cur==='ILS'?null:cur)).join(' + ')}</td></tr>`).join('')}
+        </tbody></table>` : ''}
+        <p style="margin-top:24px;font-size:10px;color:#94a3b8;text-align:center;">נוצר אוטומטית על ידי BizData Pro</p>
+      `;
+      document.body.appendChild(container);
+
+      const canvas = await window.html2canvas(container, { scale: 2, backgroundColor: '#ffffff' });
+      document.body.removeChild(container);
+
+      const { jsPDF } = window.jspdf;
+      const pdf = new jsPDF('p', 'mm', 'a4');
+      const pageWidth = 210, pageHeight = 297;
+      const imgWidth = pageWidth;
+      const imgHeight = (canvas.height * imgWidth) / canvas.width;
+      let heightLeft = imgHeight, position = 0;
+      const imgData = canvas.toDataURL('image/png');
+      pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+      heightLeft -= pageHeight;
+      while (heightLeft > 0) {
+        position = heightLeft - imgHeight;
+        pdf.addPage();
+        pdf.addImage(imgData, 'PNG', 0, position, imgWidth, imgHeight);
+        heightLeft -= pageHeight;
+      }
+      pdf.save('דוח_תכנון_רכש_'+new Date().toLocaleDateString('he-IL').replace(/\//g,'-')+'.pdf');
+    } catch (e) {
+      console.error('PDF generation failed:', e);
+      alert('יצירת ה-PDF נכשלה — נסה שוב.');
+    } finally {
+      setPdfGenerating(false);
+    }
+  };
 
   const ABCBadge = ({cls, xyz, abcXyz}) => {
     const abcStyle = {
@@ -2874,6 +3044,69 @@ const renderProductRow = (p) => {
           </div>
         </div>
       </div>
+
+      {/* Free period comparison toggle */}
+      <button onClick={()=>setShowProcCompare(p=>!p)} className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-medium border transition-colors ${showProcCompare?(isDarkMode?'bg-purple-500/20 border-purple-500/30 text-purple-300':'bg-purple-50 border-purple-200 text-purple-700'):(isDarkMode?'border-slate-700 text-slate-400 hover:text-white bg-slate-800':'border-slate-200 text-slate-500 hover:text-slate-700 bg-white')}`}>
+        <Sliders className="w-3.5 h-3.5"/> השוואת תקופות לביקוש
+      </button>
+
+      {showProcCompare && procCompareStats && (
+        <div className={`p-6 rounded-2xl border animate-in fade-in duration-300 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+          <h3 className={`font-bold flex items-center gap-2 mb-4 ${isDarkMode?'text-white':'text-slate-800'}`}><Sliders className="w-5 h-5 text-purple-500"/>השוואת תקופות — האם הביקוש השתנה?</h3>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+            {[['א',procPeriodA,setProcPeriodA],['ב',procPeriodB,setProcPeriodB]].map(([label,period,setPeriod])=>(
+              <div key={label} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border ${isDarkMode?'bg-slate-900 border-slate-700':'bg-slate-50 border-slate-200'}`}>
+                <span className={`text-xs font-bold shrink-0 px-2 py-1 rounded-lg ${label==='א'?(isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-100 text-blue-700'):(isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-200 text-slate-600')}`}>תקופה {label}</span>
+                <select value={period.start} onChange={e=>setPeriod(p=>({...p,start:e.target.value}))} style={isDarkMode?{background:'#0f172a',color:'#f8fafc'}:{}} className={`text-xs font-medium border-none focus:ring-0 p-0 cursor-pointer rounded flex-1 ${isDarkMode?'text-white':'text-slate-700 bg-transparent'}`}>
+                  {procAvailableMonths.map(d=><option key={d} value={d}>{d}</option>)}
+                </select>
+                <span className={isDarkMode?'text-slate-600':'text-slate-300'}>—</span>
+                <select value={period.end} onChange={e=>setPeriod(p=>({...p,end:e.target.value}))} style={isDarkMode?{background:'#0f172a',color:'#f8fafc'}:{}} className={`text-xs font-medium border-none focus:ring-0 p-0 cursor-pointer rounded flex-1 ${isDarkMode?'text-white':'text-slate-700 bg-transparent'}`}>
+                  {procAvailableMonths.map(d=><option key={d} value={d}>{d}</option>)}
+                </select>
+              </div>
+            ))}
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
+            {[['א',procCompareStats.a],['ב',procCompareStats.b]].map(([label,data])=>(
+              <div key={label} className={`p-4 rounded-xl border ${isDarkMode?'bg-slate-900/50 border-slate-700':'bg-slate-50 border-slate-200'}`}>
+                <span className={`text-xs font-bold px-2 py-1 rounded-lg ${label==='א'?(isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-100 text-blue-700'):(isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-200 text-slate-600')}`}>תקופה {label}</span>
+                <div className="flex items-center justify-between mt-3">
+                  <div>
+                    <p className={`text-xs mb-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>כמות שנמכרה</p>
+                    <span className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>{data.qty.toLocaleString()}</span>
+                  </div>
+                  <div className="text-left">
+                    <p className={`text-xs mb-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>הכנסה</p>
+                    <span className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>{formatShort(data.revenue)}</span>
+                  </div>
+                </div>
+              </div>
+            ))}
+          </div>
+          <div className={`flex items-center justify-center gap-2 px-4 py-2.5 rounded-xl mb-5 text-sm font-bold ${procCompareStats.qtyDelta>=0?(isDarkMode?'bg-emerald-500/10 text-emerald-300':'bg-emerald-50 text-emerald-700'):(isDarkMode?'bg-red-500/10 text-red-300':'bg-red-50 text-red-700')}`}>
+            {procCompareStats.qtyDelta>=0?<ArrowUpRight className="w-4 h-4"/>:<ArrowDownRight className="w-4 h-4"/>}
+            הביקוש (כמות) {procCompareStats.qtyDelta>=0?'עלה':'ירד'} ב-{Math.abs(procCompareStats.qtyDelta).toFixed(0)}% בתקופה א' לעומת ב'
+          </div>
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+            {[['א',procCompareStats.a],['ב',procCompareStats.b]].map(([label,data])=>(
+              <div key={label}>
+                <p className={`text-xs font-bold mb-2 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>מוצרים מובילים בכמות — תקופה {label}</p>
+                {data.top.length===0 ? <p className={`text-xs ${isDarkMode?'text-slate-600':'text-slate-400'}`}>אין נתונים</p> : (
+                  <div className="space-y-1.5">
+                    {data.top.map((t,i) => (
+                      <div key={i} className={`flex items-center justify-between text-xs px-3 py-2 rounded-lg ${isDarkMode?'bg-slate-700/30':'bg-slate-50'}`}>
+                        <span className={`truncate ${isDarkMode?'text-slate-300':'text-slate-700'}`}>{t.name}</span>
+                        <span className={`font-bold shrink-0 ${isDarkMode?'text-blue-400':'text-blue-600'}`}>{t.qty.toLocaleString()} יח'</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* ABC-XYZ Legend */}
       {showLegend && (
@@ -3872,6 +4105,12 @@ const renderProductRow = (p) => {
               {exporting ? <Loader2 className="w-3.5 h-3.5 animate-spin"/> : <Download className="w-3.5 h-3.5"/>}
               {exporting ? 'מכין...' : 'ייצוא Excel'}
             </button>
+            <button onClick={generatePDFReport} disabled={pdfGenerating}
+              className={`flex items-center gap-2 px-3 py-2 rounded-xl text-xs font-medium border transition-colors disabled:opacity-50 ${isDarkMode?'bg-red-900/20 border-red-800 text-red-400 hover:bg-red-900/40':'bg-red-50 text-red-700 border-red-200 hover:bg-red-100'}`}
+            >
+              {pdfGenerating ? <Loader2 className="w-3.5 h-3.5 animate-spin"/> : <FileText className="w-3.5 h-3.5"/>}
+              {pdfGenerating ? 'מכין...' : 'דוח PDF למנהל'}
+            </button>
           </div>
         </div>
 
@@ -4458,6 +4697,22 @@ const App = () => {
       s2.src = 'https://cdn.jsdelivr.net/npm/exceljs@4.4.0/dist/exceljs.min.js';
       s2.async = true;
       document.body.appendChild(s2);
+    }
+    // jsPDF for the manager PDF report
+    if (!window.jspdf) {
+      const s3 = document.createElement('script');
+      s3.src = 'https://cdnjs.cloudflare.com/ajax/libs/jspdf/2.5.1/jspdf.umd.min.js';
+      s3.async = true;
+      document.body.appendChild(s3);
+    }
+    // html2canvas — jsPDF's built-in fonts have no Hebrew glyphs, so the PDF
+    // report is built by rendering a styled HTML element and rasterizing it
+    // into the PDF as an image instead, which preserves Hebrew/RTL correctly.
+    if (!window.html2canvas) {
+      const s4 = document.createElement('script');
+      s4.src = 'https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js';
+      s4.async = true;
+      document.body.appendChild(s4);
     }
   }, []);
 
