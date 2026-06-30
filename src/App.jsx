@@ -289,7 +289,7 @@ const KPICard = ({ title, value, formatted, subtext, icon: Icon, color, trend, s
 
 // Overview Dashboard Page
 // ─── CUSTOMERS PAGE ─────────────────────────────────────
-const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUploadMonthly, onUploadProduct, onClearMonthly, onClearProduct, loading, excludeCurrentMonth }) => {
+const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUploadMonthly, onUploadProduct, onClearMonthly, onClearProduct, loading, uploadError, excludeCurrentMonth }) => {
   const [search, setSearch] = useState('');
   const [sortConfig, setSortConfig] = useState({ key:'totalRevenue', direction:'desc' });
   const [expandedCustomer, setExpandedCustomer] = useState(null);
@@ -501,7 +501,14 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
   const hasAnyData = monthlyData.length>0 || productData.length>0;
 
   const uploadCards = (
-    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+    <div className="space-y-3">
+      {uploadError && (
+        <div className={`flex items-start gap-2 px-4 py-3 rounded-xl text-xs font-medium ${isDarkMode?'bg-red-500/10 text-red-300 border border-red-500/20':'bg-red-50 text-red-700 border border-red-200'}`}>
+          <TriangleAlert className="w-4 h-4 shrink-0 mt-0.5"/>
+          <span>{uploadError.text}</span>
+        </div>
+      )}
+      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
       {[
         { label:'מכירות ללקוח בחתך חודשי', sub:'מגמה, נטישה, לקוחות חדשים', fileName:fileNames.monthly, onUpload:onUploadMonthly, onClear:onClearMonthly, isLoading:loading.monthly, count:monthlyData.length },
         { label:'מכירות ללקוח לפי מוצר', sub:'תמהיל מוצרים, Cross-sell', fileName:fileNames.product, onUpload:onUploadProduct, onClear:onClearProduct, isLoading:loading.product, count:productData.length },
@@ -526,6 +533,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
           )}
         </div>
       ))}
+      </div>
     </div>
   );
 
@@ -1517,6 +1525,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
   const [editingMOQ, setEditingMOQ] = useState(null);
   const [editingLeadTime, setEditingLeadTime] = useState(null); // supplier name being edited
   const [invLoading, setInvLoading] = useState(false);
+  const [invUploadError, setInvUploadError] = useState(null);
   const [exporting, setExporting] = useState(false);
   const [invFileName, setInvFileName] = useState(() => localStorage.getItem('inventoryFileName')||'');
   const [importStats, setImportStats] = useState(null);
@@ -1701,13 +1710,23 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
         if (item.currency) ncur[k] = item.currency;
       });
       setStockMap(ns); setCostMap(nc); setMinStockMap(nm); setSupplierMap(nsup); setMoqMap(nmoq); setCurrencyMap(ncur);
-      localStorage.setItem('procurementStock', JSON.stringify(ns));
-      localStorage.setItem('procurementCost', JSON.stringify(nc));
-      localStorage.setItem('procurementMinStock', JSON.stringify(nm));
-      localStorage.setItem('procurementSupplier', JSON.stringify(nsup));
-      localStorage.setItem('procurementMOQ', JSON.stringify(nmoq));
-      localStorage.setItem('procurementCurrency', JSON.stringify(ncur));
-      localStorage.setItem('inventoryFileName', file.name);
+      // Same class of failure as the customer-file uploads: writing this much
+      // data can hit the browser's storage quota. If it does, the in-memory
+      // state above still updates (so the table looks fine right now), but
+      // without a successful write here it's silently lost on next refresh —
+      // so any failure must be surfaced, not swallowed.
+      try {
+        localStorage.setItem('procurementStock', JSON.stringify(ns));
+        localStorage.setItem('procurementCost', JSON.stringify(nc));
+        localStorage.setItem('procurementMinStock', JSON.stringify(nm));
+        localStorage.setItem('procurementSupplier', JSON.stringify(nsup));
+        localStorage.setItem('procurementMOQ', JSON.stringify(nmoq));
+        localStorage.setItem('procurementCurrency', JSON.stringify(ncur));
+        localStorage.setItem('inventoryFileName', file.name);
+        setInvUploadError(null);
+      } catch {
+        setInvUploadError('הקובץ נטען למסך אבל לא נשמר בדפדפן — כנראה אחסון הדפדפן מלא. פנה מקום ונסה שוב, אחרת המידע ייעלם ברענון.');
+      }
       setInvFileName(file.name);
       const withQty = parsed.filter(p=>p.quantity!==null).length;
       const withCost = parsed.filter(p=>p.cost!==null).length;
@@ -1716,7 +1735,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
       setImportStats({ total: parsed.length, withQty, withCost, withMinStock });
       setInvSlots(prev => {
         const next = { ...prev, [slotKey]: { name: file.name, total: parsed.length, withQty, withCost, withMinStock, withSupplier, importedAt: Date.now() } };
-        localStorage.setItem('procurementInvSlots', JSON.stringify(next));
+        try { localStorage.setItem('procurementInvSlots', JSON.stringify(next)); } catch { setInvUploadError('הקובץ נטען למסך אבל לא נשמר בדפדפן — כנראה אחסון הדפדפן מלא. פנה מקום ונסה שוב, אחרת המידע ייעלם ברענון.'); }
         return next;
       });
       setShowBanner(true);
@@ -2649,6 +2668,12 @@ const renderProductRow = (p) => {
         {/* Inventory upload — two independent, optional slots */}
         <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
           <h3 className={`font-bold text-sm mb-3 flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Package className="w-4 h-4 text-amber-500"/> מלאי נוכחי</h3>
+          {invUploadError && (
+            <div className={`flex items-start gap-2 px-3 py-2.5 rounded-xl text-xs font-medium mb-3 ${isDarkMode?'bg-red-500/10 text-red-300 border border-red-500/20':'bg-red-50 text-red-700 border border-red-200'}`}>
+              <TriangleAlert className="w-4 h-4 shrink-0 mt-0.5"/>
+              <span>{invUploadError}</span>
+            </div>
+          )}
           <div className="space-y-3">
             {[
               { key:'product', label:'מלאי נוכחי לפי מוצר', sub:'יתרות, מק"ט, כמות' },
@@ -4225,6 +4250,7 @@ const App = () => {
 
   // ─── Customer file uploads (independent, optional) ───
   const [customerUploadLoading, setCustomerUploadLoading] = useState({ monthly:false, product:false });
+  const [customerUploadError, setCustomerUploadError] = useState(null); // {slot, text}
   const readXlsxRows = (file) => new Promise((resolve, reject) => {
     if (!window.XLSX) { reject(new Error('XLSX not loaded')); return; }
     const r = new FileReader();
@@ -4240,13 +4266,22 @@ const App = () => {
   const handleCustomerMonthlyUpload = async (e) => {
     const file = e.target.files[0]; if (!file) return;
     setCustomerUploadLoading(p=>({...p, monthly:true}));
+    setCustomerUploadError(null);
     try {
       const rows = await readXlsxRows(file);
       const parsed = parseCustomerMonthlyFile(rows);
       setCustomerMonthlyData(parsed);
       setCustomerMonthlyFileName(file.name);
-      localStorage.setItem('customerMonthlyData', JSON.stringify(parsed));
-      localStorage.setItem('customerMonthlyFileName', file.name);
+      // Persisting to localStorage can fail independently of parsing (most often
+      // the browser's storage quota being full) — that must NOT be silently
+      // swallowed, or the data looks fine on screen right now but is actually
+      // gone on next refresh/export, with no warning at all.
+      try {
+        localStorage.setItem('customerMonthlyData', JSON.stringify(parsed));
+        localStorage.setItem('customerMonthlyFileName', file.name);
+      } catch {
+        setCustomerUploadError({ slot:'monthly', text:'הקובץ נטען למסך אבל לא נשמר בדפדפן — כנראה אחסון הדפדפן מלא. פנה מקום (למשל נקה נתונים ישנים) ונסה שוב, אחרת המידע ייעלם ברענון.' });
+      }
     } catch {}
     setCustomerUploadLoading(p=>({...p, monthly:false}));
     e.target.value = '';
@@ -4254,13 +4289,18 @@ const App = () => {
   const handleCustomerProductUpload = async (e) => {
     const file = e.target.files[0]; if (!file) return;
     setCustomerUploadLoading(p=>({...p, product:true}));
+    setCustomerUploadError(null);
     try {
       const rows = await readXlsxRows(file);
       const parsed = parseCustomerProductFile(rows);
       setCustomerProductData(parsed);
       setCustomerProductFileName(file.name);
-      localStorage.setItem('customerProductData', JSON.stringify(parsed));
-      localStorage.setItem('customerProductFileName', file.name);
+      try {
+        localStorage.setItem('customerProductData', JSON.stringify(parsed));
+        localStorage.setItem('customerProductFileName', file.name);
+      } catch {
+        setCustomerUploadError({ slot:'product', text:'הקובץ נטען למסך אבל לא נשמר בדפדפן — כנראה אחסון הדפדפן מלא. פנה מקום (למשל נקה נתונים ישנים) ונסה שוב, אחרת המידע ייעלם ברענון.' });
+      }
     } catch {}
     setCustomerUploadLoading(p=>({...p, product:false}));
     e.target.value = '';
@@ -4992,6 +5032,7 @@ const App = () => {
               onClearMonthly={clearCustomerMonthly}
               onClearProduct={clearCustomerProduct}
               loading={customerUploadLoading}
+              uploadError={customerUploadError}
               excludeCurrentMonth={excludeCurrentMonth}
             />
           )}
