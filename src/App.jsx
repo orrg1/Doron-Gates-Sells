@@ -82,10 +82,10 @@ const formatUnitCost = (amount, code) => {
 // ─── PROCUREMENT TABLE COLUMN RESIZE ───────────────────
 // Shared between the main "by product" table and every per-supplier table,
 // so a manual resize (or auto-fit) looks the same everywhere.
-const PROC_COL_KEYS = ['name','supplier','abc','avg','trend','stock','coverage','order'];
-const PROC_COL_LABELS = { name:'מוצר', supplier:'ספק', abc:'ABC', avg:'ממוצע / תחזית', trend:'מגמה', stock:'מלאי עכשיו', coverage:'כיסוי', order:'להזמין' };
-const PROC_COL_DEFAULTS = { name:220, supplier:140, abc:70, avg:160, trend:90, stock:150, coverage:130, order:150 };
-const PROC_COL_MIN = { name:120, supplier:60, abc:50, avg:90, trend:60, stock:90, coverage:80, order:90 };
+const PROC_COL_KEYS = ['name','supplier','abc','riskScore','avg','trend','stock','coverage','order'];
+const PROC_COL_LABELS = { name:'מוצר', supplier:'ספק', abc:'ABC', riskScore:'ציון סיכון', avg:'ממוצע / תחזית', trend:'מגמה', stock:'מלאי עכשיו', coverage:'כיסוי', order:'להזמין' };
+const PROC_COL_DEFAULTS = { name:220, supplier:140, abc:70, riskScore:110, avg:160, trend:90, stock:150, coverage:130, order:150 };
+const PROC_COL_MIN = { name:120, supplier:60, abc:50, riskScore:80, avg:90, trend:60, stock:90, coverage:80, order:90 };
 
 let _measureCanvas = null;
 const measureTextWidth = (text, font) => {
@@ -102,6 +102,7 @@ const getProcColValue = (key, p) => {
     case 'name':     return p.name||'';
     case 'supplier':  return p.supplier||'';
     case 'abc':      return p.abcXyz||p.abc||'';
+    case 'riskScore': return p.riskScore!=null?p.riskScore.toString():'';
     case 'avg':      return `${p.avgMonthly.toFixed(1)} יח'`;
     case 'trend':    return p.trend?`${Math.abs(p.trend).toFixed(0)}%`:'';
     case 'stock':    return p.currentStock!=null?p.currentStock.toLocaleString():'';
@@ -112,7 +113,7 @@ const getProcColValue = (key, p) => {
 };
 // Extra px to account for icons/badges/padding that surround the text but
 // aren't captured by a plain text measurement (varies per column).
-const PROC_COL_EXTRA_PADDING = { name:70, supplier:30, abc:40, avg:40, trend:30, stock:40, coverage:40, order:50 };
+const PROC_COL_EXTRA_PADDING = { name:70, supplier:30, abc:40, riskScore:40, avg:40, trend:30, stock:40, coverage:40, order:50 };
 
 // ─── IndexedDB storage for large datasets ──────────────────────
 // localStorage caps out at ~5-10MB per origin (hard browser limit, not
@@ -166,6 +167,19 @@ const idbDelete = async (key) => {
 };
 // Keys that live in IndexedDB instead of localStorage (the heavy datasets).
 const IDB_KEYS = ['dashboardSalesData','dashboardSuppliersData','customerMonthlyData','customerProductData'];
+
+// ─── Soft-delete (trash) for the heavy datasets ─────────────────
+// Clearing a whole tab (sales/suppliers/customers) is one click and easy to
+// hit by accident — a wrong tab, a wrong button. Before actually clearing,
+// the previous value is stashed under `_trash_<key>` for 7 days (purged by
+// the app-load effect), so "Restore" is possible without re-importing from
+// Priority. Not used for tiny per-row deletes (e.g. one open order) — only
+// for whole-dataset clears, where re-import is the expensive alternative.
+const trashSet = async (key, value, extra) => {
+  try { await idbSet('_trash_' + key, { value, extra, deletedAt: Date.now() }); } catch { /* best-effort safety net only */ }
+};
+const trashGet = async (key) => { try { return await idbGet('_trash_' + key); } catch { return null; } };
+const trashClear = async (key) => { try { await idbDelete('_trash_' + key); } catch { /* best-effort */ } };
 
 const excelDateToJS = (serial) => new Date((Math.floor(serial - 25569)) * 86400 * 1000);
 
@@ -346,6 +360,8 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
   const [search, setSearch] = useState('');
   const [sortConfig, setSortConfig] = useState({ key:'totalRevenue', direction:'desc' });
   const [expandedCustomer, setExpandedCustomer] = useState(null);
+  const [customerPage, setCustomerPage] = useState(1);
+  const customerItemsPerPage = 50;
   const [periodFilter, setPeriodFilter] = useState({ start:'', end:'' });
   const availableMonths = useMemo(() => [...new Set(monthlyData.map(d=>d.date))].sort((a,b)=>getDateVal(a)-getDateVal(b)), [monthlyData]);
   useEffect(() => {
@@ -394,7 +410,16 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
       const last2Sum = effectiveMonths.slice(-2).reduce((s,m)=>s+(c.monthly[m]||0),0);
       const isChurned = !isNew && last2Sum === 0 && months.length>0;
       const status = isChurned ? 'churned' : isNew ? 'new' : 'active';
-      return { ...c, months, totalRevenue, avgMonthly, firstMonth, lastActiveMonth, trend, status };
+      // Early warning, before churn: 3 straight *effective* months of decline
+      // (each strictly lower than the one before, last one still >0 revenue —
+      // a customer who already hit 0 belongs in "churned" above, not here).
+      // Combined with ABC (computed in the pass below) so the alert only
+      // fires for revenue-significant customers worth calling, not noise.
+      const last3Eff = effMonthsForCustomer.slice(-3);
+      const decliningStreak = last3Eff.length===3
+        && last3Eff.every((m,i)=> i===0 || c.monthly[m] < c.monthly[last3Eff[i-1]])
+        && c.monthly[last3Eff[2]] > 0;
+      return { ...c, months, totalRevenue, avgMonthly, firstMonth, lastActiveMonth, trend, status, decliningStreak };
     });
     const totalAll = list.reduce((s,c)=>s+c.totalRevenue,0);
     const sorted = [...list].sort((a,b)=>b.totalRevenue-a.totalRevenue);
@@ -404,6 +429,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
       cumulative += pct;
       c.revPct = pct;
       c.abc = cumulative<=80 ? 'A' : cumulative<=95 ? 'B' : 'C';
+      c.atRisk = c.status==='active' && c.decliningStreak && (c.abc==='A'||c.abc==='B');
     });
     return sorted;
   }, [filteredMonthlyData, excludeCurrentMonth]);
@@ -462,9 +488,10 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
     const totalRevenue = customers.reduce((s,c)=>s+c.totalRevenue,0);
     const newCount = customers.filter(c=>c.status==='new').length;
     const churnedCount = customers.filter(c=>c.status==='churned').length;
+    const atRiskCount = customers.filter(c=>c.atRisk).length;
     const top1Pct = customers[0]?.revPct||0;
     const top5Pct = customers.slice(0,5).reduce((s,c)=>s+c.revPct,0);
-    return { totalRevenue, newCount, churnedCount, top1Pct, top5Pct, count: customers.length };
+    return { totalRevenue, newCount, churnedCount, atRiskCount, top1Pct, top5Pct, count: customers.length };
   }, [customers]);
 
   const filtered = useMemo(() => {
@@ -479,6 +506,9 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
       return sortConfig.direction==='asc'?(va-vb):(vb-va);
     });
   }, [customers, search, sortConfig]);
+  useEffect(() => setCustomerPage(1), [search, sortConfig, customers]);
+  const customerTotalPages = Math.ceil(filtered.length / customerItemsPerPage) || 1;
+  const paginatedCustomers = useMemo(() => filtered.slice((customerPage-1)*customerItemsPerPage, customerPage*customerItemsPerPage), [filtered, customerPage]);
 
   const reqSort = (key) => setSortConfig(p=>({ key, direction:p.key===key&&p.direction==='asc'?'desc':'asc' }));
 
@@ -671,11 +701,12 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
             </div>
           )}
 
-          <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+          <div className="grid grid-cols-2 lg:grid-cols-6 gap-4">
             <KPICard title="לקוחות" formatted={kpis.count.toLocaleString()} icon={User} color="purple" isDarkMode={isDarkMode}/>
             <KPICard title="הכנסה כוללת" formatted={formatShort(kpis.totalRevenue)} icon={DollarSign} color="blue" isDarkMode={isDarkMode}/>
             <KPICard title="לקוחות חדשים" formatted={kpis.newCount.toString()} icon={ArrowUpRight} color="green" isDarkMode={isDarkMode}/>
             <KPICard title="לקוחות שנטשו" formatted={kpis.churnedCount.toString()} icon={ArrowDownRight} color="red" subtext={excludeCurrentMonth?"0 הכנסה ב-2 חודשים (לא כולל החודש הנוכחי)":"0 הכנסה ב-2 החודשים האחרונים"} isDarkMode={isDarkMode}/>
+            <KPICard title="בסיכון נטישה" formatted={kpis.atRiskCount.toString()} icon={TriangleAlert} color="amber" subtext="לקוחות A/B בירידה 3 חודשים רצופים" isDarkMode={isDarkMode}/>
             <KPICard title="ריכוזיות (5 מובילים)" formatted={`${kpis.top5Pct.toFixed(0)}%`} icon={TriangleAlert} color={kpis.top5Pct>50?'amber':'cyan'} subtext={`לקוח בודד: ${kpis.top1Pct.toFixed(0)}%`} isDarkMode={isDarkMode}/>
           </div>
 
@@ -734,7 +765,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
                   </tr>
                 </thead>
                 <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-                  {filtered.map(c => {
+                  {paginatedCustomers.map(c => {
                     const isOpen = expandedCustomer===c.name;
                     const myProducts = productsByCustomer[c.name];
                     return (
@@ -749,7 +780,14 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
                           <td className="px-4 py-3">
                             {CustomerTrendButton(c)}
                           </td>
-                          <td className="px-4 py-3">{statusBadge(c.status)}</td>
+                          <td className="px-4 py-3 flex items-center gap-1.5 flex-wrap">
+                            {statusBadge(c.status)}
+                            {c.atRisk && (
+                              <span title="ירידה 3 חודשים רצופים בהכנסה — כדאי ליצור קשר לפני שהלקוח נוטש לגמרי" className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${isDarkMode?'bg-amber-500/20 text-amber-300':'bg-amber-100 text-amber-700'}`}>
+                                <TriangleAlert className="w-2.5 h-2.5"/>בסיכון
+                              </span>
+                            )}
+                          </td>
                           {productData.length>0 && (
                             <td className="px-4 py-3">
                               {myProducts?.length>0 && (
@@ -804,6 +842,14 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
                   {filtered.length===0 && <tr><td colSpan={7} className={`px-4 py-16 text-center text-sm ${isDarkMode?'text-slate-600':'text-slate-400'}`}>לא נמצאו לקוחות</td></tr>}
                 </tbody>
               </table>
+            </div>
+            <div className={`px-5 py-3.5 border-t flex justify-between items-center text-xs ${isDarkMode?'bg-slate-900/30 border-slate-700 text-slate-500':'bg-slate-50 border-slate-100 text-slate-500'}`}>
+              <span>מציג {filtered.length>0?(customerPage-1)*customerItemsPerPage+1:0}–{Math.min(customerPage*customerItemsPerPage,filtered.length)} מתוך {filtered.length.toLocaleString()}</span>
+              <div className="flex items-center gap-2">
+                <button onClick={()=>setCustomerPage(p=>Math.max(1,p-1))} disabled={customerPage===1} className={`p-1.5 rounded-lg disabled:opacity-30 ${isDarkMode?'hover:bg-slate-700':'hover:bg-slate-200'}`}><ChevronRight className="w-3.5 h-3.5"/></button>
+                <span className="font-mono px-2">{customerPage}/{customerTotalPages}</span>
+                <button onClick={()=>setCustomerPage(p=>Math.min(customerTotalPages,p+1))} disabled={customerPage===customerTotalPages} className={`p-1.5 rounded-lg disabled:opacity-30 ${isDarkMode?'hover:bg-slate-700':'hover:bg-slate-200'}`}><ChevronLeft className="w-3.5 h-3.5"/></button>
+              </div>
             </div>
           </div>
         </>
@@ -1695,6 +1741,37 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
   });
   const [ordersFileName, setOrdersFileName] = useState(() => localStorage.getItem('ordersFileName')||'');
   const [ordersSortConfig, setOrdersSortConfig] = useState({ key:null, direction:'asc' });
+  // ── Cash flow forecast — buckets open orders by expected delivery month ──
+  // Uses the "value" field already imported from Priority's "שווי יתרה"
+  // column (or entered manually), which the rest of this view already
+  // treats as ₪ (see the summary bar above) — no new currency assumption
+  // introduced here, just the same one made explicit as a forecast.
+  const parseOrderDate = (s) => {
+    if (!s) return null;
+    if (s.includes('/')) { const [d,m,y] = s.split('/').map(Number); return (d&&m&&y) ? new Date(y,m-1,d) : null; }
+    if (s.includes('-')) { const [y,m,d] = s.split('-').map(Number); return (y&&m&&d) ? new Date(y,m-1,d) : null; }
+    return null;
+  };
+  const cashFlowForecast = useMemo(() => {
+    const active = openOrders.filter(o => o.status !== 'received');
+    const buckets = {};
+    let noDateValue = 0, noDateCount = 0;
+    active.forEach(o => {
+      const dt = parseOrderDate(o.expectedDate);
+      if (!dt) { noDateValue += o.value||0; noDateCount++; return; }
+      const key = `${dt.getFullYear()}-${String(dt.getMonth()).padStart(2,'0')}`;
+      if (!buckets[key]) buckets[key] = { key, year:dt.getFullYear(), monthIdx:dt.getMonth(), value:0, count:0 };
+      buckets[key].value += o.value||0;
+      buckets[key].count++;
+    });
+    const sorted = Object.values(buckets).sort((a,b)=>a.key.localeCompare(b.key));
+    let cumulative = 0;
+    const data = sorted.map(b => {
+      cumulative += b.value;
+      return { month: `${MONTH_ABBR_LABELS_SHORT[b.monthIdx]}-${String(b.year).slice(2)}`, value: Math.round(b.value), cumulative: Math.round(cumulative), count: b.count };
+    });
+    return { data, noDateValue: Math.round(noDateValue), noDateCount, totalValue: Math.round(active.reduce((s,o)=>s+(o.value||0),0)) };
+  }, [openOrders]);
   const [showAddOrder, setShowAddOrder] = useState(false);
   const [editOrderId, setEditOrderId] = useState(null);
   const [orderForm, setOrderForm] = useState({ productKey:'', productName:'', supplier:'', orderedQty:'', orderDate:'', expectedDate:'', status:'ordered', poNumber:'', notes:'' });
@@ -1965,6 +2042,17 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     localStorage.removeItem('procurementImportedFiles');
   };
 
+  // ── Supplier concentration — what share of the SKU catalog (that has a
+  // supplier assigned at all) depends on the same supplier. Computed from
+  // supplierMap directly (not from `products`) to avoid a circular
+  // dependency, since this feeds into the risk score computed below. ──
+  const supplierConcentration = useMemo(() => {
+    const counts = {};
+    let totalAssigned = 0;
+    Object.values(supplierMap).forEach(s => { if (!s) return; counts[s] = (counts[s]||0) + 1; totalAssigned++; });
+    return { counts, totalAssigned };
+  }, [supplierMap]);
+
   const products = useMemo(() => {
     if (!salesData.length) return [];
     const map = {};
@@ -2135,9 +2223,30 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
           : coverageMonths < effectiveLeadTime ? 'critical'
           : (minStock ? currentStock < minStock : coverageMonths < monthsToStock) ? 'low' : 'ok')
         : 'unknown';
-      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, suggestedOrderRaw, orderCost, risk };
+
+      // ── Combined risk score (0-100) — a single number that folds together
+      // the five factors that matter for procurement risk, so scanning 1000
+      // rows for "what needs attention" doesn't require reading five columns
+      // at once. Weights: coverage 40% (the core stockout signal), demand
+      // volatility 20% (how much the forecast itself can be trusted), XYZ
+      // 15% (statistical unpredictability), lead time 15% (how much runway
+      // a supply hiccup costs you), supplier concentration 10% (single point
+      // of failure). This is a prioritization aid, not a forecast — a high
+      // score means "look at this first", not "this WILL run out".
+      const coverageRiskScore = { critical:100, low:60, ok:12, unknown:45 }[risk];
+      const volatilityRiskScore = Math.min(100, Math.abs(trend||0)); // big swings (either direction) make the forecast less trustworthy
+      const xyzRiskScore = { X:10, Y:50, Z:100 }[xyz] ?? 50;
+      const leadTimeRiskScore = Math.min(100, (effectiveLeadTime/60)*100); // 60+ days lead time treated as max risk
+      const supplierRiskScore = (supplier && supplierConcentration.totalAssigned>0)
+        ? Math.min(100, (supplierConcentration.counts[supplier]||0) / supplierConcentration.totalAssigned * 100 * 3) // ×3: even a supplier holding ~33% of the catalog should read as high concentration risk, not a middling score
+        : 0;
+      const riskScore = Math.round(
+        coverageRiskScore*0.40 + volatilityRiskScore*0.20 + xyzRiskScore*0.15 + leadTimeRiskScore*0.15 + supplierRiskScore*0.10
+      );
+
+      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, suggestedOrderRaw, orderCost, risk, riskScore };
     });
-  }, [salesData, stockMap, costMap, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, avgWindowMonths, excludeCurrentMonth]);
+  }, [salesData, stockMap, costMap, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, avgWindowMonths, excludeCurrentMonth, supplierConcentration]);
 
   const filtered = useMemo(() => {
     let data = products;
@@ -2580,7 +2689,7 @@ const SeasonalityButton = (p) => (
     <tr>
       {PROC_COL_KEYS.map(key => {
         const extraCls = key==='order' ? `font-bold ${isDarkMode?'text-blue-400 hover:text-blue-300':'text-blue-700 hover:text-blue-600'}` : '';
-        const sortKeyMap = { name:'name', supplier:'supplier', abc:'abc', avg:'avgMonthly', trend:'trend', stock:null, coverage:'coverageDays', order:'suggestedOrder' };
+        const sortKeyMap = { name:'name', supplier:'supplier', abc:'abc', riskScore:'riskScore', avg:'avgMonthly', trend:'trend', stock:null, coverage:'coverageDays', order:'suggestedOrder' };
         const sortKey = sortKeyMap[key];
         return (
           <th key={key}
@@ -2685,6 +2794,24 @@ const SeasonalityButton = (p) => (
       </span>
     );
   };
+  // Combined risk score badge — color-coded 0-100, with a tooltip that spells
+  // out the weighting so the number isn't a black box.
+  const RiskScoreBadge = ({ p }) => {
+    if (p.riskScore==null) return <span className={`text-xs ${isDarkMode?'text-slate-600':'text-slate-400'}`}>—</span>;
+    const s = p.riskScore;
+    const color = s>=70 ? 'red' : s>=40 ? 'amber' : 'emerald';
+    const cls = {
+      red:    isDarkMode?'bg-red-500/15 text-red-300 border-red-500/30':'bg-red-50 text-red-700 border-red-200',
+      amber:  isDarkMode?'bg-amber-500/15 text-amber-300 border-amber-500/30':'bg-amber-50 text-amber-700 border-amber-200',
+      emerald:isDarkMode?'bg-emerald-500/15 text-emerald-300 border-emerald-500/30':'bg-emerald-50 text-emerald-700 border-emerald-200',
+    }[color];
+    return (
+      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-bold border tabular-nums ${cls}`}
+        title="ציון סיכון משוקלל: כיסוי מלאי (40%) · תנודתיות ביקוש (20%) · יציבות XYZ (15%) · זמן אספקה (15%) · ריכוזיות ספק (10%). ציון גבוה = כדאי לבדוק קודם, לא תחזית ודאית.">
+        {s}
+      </span>
+    );
+  };
 const renderProductRow = (p) => {
                 const isEditing = editingStock===p.key;
                 const rowBg = p.risk==='critical'?(isDarkMode?'bg-red-900/10':'bg-red-50/60'):p.risk==='low'?(isDarkMode?'bg-amber-900/5':'bg-amber-50/30'):'';
@@ -2734,6 +2861,7 @@ const renderProductRow = (p) => {
                       {p.currency && p.currency!=='ILS' && <span className={`text-[10px] ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.currency}</span>}
                     </td>
                     <td className="px-4 py-3.5"><ABCBadge cls={p.abc} xyz={p.xyz} abcXyz={p.abcXyz}/></td>
+                    <td className="px-4 py-3.5"><RiskScoreBadge p={p}/></td>
                     {/* Avg + Forecast combined */}
                     <td className="px-4 py-3">
                       <div className="flex flex-col gap-0.5">
@@ -3562,6 +3690,47 @@ const renderProductRow = (p) => {
                   )}
                 </div>
               </div>
+              {/* Cash flow forecast — expected payment load by month, from open orders */}
+              {cashFlowForecast.data.length > 0 && (
+                <div className={`px-5 py-4 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+                  <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                    <h4 className={`text-sm font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}>
+                      <Wallet className="w-4 h-4 text-emerald-500"/>תחזית תזרים — הזמנות פתוחות לפי חודש אספקה צפוי
+                    </h4>
+                    <span className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+                      סה"כ: <b className={isDarkMode?'text-emerald-400':'text-emerald-600'}>₪{cashFlowForecast.totalValue.toLocaleString()}</b>
+                      {cashFlowForecast.noDateCount>0 && <span className="mr-2 opacity-70">· {cashFlowForecast.noDateCount} הזמנות ללא תאריך אספקה (₪{cashFlowForecast.noDateValue.toLocaleString()}, לא מופיעות בגרף)</span>}
+                    </span>
+                  </div>
+                  <div style={{width:'100%', height:180}}>
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={cashFlowForecast.data} margin={{top:5,right:5,bottom:0,left:-15}}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode?'#334155':'#e2e8f0'} vertical={false}/>
+                        <XAxis dataKey="month" tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false}/>
+                        <YAxis tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false} width={50} tickFormatter={v=>formatShort(v)}/>
+                        <RechartsTooltip
+                          content={({active, payload, label}) => {
+                            if (!active || !payload?.length) return null;
+                            const row = payload[0]?.payload; if (!row) return null;
+                            return (
+                              <div style={{background:isDarkMode?'#1e293b':'#fff', border:`1px solid ${isDarkMode?'#334155':'#e2e8f0'}`, borderRadius:8, fontSize:12, padding:'8px 10px', direction:'rtl'}}>
+                                <p style={{color:isDarkMode?'#e2e8f0':'#1e293b', fontWeight:'bold', marginBottom:4}}>{label}</p>
+                                <p style={{color:isDarkMode?'#cbd5e1':'#334155'}}>{row.count} הזמנות · {formatCurrency(row.value)}</p>
+                                <p style={{color:isDarkMode?'#6ee7b7':'#059669', fontSize:11, marginTop:2}}>מצטבר: {formatCurrency(row.cumulative)}</p>
+                              </div>
+                            );
+                          }}
+                        />
+                        <Bar dataKey="value" name="שווי חודשי" fill="#3b82f6" radius={[4,4,0,0]}/>
+                        <Line type="monotone" dataKey="cumulative" name="מצטבר" stroke="#10b981" strokeWidth={2} dot={{r:3}}/>
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                  <p className={`text-[11px] mt-1.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+                    מבוסס על עמודת "שווי יתרה" של כל הזמנה, לפי תאריך האספקה הצפוי · תחזית תכנונית, לא כולל תנאי תשלום/אשראי ספק
+                  </p>
+                </div>
+              )}
               <div className="overflow-x-auto">
                 <table className={`w-full text-sm text-right min-w-[780px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
                   <thead className={`text-[11px] font-semibold uppercase tracking-widest ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
@@ -4122,9 +4291,9 @@ const renderProductRow = (p) => {
             </thead>
             <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
               {visibleProducts.map(renderProductRow)}
-              {!filtered.length&&<tr><td colSpan={8} className={`px-4 py-16 text-center text-sm ${isDarkMode?'text-slate-600':'text-slate-400'}`}>לא נמצאו מוצרים</td></tr>}
+              {!filtered.length&&<tr><td colSpan={9} className={`px-4 py-16 text-center text-sm ${isDarkMode?'text-slate-600':'text-slate-400'}`}>לא נמצאו מוצרים</td></tr>}
               {visibleCount < filtered.length && (
-                <tr ref={loadMoreSentinelRef}><td colSpan={8} className={`px-4 py-4 text-center text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>טוען עוד מוצרים…</td></tr>
+                <tr ref={loadMoreSentinelRef}><td colSpan={9} className={`px-4 py-4 text-center text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>טוען עוד מוצרים…</td></tr>
               )}
             </tbody>
           </table>
@@ -4151,13 +4320,29 @@ const renderProductRow = (p) => {
 
 
 // ─── SETTINGS MODAL ────────────────────────────────────
-const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
+const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode, exchangeRates, onSaveRates }) => {
   const [localKey, setLocalKey] = useState(apiKey);
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
   const [importStatus, setImportStatus] = useState(null); // {type:'success'|'error', text}
+  const [localRates, setLocalRates] = useState({ EUR:'', USD:'' });
+  const [ratesSaved, setRatesSaved] = useState(false);
+  const [trashItems, setTrashItems] = useState([]); // recoverable recently-deleted datasets
 
   useEffect(() => { setLocalKey(apiKey); }, [apiKey, isOpen]);
+  useEffect(() => {
+    if (isOpen) setLocalRates({ EUR: exchangeRates?.EUR ?? '', USD: exchangeRates?.USD ?? '' });
+  }, [isOpen, exchangeRates]);
+
+  const handleSaveRates = () => {
+    const next = {};
+    const eur = parseFloat(localRates.EUR); if (!isNaN(eur) && eur > 0) next.EUR = eur;
+    const usd = parseFloat(localRates.USD); if (!isNaN(usd) && usd > 0) next.USD = usd;
+    try { localStorage.setItem('exchangeRates', JSON.stringify(next)); } catch { /* shown below via state anyway */ }
+    onSaveRates(next);
+    setRatesSaved(true);
+    setTimeout(() => setRatesSaved(false), 1500);
+  };
 
   // All localStorage keys this app writes to — kept as one explicit list so
   // backup/restore is a single, predictable operation instead of needing to
@@ -4172,7 +4357,7 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
     'procurementMOQ','procurementCurrency','procurementLeadTime','procurementColWidths',
     'procurementInvSlots','procurementImportedFiles','inventoryFileName','openOrders','ordersFileName',
     'customerMonthlyFileName','customerProductFileName',
-    'savedViews','excludeCurrentMonth','theme','geminiApiKey',
+    'savedViews','excludeCurrentMonth','theme','geminiApiKey','exchangeRates','lastBackupDate',
   ];
 
   // Storage diagnostic — shows exactly what's eating into storage, split
@@ -4190,6 +4375,7 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
     customerMonthlyData:'מכירות ללקוח בחתך חודשי', customerProductData:'מכירות ללקוח לפי מוצר',
     customerMonthlyFileName:'שם קובץ לקוחות חודשי', customerProductFileName:'שם קובץ לקוחות-מוצר',
     savedViews:'תצוגות שמורות', excludeCurrentMonth:'הגדרת חודש נוכחי', theme:'ערכת נושא', geminiApiKey:'מפתח Gemini',
+    exchangeRates:'שערי חליפין', lastBackupDate:'תאריך גיבוי אחרון',
   };
   const [showStorageDetail, setShowStorageDetail] = useState(false);
   const [idbUsage, setIdbUsage] = useState({ items: [], totalBytes: 0 });
@@ -4233,8 +4419,15 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
     // Heavy datasets come from IndexedDB and get embedded as actual JS values
     // (not pre-stringified) — JSON.stringify(payload) below serializes the
     // whole thing in one pass either way.
+    // A failed read must NOT silently produce a backup file that's missing
+    // the sales data — the person would only discover that when restoring.
+    const exportFailed = [];
     for (const key of IDB_KEYS) {
-      try { const v = await idbGet(key); if (v !== null) data[key] = v; } catch {}
+      try { const v = await idbGet(key); if (v !== null) data[key] = v; } catch { exportFailed.push(KEY_LABELS[key]||key); }
+    }
+    if (exportFailed.length > 0) {
+      const proceed = window.confirm(`שים לב: הנתונים הבאים לא נקראו ולא ייכללו בקובץ הגיבוי:\n• ${exportFailed.join('\n• ')}\n\nלהמשיך בכל זאת בגיבוי חלקי?`);
+      if (!proceed) { setImportStatus({ type:'error', text:'הייצוא בוטל — נסה לרענן את הדף ולייצא שוב.' }); return; }
     }
     const payload = { app:'BizDataPro', version:2, exportedAt:new Date().toISOString(), data };
     const blob = new Blob([JSON.stringify(payload)], {type:'application/json;charset=utf-8'});
@@ -4243,6 +4436,9 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
     a.setAttribute('download', 'BizDataPro_גיבוי_'+new Date().toLocaleDateString('he-IL').replace(/\//g,'-')+'.json');
     document.body.appendChild(a); a.click();
     setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 200);
+    // Used by the "back up your data" reminder banner in the header
+    try { localStorage.setItem('lastBackupDate', new Date().toISOString()); } catch { /* reminder metadata only */ }
+    setImportStatus({ type:'success', text:'קובץ הגיבוי נוצר והורד ✓' });
   };
 
   const handleImportAll = (e) => {
@@ -4276,6 +4472,7 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
         }
       }
       if (failed.length === 0) {
+        try { localStorage.setItem('lastBackupDate', new Date().toISOString()); } catch { /* reminder metadata only */ }
         setImportStatus({ type:'success', text:'הנתונים יובאו! טוען מחדש...' });
         setTimeout(() => window.location.reload(), 1200);
       } else {
@@ -4360,6 +4557,33 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode }) => {
               <p>2. לוחצים "Get API Key" → "Create API key"</p>
               <p>3. מעתיקים והודבקים כאן</p>
               <p className="mt-1 opacity-70">Gemini API חינמי עד מגבלה נדיבה מאוד לשימוש אישי.</p>
+            </div>
+          </div>
+
+          {/* Exchange rates — unlocks margin for products whose cost is in EUR/USD */}
+          <div className={`pt-5 border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+            <div className="flex items-center gap-2 mb-2">
+              <DollarSign className={`w-4 h-4 ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}/>
+              <label className={`text-sm font-medium ${isDarkMode?'text-slate-200':'text-slate-700'}`}>שערי חליפין (₪ ליחידת מטבע)</label>
+            </div>
+            <p className={`text-xs leading-relaxed mb-3 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+              מוצרים שהעלות שלהם ב-€ או $ לא נכללים בחישוב הרווח כשאין שער. הזן שער עדכני (מספיק לעדכן פעם בחודש) והרווח יחושב גם להם. השאר ריק כדי לא להמיר.
+            </p>
+            <div className="flex gap-2 items-end">
+              {[['EUR','€ יורו'],['USD','$ דולר']].map(([code,label]) => (
+                <div key={code} className="flex-1">
+                  <label className={`block text-[11px] font-medium mb-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{label}</label>
+                  <input type="number" step="0.01" min="0" dir="ltr" placeholder="—"
+                    value={localRates[code]}
+                    onChange={e=>setLocalRates(p=>({...p,[code]:e.target.value}))}
+                    style={isDarkMode?{background:'#0f172a',color:'#f1f5f9',borderColor:'#334155'}:{}}
+                    className={`w-full px-3 py-2 rounded-xl border text-sm tabular-nums focus:outline-none focus:ring-2 focus:ring-emerald-500 ${isDarkMode?'border-slate-700':'border-slate-200 bg-slate-50'}`}/>
+                </div>
+              ))}
+              <button onClick={handleSaveRates}
+                className={`px-4 py-2 rounded-xl text-sm font-medium transition-all ${ratesSaved?'bg-emerald-500 text-white':(isDarkMode?'bg-emerald-500/15 text-emerald-300 hover:bg-emerald-500/25 border border-emerald-500/30':'bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200')}`}>
+                {ratesSaved ? '✓' : 'שמור שערים'}
+              </button>
             </div>
           </div>
 
@@ -4503,6 +4727,12 @@ const callGemini = async (prompt, apiKey) => {
 const App = () => {
   const [isDarkMode, setIsDarkMode] = useState(() => typeof window!=='undefined' && localStorage.getItem('theme')==='dark');
   const [apiKey, setApiKey] = useState(() => typeof window!=='undefined' ? (localStorage.getItem('geminiApiKey')||'') : '');
+  // Manual exchange rates (₪ per 1 unit of foreign currency) — lets margin be
+  // computed for products whose cost is in EUR/USD instead of blocking them.
+  const [exchangeRates, setExchangeRates] = useState(() => { try { return JSON.parse(localStorage.getItem('exchangeRates')||'{}'); } catch { return {}; } });
+  // Backup reminder — until cloud sync exists, the JSON export is the only
+  // safety net, so the app nudges when it's been 7+ days since the last one.
+  const [backupReminderDays, setBackupReminderDays] = useState(null); // null = hidden; -1 = never backed up; n = days since last
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -4537,6 +4767,7 @@ const App = () => {
   const [salesFileNames, setSalesFileNames] = useState(() => { try { return JSON.parse(localStorage.getItem('salesFileNames')||'[]'); } catch { return []; } });
   const [suppliersFileNames, setSuppliersFileNames] = useState(() => { try { return JSON.parse(localStorage.getItem('suppliersFileNames')||'[]'); } catch { return []; } });
   const [idbReady, setIdbReady] = useState(false);
+  const [idbLoadFailed, setIdbLoadFailed] = useState([]); // IDB_KEYS whose load threw — auto-save is blocked for these
 
   // Load the four heavy datasets from IndexedDB on mount. If they're not there
   // yet but a legacy copy exists in localStorage (from before this migration),
@@ -4547,6 +4778,12 @@ const App = () => {
     let cancelled = false;
     (async () => {
       const setters = { dashboardSalesData:setSalesData, dashboardSuppliersData:setSuppliersData, customerMonthlyData:setCustomerMonthlyData, customerProductData:setCustomerProductData };
+      // Keys whose read from IndexedDB actually FAILED (threw) — as opposed to
+      // simply having no data yet. A failed read must block the auto-save
+      // effects below, or an in-memory empty [] would overwrite real persisted
+      // data on the very next render. This is the data-loss vector the old
+      // silent `catch {}` here used to leave open.
+      const failedKeys = [];
       for (const key of IDB_KEYS) {
         try {
           let value = await idbGet(key);
@@ -4560,9 +4797,16 @@ const App = () => {
             }
           }
           if (!cancelled && value !== null) setters[key](value);
-        } catch {}
+        } catch { failedKeys.push(key); }
       }
-      if (!cancelled) setIdbReady(true);
+      // Purge expired trash (deleted-data safety copies older than 7 days)
+      for (const key of IDB_KEYS) {
+        try {
+          const t = await idbGet('_trash_' + key);
+          if (t?.deletedAt && Date.now() - t.deletedAt > 7*24*60*60*1000) await idbDelete('_trash_' + key);
+        } catch { /* trash cleanup is best-effort only */ }
+      }
+      if (!cancelled) { setIdbLoadFailed(failedKeys); setIdbReady(true); }
     })();
     return () => { cancelled = true; };
   }, []);
@@ -4670,14 +4914,36 @@ const App = () => {
   // stay tiny and stay in localStorage via save().
   useEffect(() => {
     if (!idbReady) return; // avoid overwriting IDB with the initial empty [] before the load effect has run
+    if (idbLoadFailed.includes('dashboardSalesData')) return; // load failed — writing now would overwrite real data with the empty in-memory state
     idbSet('dashboardSalesData', salesData).then(()=>setStorageWarning(false)).catch(()=>setStorageWarning(true));
     save('salesFileNames', salesFileNames);
-  }, [salesData, salesFileNames, idbReady]);
+  }, [salesData, salesFileNames, idbReady, idbLoadFailed]);
   useEffect(() => {
     if (!idbReady) return;
+    if (idbLoadFailed.includes('dashboardSuppliersData')) return;
     idbSet('dashboardSuppliersData', suppliersData).then(()=>setStorageWarning(false)).catch(()=>setStorageWarning(true));
     save('suppliersFileNames', suppliersFileNames);
-  }, [suppliersData, suppliersFileNames, idbReady]);
+  }, [suppliersData, suppliersFileNames, idbReady, idbLoadFailed]);
+
+  // Backup reminder check — runs after load, and re-runs when Settings closes
+  // (exporting a backup there updates lastBackupDate and should hide the banner).
+  useEffect(() => {
+    if (!idbReady || settingsOpen) return;
+    const hasData = salesData.length>0 || suppliersData.length>0 || customerMonthlyData.length>0;
+    if (!hasData) { setBackupReminderDays(null); return; }
+    try {
+      const snooze = localStorage.getItem('backupReminderSnoozedUntil');
+      if (snooze && Date.now() < +snooze) { setBackupReminderDays(null); return; }
+      const last = localStorage.getItem('lastBackupDate');
+      if (!last) { setBackupReminderDays(-1); return; }
+      const days = Math.floor((Date.now() - new Date(last).getTime()) / (24*60*60*1000));
+      setBackupReminderDays(days >= 7 ? days : null);
+    } catch { setBackupReminderDays(null); }
+  }, [idbReady, settingsOpen, salesData, suppliersData, customerMonthlyData]);
+  const snoozeBackupReminder = () => {
+    try { localStorage.setItem('backupReminderSnoozedUntil', String(Date.now() + 3*24*60*60*1000)); } catch { /* snooze is cosmetic */ }
+    setBackupReminderDays(null);
+  };
 
   // Toggle theme
   const toggleTheme = () => { const n=!isDarkMode; setIsDarkMode(n); localStorage.setItem('theme',n?'dark':'light'); };
@@ -4763,20 +5029,46 @@ const App = () => {
     setLoading(false); e.target.value='';
   }, [salesData, suppliersData, activeTab]);
 
+  const [undoToast, setUndoToast] = useState(null); // {label, onUndo}
+  const undoTimerRef = useRef(null);
+  const showUndoToast = (label, onUndo) => {
+    if (undoTimerRef.current) clearTimeout(undoTimerRef.current);
+    setUndoToast({ label, onUndo });
+    undoTimerRef.current = setTimeout(() => setUndoToast(null), 10000);
+  };
+
   const handleClearData = () => {
     // overview + procurement = clear everything, like summary
     const clearBoth = activeTab==='summary' || activeTab==='overview' || activeTab==='procurement';
     const keys = clearBoth ? ['sales','suppliers'] : [activeTab];
     keys.forEach(k => {
       if (k==='sales') {
+        trashSet('dashboardSalesData', salesData, { fileNames: salesFileNames });
         setSalesData([]); setSalesFileNames([]);
         idbDelete('dashboardSalesData').catch(()=>{}); localStorage.removeItem('dashboardSalesData'); localStorage.removeItem('salesFileNames');
       } else if (k==='suppliers') {
+        trashSet('dashboardSuppliersData', suppliersData, { fileNames: suppliersFileNames });
         setSuppliersData([]); setSuppliersFileNames([]);
         idbDelete('dashboardSuppliersData').catch(()=>{}); localStorage.removeItem('dashboardSuppliersData'); localStorage.removeItem('suppliersFileNames');
       }
     });
     setAvailableDates([]); setDateFilter({start:'',end:''}); resetFilters(); setDrillDownMonth(null);
+    showUndoToast(
+      clearBoth ? 'הנתונים נמחקו' : (keys[0]==='sales' ? 'נתוני המכירות נמחקו' : 'נתוני הרכש נמחקו'),
+      async () => {
+        for (const k of keys) {
+          const key = k==='sales' ? 'dashboardSalesData' : 'dashboardSuppliersData';
+          const t = await trashGet(key);
+          if (t?.value) {
+            if (k==='sales') { setSalesData(t.value); setSalesFileNames(t.extra?.fileNames||[]); }
+            else { setSuppliersData(t.value); setSuppliersFileNames(t.extra?.fileNames||[]); }
+            await idbSet(key, t.value);
+            await trashClear(key);
+          }
+        }
+        setUndoToast(null);
+      }
+    );
   };
 
   const resetFilters = () => {
@@ -4860,12 +5152,34 @@ const App = () => {
     e.target.value = '';
   };
   const clearCustomerMonthly = () => {
+    trashSet('customerMonthlyData', customerMonthlyData, { fileName: customerMonthlyFileName });
     setCustomerMonthlyData([]); setCustomerMonthlyFileName('');
     idbDelete('customerMonthlyData').catch(()=>{}); localStorage.removeItem('customerMonthlyData'); localStorage.removeItem('customerMonthlyFileName');
+    showUndoToast('נתוני לקוחות (חודשי) נמחקו', async () => {
+      const t = await trashGet('customerMonthlyData');
+      if (t?.value) {
+        setCustomerMonthlyData(t.value); setCustomerMonthlyFileName(t.extra?.fileName||'');
+        await idbSet('customerMonthlyData', t.value);
+        localStorage.setItem('customerMonthlyFileName', t.extra?.fileName||'');
+        await trashClear('customerMonthlyData');
+      }
+      setUndoToast(null);
+    });
   };
   const clearCustomerProduct = () => {
+    trashSet('customerProductData', customerProductData, { fileName: customerProductFileName });
     setCustomerProductData([]); setCustomerProductFileName('');
     idbDelete('customerProductData').catch(()=>{}); localStorage.removeItem('customerProductData'); localStorage.removeItem('customerProductFileName');
+    showUndoToast('נתוני לקוחות (מוצרים) נמחקו', async () => {
+      const t = await trashGet('customerProductData');
+      if (t?.value) {
+        setCustomerProductData(t.value); setCustomerProductFileName(t.extra?.fileName||'');
+        await idbSet('customerProductData', t.value);
+        localStorage.setItem('customerProductFileName', t.extra?.fileName||'');
+        await trashClear('customerProductData');
+      }
+      setUndoToast(null);
+    });
   };
 
   // ─── Saved views — remembers a filter combo (tab + date range + product/supplier) ───
@@ -5238,19 +5552,23 @@ const App = () => {
       const prev   = months.slice(-6,-3).reduce((s,m)=>s+p.monthlyData[m],0);
       p.trend = prev>0 ? ((recent-prev)/prev*100) : (recent>0 ? 100 : 0);
       p.avgMonthly = months.length ? p.totalRev/months.length : 0;
-      // Margin — only when we have a cost AND it's in ILS (or currency unspecified).
-      // Mixing currencies into one ₪ margin would be silently wrong, so we
-      // flag it instead of guessing an exchange rate.
-      const unitCost = costMap[p.sku]??costMap[p.name]??null;
+      // Margin — cost in ₪ (or unspecified currency) is used as-is. Cost in
+      // EUR/USD is converted with the manual exchange rate from Settings when
+      // one is set; without a rate the product stays flagged instead of
+      // silently mixing currencies into one ₪ margin.
+      const unitCostRaw = costMap[p.sku]??costMap[p.name]??null;
       const currency = currencyMap[p.sku]??currencyMap[p.name]??null;
-      const costUsable = unitCost!=null && (!currency || currency==='ILS');
-      p.unitCost = costUsable ? unitCost : null;
-      p.costCurrencyBlocked = unitCost!=null && currency && currency!=='ILS' ? currency : null;
-      p.margin = costUsable ? p.totalRev - p.totalQty*unitCost : null;
+      const isForeign = currency && currency!=='ILS';
+      const rate = !isForeign ? 1 : (exchangeRates?.[currency]>0 ? exchangeRates[currency] : null);
+      const costUsable = unitCostRaw!=null && rate!=null;
+      p.unitCost = costUsable ? unitCostRaw*rate : null;
+      p.costConverted = costUsable && isForeign ? currency : null; // margin computed via manual rate
+      p.costCurrencyBlocked = unitCostRaw!=null && !costUsable ? currency : null;
+      p.margin = costUsable ? p.totalRev - p.totalQty*p.unitCost : null;
       p.marginPct = (costUsable && p.totalRev>0) ? (p.margin/p.totalRev*100) : null;
     });
     return sorted;
-  }, [activeTab, filteredData, costMap, currencyMap]);
+  }, [activeTab, filteredData, costMap, currencyMap, exchangeRates]);
 
   const [salesViewMode, setSalesViewMode] = useState('transactions'); // 'transactions' | 'byProduct'
   const [productAbcFilter, setProductAbcFilter] = useState('all'); // 'all'|'A'|'B'|'C'
@@ -5410,9 +5728,19 @@ const App = () => {
 
   return (
     <div className={`flex min-h-screen font-sans transition-colors duration-300 ${isDarkMode?'bg-slate-950 text-slate-100':'bg-slate-50 text-slate-800'}`} dir="rtl">
-      <SettingsModal isOpen={settingsOpen} onClose={()=>setSettingsOpen(false)} apiKey={apiKey} onSave={setApiKey} isDarkMode={isDarkMode}/>
+      <SettingsModal isOpen={settingsOpen} onClose={()=>setSettingsOpen(false)} apiKey={apiKey} onSave={setApiKey} isDarkMode={isDarkMode} exchangeRates={exchangeRates} onSaveRates={setExchangeRates}/>
       <AIModal isOpen={aiModalOpen} onClose={()=>setAiModalOpen(false)} loading={aiLoading} report={aiReport} isDarkMode={isDarkMode}/>
       <ClearModal isOpen={clearModalOpen} onClose={()=>setClearModalOpen(false)} onConfirm={handleClearData} type={activeTab} isDarkMode={isDarkMode}/>
+
+      {/* Undo toast — appears after clearing a dataset, active for 10s */}
+      {undoToast && (
+        <div className={`fixed bottom-6 right-6 z-50 flex items-center gap-3 px-4 py-3 rounded-2xl shadow-2xl border animate-in fade-in slide-in-from-bottom-2 duration-200 ${isDarkMode?'bg-slate-800 border-slate-700 text-slate-200':'bg-slate-900 border-slate-700 text-slate-100'}`}>
+          <Trash2 className="w-4 h-4 text-red-400 shrink-0"/>
+          <span className="text-sm">{undoToast.label}</span>
+          <button onClick={undoToast.onUndo} className="text-sm font-bold text-blue-400 hover:text-blue-300 shrink-0">שחזר</button>
+          <button onClick={()=>setUndoToast(null)} className="opacity-50 hover:opacity-100 shrink-0"><X className="w-3.5 h-3.5"/></button>
+        </div>
+      )}
 
       {/* FAB Chat */}
       <div className="fixed bottom-6 left-6 z-40">
@@ -5580,6 +5908,33 @@ const App = () => {
 
         {/* Content */}
         <main className="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
+          {/* IDB load failure — surfaced loudly instead of silently losing data */}
+          {idbLoadFailed.length > 0 && (
+            <div className={`flex items-start gap-3 px-5 py-4 rounded-2xl border-2 ${isDarkMode?'bg-red-500/10 border-red-500/40 text-red-300':'bg-red-50 border-red-300 text-red-800'}`}>
+              <TriangleAlert className="w-5 h-5 shrink-0 mt-0.5"/>
+              <div className="flex-1 text-sm">
+                <p className="font-bold">חלק מהנתונים לא נטענו מהאחסון המקומי</p>
+                <p className="text-xs mt-1 opacity-80">
+                  קריאה מ-IndexedDB נכשלה עבור: {idbLoadFailed.map(k=>({dashboardSalesData:'מכירות',dashboardSuppliersData:'רכש וספקים',customerMonthlyData:'לקוחות (חודשי)',customerProductData:'לקוחות (מוצרים)'}[k]||k)).join(', ')}.
+                  כדי להגן על הנתונים השמורים, שינויים בנתונים אלה <b>לא נשמרים</b> כרגע. רענן את הדף — ברוב המקרים זו תקלה חולפת. אם זה חוזר, ייצא גיבוי ממחשב אחר או בדוק שהדפדפן לא במצב פרטי.
+                </p>
+              </div>
+              <button onClick={()=>window.location.reload()} className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold ${isDarkMode?'bg-red-500/20 hover:bg-red-500/30':'bg-red-100 hover:bg-red-200'}`}>רענן דף</button>
+            </div>
+          )}
+          {/* Backup reminder — the JSON export is the only safety net until cloud sync exists */}
+          {backupReminderDays !== null && idbLoadFailed.length === 0 && (
+            <div className={`flex items-center gap-3 px-5 py-3 rounded-2xl border ${isDarkMode?'bg-amber-500/10 border-amber-500/25 text-amber-300':'bg-amber-50 border-amber-200 text-amber-800'}`}>
+              <FileSpreadsheet className="w-4 h-4 shrink-0"/>
+              <p className="flex-1 text-xs sm:text-sm">
+                {backupReminderDays === -1
+                  ? 'עדיין לא יצרת קובץ גיבוי. הנתונים שמורים רק בדפדפן הזה — ניקוי היסטוריה או תקלה ימחקו אותם.'
+                  : `עברו ${backupReminderDays} ימים מהגיבוי האחרון. מומלץ לייצא גיבוי עדכני.`}
+              </p>
+              <button onClick={()=>setSettingsOpen(true)} className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold ${isDarkMode?'bg-amber-500/20 hover:bg-amber-500/30':'bg-amber-100 hover:bg-amber-200'}`}>גבה עכשיו</button>
+              <button onClick={snoozeBackupReminder} title="הזכר לי בעוד 3 ימים" className="shrink-0 opacity-50 hover:opacity-100"><X className="w-4 h-4"/></button>
+            </div>
+          )}
           {/* Overview */}
           {activeTab==='overview' && (
             <OverviewPage salesData={salesData} suppliersData={suppliersData} dateFilter={dateFilter} availableDates={availableDates} isDarkMode={isDarkMode} setActiveTab={setActiveTab} excludeCurrentMonth={excludeCurrentMonth}/>
@@ -6085,14 +6440,14 @@ const App = () => {
                   </div>
                   {hasBlockedCurrency && (
                     <div className={`px-5 py-2 text-xs flex items-center gap-2 ${isDarkMode?'bg-amber-500/10 text-amber-400':'bg-amber-50 text-amber-700'}`}>
-                      <TriangleAlert className="w-3.5 h-3.5"/> חלק מהמוצרים מיובאים בעלות במטבע שאינו ₪ — הרווח לא חושב להם כדי לא לערבב מטבעות
+                      <TriangleAlert className="w-3.5 h-3.5"/> חלק מהמוצרים מיובאים בעלות במטבע שאינו ₪ — הרווח לא חושב להם. הזן שער חליפין ב-⚙️ הגדרות והרווח יחושב גם להם
                     </div>
                   )}
                   {/* Legend — explains ABC/XYZ, margin, and the time scope behind the numbers */}
                   <div className={`px-5 py-2.5 border-b flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] ${isDarkMode?'border-slate-700 text-slate-500':'border-slate-100 text-slate-400'}`}>
                     <span><span className="font-bold text-amber-500">A</span>=80% מההכנסה · <span className="font-bold text-blue-500">B</span>=עד 95% · <span className="font-bold text-slate-400">C</span>=שאר 5%</span>
                     <span>X/Y/Z = יציבות ביקוש (יציב→לא צפוי)</span>
-                    {hasAnyMargin && <span>רווח = הכנסה − (כמות × עלות) · תיאורטי, לא כולל הוצאות תפעול</span>}
+                    {hasAnyMargin && <span>רווח = הכנסה − (כמות × עלות) · תיאורטי, לא כולל הוצאות תפעול · ≈€/≈$ = עלות שהומרה לפי שער מההגדרות</span>}
                     <span>כמות והכנסה: לפי טווח התאריכים שנבחר מעל הטבלה · גרף המגמה (בלחיצה על %) מציג תמיד 12 חודשים אחרונים בפועל</span>
                   </div>
                   <div className="overflow-x-auto max-h-[460px]">
@@ -6124,7 +6479,7 @@ const App = () => {
                             <td className="px-5 py-3.5">
                               {SalesTrendButton(p)}
                             </td>
-                            {hasAnyMargin && <td className={`px-5 py-3.5 font-bold tabular-nums ${p.margin==null?(isDarkMode?'text-slate-600':'text-slate-300'):p.margin>=0?(isDarkMode?'text-emerald-400':'text-emerald-600'):'text-red-500'}`}>{p.margin!=null?formatCurrency(p.margin):(p.costCurrencyBlocked?`⚠ ${p.costCurrencyBlocked}`:'—')}</td>}
+                            {hasAnyMargin && <td className={`px-5 py-3.5 font-bold tabular-nums ${p.margin==null?(isDarkMode?'text-slate-600':'text-slate-300'):p.margin>=0?(isDarkMode?'text-emerald-400':'text-emerald-600'):'text-red-500'}`} title={p.costConverted?`עלות ב-${p.costConverted} — הומרה לפי השער שהוגדר בהגדרות`:undefined}>{p.margin!=null?<>{formatCurrency(p.margin)}{p.costConverted && <span className="text-[10px] font-normal opacity-60 mr-1">≈{currencySymbol(p.costConverted)}</span>}</>:(p.costCurrencyBlocked?`⚠ ${p.costCurrencyBlocked}`:'—')}</td>}
                             {hasAnyMargin && <td className={`px-5 py-3.5 text-xs font-medium ${p.marginPct==null?(isDarkMode?'text-slate-600':'text-slate-300'):p.marginPct>=0?'text-emerald-500':'text-red-500'}`}>{p.marginPct!=null?`${p.marginPct.toFixed(1)}%`:'—'}</td>}
                             <td className="px-5 py-3.5">
                               <button onClick={()=>jumpToProcurement(p.name)} title="עבור לתכנון רכש למוצר הזה — מלאי, כיסוי, תחזית ועונתיות"
