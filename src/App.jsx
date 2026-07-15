@@ -1529,10 +1529,16 @@ const parseInventoryFile = (rows) => {
     const moqRaw = moqIdx !== -1 ? parseFloat(vals[moqIdx].replace(/[^\d.-]/g,'')) : NaN;
     const moq = (!isNaN(moqRaw) && moqRaw > 0) ? moqRaw : null;
     const currRaw = currencyIdx !== -1 ? vals[currencyIdx] : '';
-    const currency = currRaw === 'ש"ח' || currRaw === 'שח' ? 'ILS'
-      : currRaw === '$' ? 'USD'
-      : currRaw === 'EUR' || currRaw === '€' ? 'EUR'
-      : (currRaw || null);
+    // Broad, case-insensitive normalization — Priority exports vary a lot in
+    // how currency is written (symbol, Hebrew word, English code, ISO code),
+    // and a miss here silently falls through to "treat as ILS" elsewhere, so
+    // it's worth casting a wide net rather than only matching exact symbols.
+    const currNorm = currRaw.toLowerCase().replace(/\s+/g,'');
+    const currency = !currNorm ? null
+      : ['ש"ח','שח','₪','ils','nis','שקל','שקלים'].includes(currNorm) ? 'ILS'
+      : ['$','usd','us$','דולר','דולרים'].includes(currNorm) ? 'USD'
+      : ['€','eur','אירו','יורו'].includes(currNorm) ? 'EUR'
+      : currRaw; // unrecognized value kept as-is — will show as a blocked/unmapped currency rather than silently defaulting to ILS
     result.push({ sku: sku||name, name: name||sku, quantity: qty, cost, minStock, supplier, moq, currency });
   });
   return result;
@@ -1750,11 +1756,33 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
   });
   const [ordersFileName, setOrdersFileName] = useState(() => localStorage.getItem('ordersFileName')||'');
   const [ordersSortConfig, setOrdersSortConfig] = useState({ key:null, direction:'asc' });
+
+  // ── Currency-aware open orders ──────────────────────────────────
+  // parsePriorityOrders never captured a currency (Priority's "שווי יתרה"
+  // column is just a number, in whatever currency that supplier bills in),
+  // so this table was always showing "₪" on foreign-supplier orders no
+  // matter what. Currency is resolved the same way as the main products
+  // table — via currencyMap, matched by SKU/product name — which also means
+  // it now benefits from the per-supplier currency override in the
+  // "ספקים" view. valueILS is null (not silently 1:1) when the currency is
+  // foreign and no exchange rate is set in Settings.
+  const ordersEnriched = useMemo(() => {
+    return openOrders.map(o => {
+      const currency = currencyMap[o.productKey]??currencyMap[o.productName]??null;
+      const isForeign = currency && currency!=='ILS';
+      const rate = !isForeign ? 1 : (exchangeRates?.[currency]>0 ? exchangeRates[currency] : null);
+      const costUsable = o.value!=null && rate!=null;
+      const valueILS = costUsable ? o.value*rate : null;
+      const costCurrencyBlocked = o.value>0 && isForeign && rate==null ? currency : null;
+      const unitPriceOriginal = (o.value>0 && o.orderedQty>0) ? o.value/o.orderedQty : null;
+      return { ...o, currency, valueILS, costCurrencyBlocked, costConverted: costUsable && isForeign ? currency : null, unitPriceOriginal };
+    });
+  }, [openOrders, currencyMap, exchangeRates]);
+  const ordersBlockedCurrencies = useMemo(() => [...new Set(ordersEnriched.filter(o=>o.costCurrencyBlocked).map(o=>o.costCurrencyBlocked))], [ordersEnriched]);
+
   // ── Cash flow forecast — buckets open orders by expected delivery month ──
-  // Uses the "value" field already imported from Priority's "שווי יתרה"
-  // column (or entered manually), which the rest of this view already
-  // treats as ₪ (see the summary bar above) — no new currency assumption
-  // introduced here, just the same one made explicit as a forecast.
+  // Uses valueILS (above) so mixed-currency open orders don't get summed as
+  // if they were all ₪.
   const parseOrderDate = (s) => {
     if (!s) return null;
     if (s.includes('/')) { const [d,m,y] = s.split('/').map(Number); return (d&&m&&y) ? new Date(y,m-1,d) : null; }
@@ -1762,7 +1790,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     return null;
   };
   const cashFlowForecast = useMemo(() => {
-    const active = openOrders.filter(o => o.status !== 'received');
+    const active = ordersEnriched.filter(o => o.status !== 'received');
     const buckets = {};
     let noDateValue = 0, noDateCount = 0;
     active.forEach(o => {
@@ -1781,11 +1809,11 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
           estimated = true;
         }
       }
-      if (!dt) { noDateValue += o.value||0; noDateCount++; return; } // no date to work with at all
+      if (!dt) { noDateValue += o.valueILS||0; noDateCount++; return; } // no date to work with at all
       const key = `${dt.getFullYear()}-${String(dt.getMonth()).padStart(2,'0')}`;
       if (!buckets[key]) buckets[key] = { key, year:dt.getFullYear(), monthIdx:dt.getMonth(), actualValue:0, estimatedValue:0, actualCount:0, estimatedCount:0 };
-      if (estimated) { buckets[key].estimatedValue += o.value||0; buckets[key].estimatedCount++; }
-      else { buckets[key].actualValue += o.value||0; buckets[key].actualCount++; }
+      if (estimated) { buckets[key].estimatedValue += o.valueILS||0; buckets[key].estimatedCount++; }
+      else { buckets[key].actualValue += o.valueILS||0; buckets[key].actualCount++; }
     });
     const sorted = Object.values(buckets).sort((a,b)=>a.key.localeCompare(b.key));
     let cumulative = 0;
@@ -1800,8 +1828,8 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
       };
     });
     const anyEstimated = sorted.some(b => b.estimatedValue > 0);
-    return { data, anyEstimated, noDateValue: Math.round(noDateValue), noDateCount, totalValue: Math.round(active.reduce((s,o)=>s+(o.value||0),0)) };
-  }, [openOrders, leadTime, leadTimeMap]);
+    return { data, anyEstimated, noDateValue: Math.round(noDateValue), noDateCount, totalValue: Math.round(active.reduce((s,o)=>s+(o.valueILS||0),0)) };
+  }, [ordersEnriched, leadTime, leadTimeMap]);
   const [showAddOrder, setShowAddOrder] = useState(false);
   const [editOrderId, setEditOrderId] = useState(null);
   const [orderForm, setOrderForm] = useState({ productKey:'', productName:'', supplier:'', orderedQty:'', orderDate:'', expectedDate:'', status:'ordered', poNumber:'', notes:'' });
@@ -1878,15 +1906,15 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
   };
 
   const sortedOpenOrders = useMemo(() => {
-    if (!ordersSortConfig.key) return openOrders;
-    return [...openOrders].sort((a,b) => {
+    if (!ordersSortConfig.key) return ordersEnriched;
+    return [...ordersEnriched].sort((a,b) => {
       const va = a[ordersSortConfig.key] ?? '', vb = b[ordersSortConfig.key] ?? '';
       let cmp;
       if (typeof va === 'number' || typeof vb === 'number') cmp = (va||0) - (vb||0);
       else cmp = String(va).localeCompare(String(vb), 'he');
       return ordersSortConfig.direction === 'asc' ? cmp : -cmp;
     });
-  }, [openOrders, ordersSortConfig]);
+  }, [ordersEnriched, ordersSortConfig]);
   const reqOrdersSort = (key) => setOrdersSortConfig(p => ({ key, direction: p.key===key && p.direction==='asc' ? 'desc' : 'asc' }));
 
   const saveStock = (key, val) => {
@@ -1910,6 +1938,24 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     if (isNaN(n) || n < 0) { delete updated[supplierName]; } else { updated[supplierName] = n; }
     setLeadTimeMap(updated);
     localStorage.setItem('procurementLeadTime', JSON.stringify(updated));
+  };
+
+  // Force the currency for every SKU under one supplier — bypasses whatever
+  // the imported file's currency column did or didn't say. Currency is
+  // fundamentally a property of the SUPPLIER, not each row, and Priority
+  // exports don't always carry a clean per-row currency value — a supplier
+  // showing a currency mix in costByCurrency is usually that detection
+  // failing partway through, not an actual multi-currency supplier. This
+  // lets the person correct it once per supplier instead of per SKU.
+  const saveSupplierCurrency = (supplierName, code, items) => {
+    const updated = { ...currencyMap };
+    items.forEach(p => {
+      const k = p.key || p.sku || p.name;
+      if (!k) return;
+      if (code === '') delete updated[k]; else updated[k] = code;
+    });
+    setCurrencyMap(updated);
+    localStorage.setItem('procurementCurrency', JSON.stringify(updated));
   };
 
   const generateProcurementInsight = async () => {
@@ -3554,9 +3600,28 @@ const renderProductRow = (p) => {
                             {leadTimeMap[grp.name]!=null ? `זמן אספקה: ${leadTimeMap[grp.name]} חודש` : `+זמן אספקה (גלובלי: ${leadTime})`}
                           </button>
                         )}
+                        {/* Per-supplier currency override — bypasses unreliable per-row detection from the import file */}
+                        {(() => {
+                          const supCurrencies = [...new Set(grp.items.map(p=>p.currency||'ILS'))];
+                          const uniform = supCurrencies.length===1 ? supCurrencies[0] : '';
+                          return (
+                            <select
+                              value={uniform}
+                              onClick={e=>e.stopPropagation()}
+                              onChange={e=>{e.stopPropagation(); saveSupplierCurrency(grp.name, e.target.value, grp.items);}}
+                              title="קבע את המטבע של הספק הזה לכל המוצרים שלו — עוקף את מה שזוהה (או לא זוהה) מקובץ הייבוא"
+                              style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#334155'}:{}}
+                              className={`text-[11px] font-medium px-1.5 py-0.5 rounded border cursor-pointer ${uniform===''?(isDarkMode?'border-amber-500/40 bg-amber-500/10 text-amber-300':'border-amber-300 bg-amber-50 text-amber-700'):(isDarkMode?'border-slate-700 text-slate-300':'border-slate-200 text-slate-600')}`}>
+                              {uniform==='' && <option value="" disabled>מטבע מעורב — בחר</option>}
+                              <option value="ILS">₪ ILS</option>
+                              <option value="EUR">€ EUR</option>
+                              <option value="USD">$ USD</option>
+                            </select>
+                          );
+                        })()}
                       </div>
                       {Object.keys(grp.costByCurrency).length>1 && (
-                        <p className={`text-[10px] mt-0.5 ${isDarkMode?'text-amber-500/70':'text-amber-600'}`}>⚠ הספק הזה מיובא במספר מטבעות — הסכומים לא מומרים/מאוחדים</p>
+                        <p className={`text-[10px] mt-0.5 ${isDarkMode?'text-amber-500/70':'text-amber-600'}`}>⚠ הספק הזה מיובא במספר מטבעות — סימן לזיהוי מטבע לא אחיד מהקובץ. השתמש בבורר המטבע למעלה כדי לתקן לכל המוצרים של הספק בבת אחת</p>
                       )}
                     </div>
                     {/* Total units badge */}
@@ -3751,9 +3816,15 @@ const renderProductRow = (p) => {
                   <span className={`text-xs font-bold ${isDarkMode?'text-blue-300':'text-blue-700'}`}>
                     {openOrders.reduce((a,o)=>a+(o.orderedQty||0),0).toLocaleString()} יח' בדרך
                   </span>
-                  {openOrders.some(o=>o.value>0) && (
+                  {ordersEnriched.some(o=>o.valueILS>0) && (
                     <span className={`text-xs font-bold ${isDarkMode?'text-emerald-400':'text-emerald-700'}`}>
-                      ₪{Math.round(openOrders.reduce((a,o)=>a+(o.value||0),0)).toLocaleString()} שווי
+                      {formatCurrency(ordersEnriched.reduce((a,o)=>a+(o.valueILS||0),0))} שווי
+                    </span>
+                  )}
+                  {ordersBlockedCurrencies.length>0 && (
+                    <span title={`הזמנות ב-${ordersBlockedCurrencies.join('/')} לא נכללות בסה"כ — הזן שער חליפין ב-⚙️ הגדרות, או קבע מטבע לספק בתצוגת "ספקים"`}
+                      className={`flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-lg ${isDarkMode?'bg-amber-500/15 text-amber-300':'bg-amber-50 text-amber-700'}`}>
+                      <TriangleAlert className="w-3 h-3"/> חסר שער ל-{ordersBlockedCurrencies.join('/')}
                     </span>
                   )}
                 </div>
@@ -3821,7 +3892,8 @@ const renderProductRow = (p) => {
                       <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('supplier')}>ספק ↕</th>
                       <th className="px-4 py-3">PO</th>
                       <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('orderedQty')}>יתרה לאספקה ↕</th>
-                      <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('value')}>שווי ₪ ↕</th>
+                      <th className="px-4 py-3">מחיר יח'</th>
+                      <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('valueILS')}>שווי ₪ ↕</th>
                       <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('orderDate')}>הוזמן ↕</th>
                       <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('expectedDate')}>אספקה צפויה ↕</th>
                       <th className="px-4 py-3">סטטוס</th>
@@ -3850,8 +3922,17 @@ const renderProductRow = (p) => {
                             <span className={`font-bold text-sm tabular-nums ${isDarkMode?'text-blue-300':'text-blue-700'}`}>{order.orderedQty.toLocaleString()}</span>
                             <span className={`text-xs mr-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>יח'</span>
                           </td>
+                          <td className={`px-4 py-3.5 text-xs tabular-nums ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+                            {order.unitPriceOriginal!=null ? formatUnitCost(order.unitPriceOriginal, order.currency) : '—'}
+                          </td>
                           <td className={`px-4 py-3.5 text-sm tabular-nums ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>
-                            {order.value > 0 ? '₪'+Math.round(order.value).toLocaleString() : '—'}
+                            {order.valueILS!=null ? (
+                              <span title={order.costConverted?`הומר מ-${order.currency} לפי השער שהוגדר בהגדרות`:undefined}>
+                                {formatCurrency(order.valueILS)}{order.costConverted && <span className="text-[10px] font-normal opacity-60 mr-1">≈{currencySymbol(order.costConverted)}</span>}
+                              </span>
+                            ) : order.costCurrencyBlocked ? (
+                              <span title="חסר שער חליפין בהגדרות" className={isDarkMode?'text-amber-400':'text-amber-600'}>⚠ {order.costCurrencyBlocked}</span>
+                            ) : '—'}
                           </td>
                           <td className={`px-4 py-3.5 text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{order.orderDate||'—'}</td>
                           <td className={`px-4 py-3.5 text-xs ${isOverdue?'text-red-500 font-bold':(isDarkMode?'text-slate-400':'text-slate-500')}`}>
