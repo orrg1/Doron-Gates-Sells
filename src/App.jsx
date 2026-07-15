@@ -1616,7 +1616,7 @@ const MONTH_FULL_LABELS = ['ינואר','פברואר','מרץ','אפריל','מ
 const MONTH_ABBR_LABELS_SHORT = ['ינו','פבר','מרץ','אפר','מאי','יונ','יול','אוג','ספט','אוק','נוב','דצמ'];
 
 // ─── PROCUREMENT PAGE ──────────────────────────────────
-const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, jumpTo, onJumpToSales, excludeCurrentMonth }) => {
+const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
   const [minStockMap, setMinStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementMinStock')||'{}'); } catch { return {}; } });
   const [supplierMap, setSupplierMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementSupplier')||'{}'); } catch { return {}; } });
@@ -2163,10 +2163,28 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
       const trend = prev3>0?((last3-prev3)/prev3)*100:0;
       // match by key, sku, or name
       const currentStock = stockMap[key]??stockMap[p.sku]??stockMap[p.name]??null;
-      const unitCost     = costMap[key]??costMap[p.sku]??costMap[p.name]??null;
       const minStock     = minStockMap[key]??minStockMap[p.sku]??minStockMap[p.name]??null;
       const supplier     = supplierMap[key]??supplierMap[p.sku]??supplierMap[p.name]??null;
       const currency     = currencyMap[key]??currencyMap[p.sku]??currencyMap[p.name]??null;
+      // ── Unit cost — original currency AND ₪-converted ──
+      // costMap holds the raw imported cost, in whatever currency the
+      // inventory file specified (ILS/EUR/USD). unitCost (ILS) is what every
+      // aggregate/total ₪ figure in this page must use (KPI cards, PDF
+      // summary, dead-stock value, what-if totals) — otherwise a €120 line
+      // and a ₪120 line get summed as if equal, which is exactly the bug
+      // this fixes. unitCostOriginal stays in the native currency for
+      // per-row/per-currency displays (e.g. the supplier PDF, which
+      // correctly shows "€120" rather than converting for a document a
+      // supplier will actually be paid in). When a foreign cost has no
+      // matching rate in Settings, unitCost is null (flagged via
+      // costCurrencyBlocked) rather than silently treated as 1:1 ₪.
+      const unitCostOriginal = costMap[key]??costMap[p.sku]??costMap[p.name]??null;
+      const isForeignCost = currency && currency!=='ILS';
+      const fxRate = !isForeignCost ? 1 : (exchangeRates?.[currency]>0 ? exchangeRates[currency] : null);
+      const costUsable = unitCostOriginal!=null && fxRate!=null;
+      const unitCost = costUsable ? unitCostOriginal*fxRate : null;
+      const costConverted = costUsable && isForeignCost ? currency : null;
+      const costCurrencyBlocked = unitCostOriginal!=null && !costUsable ? currency : null;
       const avgDaily      = avgMonthly / 30;
       const coverageMonths = (currentStock!==null&&avgMonthly>0)?currentStock/avgMonthly:null;
       const coverageDays   = (currentStock!==null&&avgDaily>0)?Math.round(currentStock/avgDaily):null;
@@ -2258,7 +2276,8 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
       const suggestedOrder = (moq && moq>0 && suggestedOrderRaw>0)
         ? Math.ceil(suggestedOrderRaw / moq) * moq
         : suggestedOrderRaw;
-      const orderCost = (suggestedOrder>0&&unitCost)?suggestedOrder*unitCost:null;
+      const orderCost = (suggestedOrder>0&&unitCost)?suggestedOrder*unitCost:null; // ₪ — for all totals/sorting/aggregates
+      const orderCostOriginal = (suggestedOrder>0&&unitCostOriginal)?suggestedOrder*unitCostOriginal:null; // native currency — for per-row/per-currency display
       const risk = currentStock!==null
         ? (currentStock <= 0 ? 'critical'  // negative or zero stock
           : coverageMonths < effectiveLeadTime ? 'critical'
@@ -2285,9 +2304,9 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
         coverageRiskScore*0.40 + volatilityRiskScore*0.20 + xyzRiskScore*0.15 + leadTimeRiskScore*0.15 + supplierRiskScore*0.10
       );
 
-      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, suggestedOrderRaw, orderCost, risk, riskScore };
+      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, risk, riskScore };
     });
-  }, [salesData, stockMap, costMap, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, avgWindowMonths, excludeCurrentMonth, supplierConcentration]);
+  }, [salesData, stockMap, costMap, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates]);
 
   const filtered = useMemo(() => {
     let data = products;
@@ -2338,10 +2357,10 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
   const completeness = useMemo(() => {
     const total     = products.length;
     const withStock = products.filter(p => p.currentStock !== null).length;
-    const withCost  = products.filter(p => p.unitCost !== null && p.unitCost > 0).length;
+    const withCost  = products.filter(p => p.unitCostOriginal !== null && p.unitCostOriginal > 0).length;
     const withOrders= products.filter(p => p.incomingQty > 0).length;
-    const withAll   = products.filter(p => p.currentStock !== null && p.unitCost !== null && p.unitCost > 0).length;
-    const noData    = products.filter(p => p.currentStock === null && (p.unitCost === null || p.unitCost === 0)).length;
+    const withAll   = products.filter(p => p.currentStock !== null && p.unitCostOriginal !== null && p.unitCostOriginal > 0).length;
+    const noData    = products.filter(p => p.currentStock === null && (p.unitCostOriginal === null || p.unitCostOriginal === 0)).length;
     return { total, withStock, withCost, withOrders, withAll, noData,
       stockPct:  total ? Math.round(withStock/total*100) : 0,
       costPct:   total ? Math.round(withCost/total*100)  : 0,
@@ -2429,6 +2448,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
   const riskCounts = useMemo(()=>({ critical:products.filter(p=>p.risk==='critical').length, low:products.filter(p=>p.risk==='low').length }), [products]);
   const totalOrderUnits = useMemo(()=>filtered.reduce((a,p)=>a+p.suggestedOrder,0),[filtered]);
   const totalOrderCost  = useMemo(()=>filtered.reduce((a,p)=>a+(p.orderCost||0),0),[filtered]);
+  const blockedCurrencies = useMemo(() => [...new Set(products.filter(p=>p.costCurrencyBlocked).map(p=>p.costCurrencyBlocked))], [products]);
   const stockedCount = useMemo(()=>products.filter(p=>p.currentStock!==null).length,[products]);
 
   // Group products-to-order by supplier — must be after filtered
@@ -2439,10 +2459,10 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
       if (!groups[sup]) groups[sup] = { name: sup, items: [], totalUnits: 0, totalCost: 0, costByCurrency: {}, criticalCount: 0 };
       groups[sup].items.push(p);
       groups[sup].totalUnits += p.suggestedOrder;
-      groups[sup].totalCost  += p.orderCost || 0;
-      if (p.orderCost) {
+      groups[sup].totalCost  += p.orderCost || 0; // ₪-converted — used for the blended headline total & supplier sort
+      if (p.orderCostOriginal) {
         const cur = p.currency || 'ILS';
-        groups[sup].costByCurrency[cur] = (groups[sup].costByCurrency[cur]||0) + p.orderCost;
+        groups[sup].costByCurrency[cur] = (groups[sup].costByCurrency[cur]||0) + p.orderCostOriginal; // native currency — kept pure, never blended
       }
       if (p.risk === 'critical') groups[sup].criticalCount++;
     });
@@ -2472,7 +2492,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
         <td style="padding:6px 8px;font-size:11px;text-align:center;">${p.supplier||'—'}</td>
         <td style="padding:6px 8px;font-size:11px;text-align:center;">${p.currentStock??'—'}</td>
         <td style="padding:6px 8px;font-size:11px;text-align:center;font-weight:bold;color:${p.risk==='critical'?'#dc2626':'#d97706'};">${p.suggestedOrder.toLocaleString()}</td>
-        <td style="padding:6px 8px;font-size:11px;text-align:center;">${p.orderCost?formatUnitCost(Math.round(p.orderCost),p.currency):'—'}</td>
+        <td style="padding:6px 8px;font-size:11px;text-align:center;">${p.orderCostOriginal?formatUnitCost(Math.round(p.orderCostOriginal),p.currency):'—'}</td>
       </tr>`;
       const tableHead = `<tr style="background:#1e293b;color:#fff;"><th style="padding:6px 8px;font-size:11px;text-align:right;">מוצר</th><th style="padding:6px 8px;font-size:11px;">ABC</th><th style="padding:6px 8px;font-size:11px;">ספק</th><th style="padding:6px 8px;font-size:11px;">מלאי</th><th style="padding:6px 8px;font-size:11px;">להזמין</th><th style="padding:6px 8px;font-size:11px;">עלות</th></tr>`;
 
@@ -2499,6 +2519,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
             <div style="font-size:11px;color:#064e3b;">עלות הזמנה משוערת</div>
           </div>
         </div>
+        ${blockedCurrencies.length ? `<p style="margin:-12px 0 20px;font-size:11px;color:#b45309;text-align:center;">⚠ הסכום הכולל אינו כולל עלויות ב-${blockedCurrencies.join('/')} (אין שער חליפין מוגדר בהגדרות)</p>` : ''}
         ${criticalItems.length ? `<h2 style="font-size:15px;margin:20px 0 8px;color:#dc2626;">⛔ פריטים קריטיים — הזמן מיד (${criticalItems.length})</h2>
         <table style="width:100%;border-collapse:collapse;"><thead>${tableHead}</thead><tbody>${criticalItems.map(rowHtml).join('')}</tbody></table>` : ''}
         ${lowItems.length ? `<h2 style="font-size:15px;margin:20px 0 8px;color:#d97706;">⚠ מלאי נמוך (${lowItems.length})</h2>
@@ -2994,7 +3015,13 @@ const renderProductRow = (p) => {
                             <span className="text-base tabular-nums">{p.suggestedOrder.toLocaleString()}</span>
                             <span className="text-xs font-normal opacity-70">יח'</span>
                           </div>
-                          {p.orderCost&&<span className={`text-xs px-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{formatShort(p.orderCost)}</span>}
+                          {p.orderCost ? (
+                            <span title={p.costConverted?`עלות ב-${p.costConverted} — הומרה לפי השער שהוגדר בהגדרות`:undefined} className={`text-xs px-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+                              {formatShort(p.orderCost)}{p.costConverted && <span className="opacity-70"> ≈{currencySymbol(p.costConverted)}</span>}
+                            </span>
+                          ) : p.costCurrencyBlocked ? (
+                            <span title="חסר שער חליפין בהגדרות — העלות לא חושבה" className={`text-xs px-1 ${isDarkMode?'text-amber-400':'text-amber-600'}`}>⚠ {p.costCurrencyBlocked}</span>
+                          ) : null}
                           {p.incomingQty>0 && <span className={`text-[10px] px-1 ${isDarkMode?'text-blue-400':'text-blue-600'}`}>📦 כבר קוזזו {p.incomingQty} יח' שבדרך</span>}
                         </div>
                       ) : (
@@ -3451,7 +3478,7 @@ const renderProductRow = (p) => {
                       grp.items.filter(p=>p.suggestedOrder>0).forEach(p => {
                         const bg = riskColor[p.risk]||'#fff';
                         const sym = currencySymbol(p.currency);
-                        html += `<tr style="background:${bg}"><td>${p.sku||p.name}</td><td>${p.name}</td><td style="text-align:center;font-weight:bold">${p.abc}</td><td style="text-align:center">${p.avgMonthly.toFixed(1)}</td><td style="text-align:center">${p.currentStock??'—'}</td><td style="text-align:center">${p.coverageDays!=null?p.coverageDays+' יום':'—'}</td><td style="text-align:center;font-weight:bold;font-size:13px;background:${p.risk==='critical'?'#fecaca':p.risk==='low'?'#fef3c7':'#dbeafe'};color:${p.risk==='critical'?'#dc2626':p.risk==='low'?'#d97706':'#1d4ed8'}">${p.suggestedOrder.toLocaleString()}</td><td style="text-align:center">${p.unitCost?sym+p.unitCost:''}</td><td style="text-align:center">${p.orderCost?sym+Math.round(p.orderCost).toLocaleString():''}</td></tr>`;
+                        html += `<tr style="background:${bg}"><td>${p.sku||p.name}</td><td>${p.name}</td><td style="text-align:center;font-weight:bold">${p.abc}</td><td style="text-align:center">${p.avgMonthly.toFixed(1)}</td><td style="text-align:center">${p.currentStock??'—'}</td><td style="text-align:center">${p.coverageDays!=null?p.coverageDays+' יום':'—'}</td><td style="text-align:center;font-weight:bold;font-size:13px;background:${p.risk==='critical'?'#fecaca':p.risk==='low'?'#fef3c7':'#dbeafe'};color:${p.risk==='critical'?'#dc2626':p.risk==='low'?'#d97706':'#1d4ed8'}">${p.suggestedOrder.toLocaleString()}</td><td style="text-align:center">${p.unitCostOriginal?sym+p.unitCostOriginal:''}</td><td style="text-align:center">${p.orderCostOriginal?sym+Math.round(p.orderCostOriginal).toLocaleString():''}</td></tr>`;
                       });
                       const subtotalText = Object.entries(grp.costByCurrency).map(([cur,amt]) => `${currencySymbol(cur==='ILS'?null:cur)}${Math.round(amt).toLocaleString()}${cur!=='ILS'?` ${cur}`:''}`).join(' + ');
                       html += `<tr style="background:#f8fafc;font-weight:bold"><td colspan="6" style="text-align:right">סה"כ מ${grp.name}</td><td style="text-align:center;color:#1d4ed8">${grp.totalUnits.toLocaleString()}</td><td></td><td style="text-align:center;color:#16a34a">${subtotalText}</td></tr>`;
@@ -4097,6 +4124,11 @@ const renderProductRow = (p) => {
                   <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}>
                     <Trash2 className="w-4 h-4 text-red-400"/> {deadStockData.length} פריטים לא זמים
                   </h3>
+                  {deadStockData.some(p=>p.costCurrencyBlocked) && (
+                    <span title="חלק מהפריטים בעלות במטבע זר בלי שער מוגדר — הערך שלהם לא נכלל בסה״כ" className={`flex items-center gap-1 text-[11px] font-medium px-2 py-1 rounded-lg ${isDarkMode?'bg-amber-500/15 text-amber-300':'bg-amber-50 text-amber-700'}`}>
+                      <TriangleAlert className="w-3 h-3"/> יש פריטים בערך לא ידוע (מטבע זר)
+                    </span>
+                  )}
                 </div>
                 <button onClick={() => {
                   setTimeout(() => {
@@ -4240,6 +4272,12 @@ const renderProductRow = (p) => {
                 <ShoppingCart className="w-3.5 h-3.5"/>
                 {totalOrderUnits.toLocaleString()} יח\'
                 {totalOrderCost>0 && <span className={`mr-1 pr-1 border-r ${isDarkMode?'border-blue-500/30':'border-blue-200'}`}>{formatShort(totalOrderCost)}</span>}
+              </div>
+            )}
+            {blockedCurrencies.length>0 && (
+              <div title={`מוצרים בעלות ${blockedCurrencies.join('/')} לא נכללים בסכומים (עלות הזמנה, ערך מלאי) — הזן שער חליפין ב-⚙️ הגדרות כדי לכלול אותם`}
+                className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border font-medium ${isDarkMode?'bg-amber-500/10 border-amber-500/25 text-amber-300':'bg-amber-50 border-amber-200 text-amber-700'}`}>
+                <TriangleAlert className="w-3.5 h-3.5"/> חסר שער ל-{blockedCurrencies.join('/')}
               </div>
             )}
             <div className="relative">
@@ -6015,7 +6053,7 @@ const App = () => {
 
           {/* Procurement Planning */}
           {activeTab==='procurement' && (
-            <ProcurementPage salesData={salesData} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} />
+            <ProcurementPage salesData={salesData} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} />
           )}
 
           {/* Summary */}
