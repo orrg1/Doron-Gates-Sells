@@ -401,8 +401,14 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
       const avgMonthly = effMonthsForCustomer.length ? effMonthsForCustomer.reduce((s,m)=>s+c.monthly[m],0)/effMonthsForCustomer.length : 0;
       const firstMonth = months[0];
       const lastActiveMonth = months[months.length-1];
-      const recent = effMonthsForCustomer.slice(-3).reduce((s,m)=>s+(c.monthly[m]||0),0);
-      const prev = effMonthsForCustomer.slice(-6,-3).reduce((s,m)=>s+(c.monthly[m]||0),0);
+      // Trend — last 3 vs previous 3 *actual calendar months* (from the
+      // overall effectiveMonths list, zero-filled), NOT the customer's own
+      // last 3 active months. A customer who buys irregularly (e.g. Jan,
+      // Mar, Jul) would otherwise have "recent 3" span half a year while
+      // "previous 3" spans a different, unequal stretch — comparing real
+      // amounts over mismatched time windows and producing a misleading %.
+      const recent = effectiveMonths.slice(-3).reduce((s,m)=>s+(c.monthly[m]||0),0);
+      const prev = effectiveMonths.slice(-6,-3).reduce((s,m)=>s+(c.monthly[m]||0),0);
       const trend = prev>0 ? ((recent-prev)/prev*100) : (recent>0?100:0);
       const isNew = effectiveMonths.indexOf(firstMonth) >= effectiveMonths.length-2;
       // Churned = zero revenue across the last 2 *effective* months (i.e. excluding
@@ -415,10 +421,13 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
       // a customer who already hit 0 belongs in "churned" above, not here).
       // Combined with ABC (computed in the pass below) so the alert only
       // fires for revenue-significant customers worth calling, not noise.
-      const last3Eff = effMonthsForCustomer.slice(-3);
-      const decliningStreak = last3Eff.length===3
-        && last3Eff.every((m,i)=> i===0 || c.monthly[m] < c.monthly[last3Eff[i-1]])
-        && c.monthly[last3Eff[2]] > 0;
+      // Same calendar-based (zero-filled) window as `trend` above — a real
+      // 3-calendar-month decline, not 3 non-zero months that might span
+      // much longer than a quarter for an irregular buyer.
+      const last3Cal = effectiveMonths.slice(-3);
+      const decliningStreak = last3Cal.length===3
+        && last3Cal.every((m,i)=> i===0 || (c.monthly[m]||0) < (c.monthly[last3Cal[i-1]]||0))
+        && (c.monthly[last3Cal[2]]||0) > 0;
       return { ...c, months, totalRevenue, avgMonthly, firstMonth, lastActiveMonth, trend, status, decliningStreak };
     });
     const totalAll = list.reduce((s,c)=>s+c.totalRevenue,0);
@@ -1757,21 +1766,42 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     const buckets = {};
     let noDateValue = 0, noDateCount = 0;
     active.forEach(o => {
-      const dt = parseOrderDate(o.expectedDate);
-      if (!dt) { noDateValue += o.value||0; noDateCount++; return; }
+      let dt = parseOrderDate(o.expectedDate);
+      let estimated = false;
+      if (!dt) {
+        // Most orders don't carry a real expected-delivery date — fall back to
+        // order date + lead time (per-supplier override if set, else the
+        // global lead-time slider) as a planning estimate, clearly marked as
+        // such in the chart rather than silently treated as a real date.
+        const orderDt = parseOrderDate(o.orderDate);
+        if (orderDt) {
+          const effLeadTime = (o.supplier && leadTimeMap[o.supplier]!=null) ? leadTimeMap[o.supplier] : leadTime;
+          dt = new Date(orderDt);
+          dt.setDate(dt.getDate() + Math.round(effLeadTime*30));
+          estimated = true;
+        }
+      }
+      if (!dt) { noDateValue += o.value||0; noDateCount++; return; } // no date to work with at all
       const key = `${dt.getFullYear()}-${String(dt.getMonth()).padStart(2,'0')}`;
-      if (!buckets[key]) buckets[key] = { key, year:dt.getFullYear(), monthIdx:dt.getMonth(), value:0, count:0 };
-      buckets[key].value += o.value||0;
-      buckets[key].count++;
+      if (!buckets[key]) buckets[key] = { key, year:dt.getFullYear(), monthIdx:dt.getMonth(), actualValue:0, estimatedValue:0, actualCount:0, estimatedCount:0 };
+      if (estimated) { buckets[key].estimatedValue += o.value||0; buckets[key].estimatedCount++; }
+      else { buckets[key].actualValue += o.value||0; buckets[key].actualCount++; }
     });
     const sorted = Object.values(buckets).sort((a,b)=>a.key.localeCompare(b.key));
     let cumulative = 0;
     const data = sorted.map(b => {
-      cumulative += b.value;
-      return { month: `${MONTH_ABBR_LABELS_SHORT[b.monthIdx]}-${String(b.year).slice(2)}`, value: Math.round(b.value), cumulative: Math.round(cumulative), count: b.count };
+      const monthTotal = b.actualValue + b.estimatedValue;
+      cumulative += monthTotal;
+      return {
+        month: `${MONTH_ABBR_LABELS_SHORT[b.monthIdx]}-${String(b.year).slice(2)}`,
+        actual: Math.round(b.actualValue), estimated: Math.round(b.estimatedValue),
+        value: Math.round(monthTotal), cumulative: Math.round(cumulative),
+        count: b.actualCount + b.estimatedCount,
+      };
     });
-    return { data, noDateValue: Math.round(noDateValue), noDateCount, totalValue: Math.round(active.reduce((s,o)=>s+(o.value||0),0)) };
-  }, [openOrders]);
+    const anyEstimated = sorted.some(b => b.estimatedValue > 0);
+    return { data, anyEstimated, noDateValue: Math.round(noDateValue), noDateCount, totalValue: Math.round(active.reduce((s,o)=>s+(o.value||0),0)) };
+  }, [openOrders, leadTime, leadTimeMap]);
   const [showAddOrder, setShowAddOrder] = useState(false);
   const [editOrderId, setEditOrderId] = useState(null);
   const [orderForm, setOrderForm] = useState({ productKey:'', productName:'', supplier:'', orderedQty:'', orderDate:'', expectedDate:'', status:'ordered', poNumber:'', notes:'' });
@@ -2091,28 +2121,39 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     });
     return sorted.map(p => {
       const key = p.sku||p.name;
-      // Use only months where this product actually sold (not all dataset months)
-      // This prevents newly-added or seasonal products from appearing with inflated averages
-      // ── Smart average: trim outlier months, flag limited data ──
-      const activeVals = Object.values(p.monthlyDataWindow||p.monthlyData).filter(v => v > 0);
+      // ── Average monthly demand — calendar-based, zero-filled ──
+      // Averaged over every calendar month from the product's FIRST sale
+      // within the window through the end of the window — including months
+      // with zero sales. This matters a lot for intermittent-demand products
+      // (e.g. a handful of units every few months): dividing only by the
+      // months that had a sale (the old approach) skips the zero months in
+      // between and overstates the true monthly rate — e.g. 12 units sold
+      // across 2 active months out of a 12-month span used to average out
+      // to 6/month instead of the real ~1/month. It still avoids diluting a
+      // genuinely new product's average by NOT counting calendar months
+      // before its first sale.
+      const firstActiveIdx = allMonths.findIndex(m => (p.monthlyDataWindow[m]||0) > 0);
       let avgMonthly, avgDataMonths, isLimitedData;
-      if (activeVals.length === 0) {
+      if (firstActiveIdx === -1) {
         avgMonthly = 0; avgDataMonths = 0; isLimitedData = true;
-      } else if (activeVals.length <= 2) {
-        // Too few months — use raw average but flag as unreliable
-        avgMonthly = activeVals.reduce((a,b)=>a+b,0) / activeVals.length;
-        avgDataMonths = activeVals.length;
-        isLimitedData = true;
       } else {
-        // Trimmed mean: exclude months with sales < 20% of median (one-off anomaly months)
-        const sorted = [...activeVals].sort((a,b)=>a-b);
-        const median = sorted[Math.floor(sorted.length / 2)];
-        const threshold = median * 0.20;
-        const trimmed = activeVals.filter(v => v >= threshold);
-        const finalVals = trimmed.length >= 2 ? trimmed : activeVals; // fallback if over-trimmed
-        avgMonthly = finalVals.reduce((a,b)=>a+b,0) / finalVals.length;
-        avgDataMonths = finalVals.length;
-        isLimitedData = finalVals.length < 3;
+        const relevantMonths = allMonths.slice(firstActiveIdx); // calendar months since first sale, zero-filled
+        const rawVals = relevantMonths.map(m => p.monthlyDataWindow[m]||0);
+        const activeVals = rawVals.filter(v => v>0);
+        // Cap (never drop) a rare abnormally-large single month — e.g. one
+        // bulk order — at 3× the median of active months, so one outlier
+        // doesn't dominate the average. Zero months are real "no demand"
+        // data, not anomalies, and are never touched or excluded.
+        let cappedVals = rawVals;
+        if (activeVals.length >= 3) {
+          const sortedActive = [...activeVals].sort((a,b)=>a-b);
+          const median = sortedActive[Math.floor(sortedActive.length/2)];
+          const cap = median * 3;
+          cappedVals = rawVals.map(v => v > cap ? cap : v);
+        }
+        avgMonthly = cappedVals.reduce((a,b)=>a+b,0) / relevantMonths.length;
+        avgDataMonths = relevantMonths.length;
+        isLimitedData = avgDataMonths < 3;
       }
       const sparkline = allMonths.slice(-6).map(m=>({m, v:p.monthlyData[m]||0}));
       // Richer 12-month series for the trend popup chart (sparkline stays at 6 for compact use elsewhere)
@@ -2244,7 +2285,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
         coverageRiskScore*0.40 + volatilityRiskScore*0.20 + xyzRiskScore*0.15 + leadTimeRiskScore*0.15 + supplierRiskScore*0.10
       );
 
-      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, suggestedOrderRaw, orderCost, risk, riskScore };
+      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, suggestedOrderRaw, orderCost, risk, riskScore };
     });
   }, [salesData, stockMap, costMap, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, avgWindowMonths, excludeCurrentMonth, supplierConcentration]);
 
@@ -3691,46 +3732,59 @@ const renderProductRow = (p) => {
                 </div>
               </div>
               {/* Cash flow forecast — expected payment load by month, from open orders */}
-              {cashFlowForecast.data.length > 0 && (
-                <div className={`px-5 py-4 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
-                  <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
-                    <h4 className={`text-sm font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}>
-                      <Wallet className="w-4 h-4 text-emerald-500"/>תחזית תזרים — הזמנות פתוחות לפי חודש אספקה צפוי
-                    </h4>
-                    <span className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
-                      סה"כ: <b className={isDarkMode?'text-emerald-400':'text-emerald-600'}>₪{cashFlowForecast.totalValue.toLocaleString()}</b>
-                      {cashFlowForecast.noDateCount>0 && <span className="mr-2 opacity-70">· {cashFlowForecast.noDateCount} הזמנות ללא תאריך אספקה (₪{cashFlowForecast.noDateValue.toLocaleString()}, לא מופיעות בגרף)</span>}
-                    </span>
-                  </div>
-                  <div style={{width:'100%', height:180}}>
-                    <ResponsiveContainer width="100%" height="100%">
-                      <ComposedChart data={cashFlowForecast.data} margin={{top:5,right:5,bottom:0,left:-15}}>
-                        <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode?'#334155':'#e2e8f0'} vertical={false}/>
-                        <XAxis dataKey="month" tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false}/>
-                        <YAxis tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false} width={50} tickFormatter={v=>formatShort(v)}/>
-                        <RechartsTooltip
-                          content={({active, payload, label}) => {
-                            if (!active || !payload?.length) return null;
-                            const row = payload[0]?.payload; if (!row) return null;
-                            return (
-                              <div style={{background:isDarkMode?'#1e293b':'#fff', border:`1px solid ${isDarkMode?'#334155':'#e2e8f0'}`, borderRadius:8, fontSize:12, padding:'8px 10px', direction:'rtl'}}>
-                                <p style={{color:isDarkMode?'#e2e8f0':'#1e293b', fontWeight:'bold', marginBottom:4}}>{label}</p>
-                                <p style={{color:isDarkMode?'#cbd5e1':'#334155'}}>{row.count} הזמנות · {formatCurrency(row.value)}</p>
-                                <p style={{color:isDarkMode?'#6ee7b7':'#059669', fontSize:11, marginTop:2}}>מצטבר: {formatCurrency(row.cumulative)}</p>
-                              </div>
-                            );
-                          }}
-                        />
-                        <Bar dataKey="value" name="שווי חודשי" fill="#3b82f6" radius={[4,4,0,0]}/>
-                        <Line type="monotone" dataKey="cumulative" name="מצטבר" stroke="#10b981" strokeWidth={2} dot={{r:3}}/>
-                      </ComposedChart>
-                    </ResponsiveContainer>
-                  </div>
-                  <p className={`text-[11px] mt-1.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
-                    מבוסס על עמודת "שווי יתרה" של כל הזמנה, לפי תאריך האספקה הצפוי · תחזית תכנונית, לא כולל תנאי תשלום/אשראי ספק
-                  </p>
+              <div className={`px-5 py-4 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+                <div className="flex items-center justify-between mb-2 flex-wrap gap-2">
+                  <h4 className={`text-sm font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}>
+                    <Wallet className="w-4 h-4 text-emerald-500"/>תחזית תזרים — הזמנות פתוחות לפי חודש
+                  </h4>
+                  <span className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+                    סה"כ: <b className={isDarkMode?'text-emerald-400':'text-emerald-600'}>₪{cashFlowForecast.totalValue.toLocaleString()}</b>
+                    {cashFlowForecast.noDateCount>0 && <span className="mr-2 opacity-70">· {cashFlowForecast.noDateCount} הזמנות ללא תאריך הזמנה או אספקה (₪{cashFlowForecast.noDateValue.toLocaleString()}, לא מופיעות בגרף)</span>}
+                  </span>
                 </div>
-              )}
+                {cashFlowForecast.data.length > 0 ? (
+                  <>
+                    <div style={{width:'100%', height:180}}>
+                      <ResponsiveContainer width="100%" height="100%">
+                        <ComposedChart data={cashFlowForecast.data} margin={{top:5,right:5,bottom:0,left:-15}}>
+                          <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode?'#334155':'#e2e8f0'} vertical={false}/>
+                          <XAxis dataKey="month" tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false}/>
+                          <YAxis tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false} width={50} tickFormatter={v=>formatShort(v)}/>
+                          <RechartsTooltip
+                            content={({active, payload, label}) => {
+                              if (!active || !payload?.length) return null;
+                              const row = payload[0]?.payload; if (!row) return null;
+                              return (
+                                <div style={{background:isDarkMode?'#1e293b':'#fff', border:`1px solid ${isDarkMode?'#334155':'#e2e8f0'}`, borderRadius:8, fontSize:12, padding:'8px 10px', direction:'rtl'}}>
+                                  <p style={{color:isDarkMode?'#e2e8f0':'#1e293b', fontWeight:'bold', marginBottom:4}}>{label}</p>
+                                  {row.actual>0 && <p style={{color:isDarkMode?'#93c5fd':'#1d4ed8'}}>בתאריך ידוע: {formatCurrency(row.actual)}</p>}
+                                  {row.estimated>0 && <p style={{color:isDarkMode?'#fcd34d':'#b45309'}}>מוערך (הזמנה+זמן אספקה): {formatCurrency(row.estimated)}</p>}
+                                  <p style={{color:isDarkMode?'#cbd5e1':'#334155', marginTop:2}}>{row.count} הזמנות · סה"כ {formatCurrency(row.value)}</p>
+                                  <p style={{color:isDarkMode?'#6ee7b7':'#059669', fontSize:11, marginTop:2}}>מצטבר: {formatCurrency(row.cumulative)}</p>
+                                </div>
+                              );
+                            }}
+                          />
+                          <Bar dataKey="actual" name="תאריך אספקה ידוע" stackId="cf" fill="#3b82f6" radius={[0,0,0,0]}/>
+                          <Bar dataKey="estimated" name="מוערך (הזמנה + זמן אספקה)" stackId="cf" fill="#f59e0b" fillOpacity={0.6} radius={[4,4,0,0]}/>
+                          <Line type="monotone" dataKey="cumulative" name="מצטבר" stroke="#10b981" strokeWidth={2} dot={{r:3}}/>
+                        </ComposedChart>
+                      </ResponsiveContainer>
+                    </div>
+                    <div className={`flex items-center gap-4 mt-1 text-[11px] ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+                      <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm" style={{background:'#3b82f6'}}/>תאריך אספקה ידוע</span>
+                      {cashFlowForecast.anyEstimated && <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm" style={{background:'#f59e0b', opacity:0.6}}/>מוערך מתאריך הזמנה + זמן אספקה</span>}
+                    </div>
+                  </>
+                ) : (
+                  <p className={`text-xs py-4 text-center ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+                    אין מספיק תאריכים (לא תאריך אספקה ולא תאריך הזמנה) כדי לבנות תחזית — מלא לפחות תאריך הזמנה בהזמנות הידניות, או ודא שהעמודה מזוהה בקובץ שמיובא מ-Priority.
+                  </p>
+                )}
+                <p className={`text-[11px] mt-1.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+                  כשאין תאריך אספקה צפוי בפועל, המשבצת מוערכת מתאריך ההזמנה + זמן האספקה (ספציפי לספק אם הוגדר, אחרת הסליידר הגלובלי) · תחזית תכנונית, לא כולל תנאי תשלום/אשראי ספק
+                </p>
+              </div>
               <div className="overflow-x-auto">
                 <table className={`w-full text-sm text-right min-w-[780px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
                   <thead className={`text-[11px] font-semibold uppercase tracking-widest ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
