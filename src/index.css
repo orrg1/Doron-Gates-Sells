@@ -1,1 +1,5 @@
 @import "tailwindcss";
+
+/* Chart axis numbers: keep them left-to-right inside the RTL page, otherwise
+   the browser anchors them on the wrong side and they overlap the bars. */
+.recharts-cartesian-axis-tick-value { direction: ltr; unicode-bidi: plaintext; }

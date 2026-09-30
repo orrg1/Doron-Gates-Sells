@@ -1,4 +1,5 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import { createPortal } from 'react-dom';
 import {
   Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter,
   ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot,
@@ -8,7 +9,7 @@ import {
   Info, Bell, User, Settings, Eye, EyeOff, TrendingDown, Zap,
   PieChart as PieChartIcon, Target, ArrowUpRight, ArrowDownRight, Home,
   ShoppingCart, ClipboardList, Sliders, TriangleAlert, Star, CircleDot,
-  Minus, RefreshCw, SlidersHorizontal
+  Minus, RefreshCw, SlidersHorizontal, MoreHorizontal
 } from 'lucide-react';
 import {
   ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid,
@@ -54,16 +55,23 @@ const HebrewMonthsReverse = {
   'יול':7,'אוג':8,'ספט':9,'אוק':10,'נוב':11,'דצמ':12
 };
 
+// Negative amounts: the minus sign must stay on the left of the number. In an
+// RTL page a bare "-₪809K" gets reordered by the browser into "809K-₪", so the
+// value is isolated as a left-to-right run (U+2066 … U+2069).
+const ltrIsolate = (t) => `\u2066${t}\u2069`;
+const fmtPct = (v, d = 1) => v < 0 ? ltrIsolate(`${v.toFixed(d)}%`) : `${v.toFixed(d)}%`;
 const formatCurrency = (val) => {
   if (isNaN(val)) return '₪0';
-  return new Intl.NumberFormat('he-IL', { style:'currency', currency:'ILS', maximumFractionDigits:0 }).format(val);
+  const t = new Intl.NumberFormat('he-IL', { style:'currency', currency:'ILS', maximumFractionDigits:0 }).format(Math.abs(val));
+  return val < 0 ? ltrIsolate('-' + t.replace(/[\u200e\u200f]/g,'').trim()) : t;
 };
 
 const formatShort = (val) => {
   if (isNaN(val)) return '₪0';
-  if (Math.abs(val) >= 1_000_000) return `₪${(val/1_000_000).toFixed(1)}M`;
-  if (Math.abs(val) >= 1_000) return `₪${(val/1_000).toFixed(0)}K`;
-  return formatCurrency(val);
+  const a = Math.abs(val);
+  const t = a >= 1_000_000 ? `₪${(a/1_000_000).toFixed(1)}M` : a >= 1_000 ? `₪${(a/1_000).toFixed(0)}K` : null;
+  if (t === null) return formatCurrency(val);
+  return val < 0 ? ltrIsolate('-' + t) : t;
 };
 
 // Returns a display symbol for a stored currency code. Defaults to ₪ when
@@ -82,10 +90,10 @@ const formatUnitCost = (amount, code) => {
 // ─── PROCUREMENT TABLE COLUMN RESIZE ───────────────────
 // Shared between the main "by product" table and every per-supplier table,
 // so a manual resize (or auto-fit) looks the same everywhere.
-const PROC_COL_KEYS = ['name','supplier','abc','riskScore','avg','trend','stock','coverage','order'];
-const PROC_COL_LABELS = { name:'מוצר', supplier:'ספק', abc:'ABC', riskScore:'ציון סיכון', avg:'ממוצע / תחזית', trend:'מגמה', stock:'מלאי עכשיו', coverage:'כיסוי', order:'להזמין' };
-const PROC_COL_DEFAULTS = { name:220, supplier:140, abc:70, riskScore:110, avg:160, trend:90, stock:150, coverage:130, order:150 };
-const PROC_COL_MIN = { name:120, supplier:60, abc:50, riskScore:80, avg:90, trend:60, stock:90, coverage:80, order:90 };
+const PROC_COL_KEYS = ['name','order','status','stock','coverage','avg','supplier'];
+const PROC_COL_LABELS = { name:'מוצר', order:'להזמין', status:'מצב', stock:'מלאי + בדרך', coverage:'כיסוי', avg:'ממוצע לחודש', supplier:'ספק' };
+const PROC_COL_DEFAULTS = { name:300, order:120, status:150, stock:150, coverage:140, avg:120, supplier:160 };
+const PROC_COL_MIN = { name:160, order:90, status:110, stock:110, coverage:100, avg:90, supplier:90 };
 
 let _measureCanvas = null;
 const measureTextWidth = (text, font) => {
@@ -95,25 +103,57 @@ const measureTextWidth = (text, font) => {
   return ctx.measureText(String(text)).width;
 };
 
+// ─── PROCUREMENT STATUS — one status and at most one note per row ─────
+// Color language (same everywhere): red = act now, orange = pay attention,
+// green = fine, gray = secondary / no data. Blue is only for info & actions.
+const procStatus = (p) => {
+  if (p.currentStock === null) return 'unknown';
+  if (p.suggestedOrder > 0) return p.risk === 'critical' ? 'now' : 'soon';
+  if (p.overdue || p.shortNowCoveredByPO) return 'watch';
+  return 'ok';
+};
+const PROC_STATUS_LABEL = { now:'להזמין עכשיו', soon:'להזמין בקרוב', watch:'לעקוב', ok:'תקין', unknown:'אין נתוני מלאי' };
+// The single note shown under a product name — the most important one wins.
+const procChip = (p) => {
+  if (p.overdue) return { t:`הזמנה באיחור ${p.overdue.maxDays} ימים`, k:'now' };
+  if (p.shortNowCoveredByPO) return { t:'חסר עכשיו · מכוסה בהזמנה', k:'watch' };
+  if (p.priceChangePct!=null && Math.abs(p.priceChangePct) >= 3) return { t:`מחיר קניה ${p.priceChangePct>0?'עלה':'ירד'} ${Math.abs(p.priceChangePct).toFixed(0)}%`, k: p.priceChangePct>0 ? 'watch' : 'muted' };
+  if (p.lifecycle === 'dying') return { t:'מכירות צונחות', k:'watch' };
+  if (p.isLimitedData && p.avgDataMonths > 0) return { t:`נתונים מ-${p.avgDataMonths} ח׳ בלבד`, k:'muted' };
+  if (p.effectiveCoverMonths != null && p.effectiveCoverMonths > 12) return { t:`מלאי ל-${Math.round(p.effectiveCoverMonths)} חודשים`, k:'muted' };
+  return null;
+};
+const procStatusCls = (st, dark) => ({
+  now:     dark ? 'bg-red-500/15 text-red-300'       : 'bg-red-50 text-red-700',
+  soon:    dark ? 'bg-orange-500/15 text-orange-300' : 'bg-orange-50 text-orange-800',
+  watch:   dark ? 'bg-orange-500/15 text-orange-300' : 'bg-orange-50 text-orange-800',
+  ok:      dark ? 'bg-emerald-500/15 text-emerald-300' : 'bg-emerald-50 text-emerald-700',
+  unknown: dark ? 'bg-slate-700 text-slate-300'      : 'bg-slate-100 text-slate-600',
+}[st]);
+const procDotColor = { now:'#C8322B', soon:'#D9822B', watch:'#D9822B', ok:'#2E8B57', unknown:'#8A919E' };
+const procChipCls = (k, dark) => ({
+  now:   dark ? 'bg-red-500/15 text-red-300'       : 'bg-red-50 text-red-700',
+  watch: dark ? 'bg-orange-500/15 text-orange-300' : 'bg-orange-50 text-orange-800',
+  muted: dark ? 'bg-slate-700 text-slate-300'      : 'bg-slate-100 text-slate-600',
+}[k]);
+
 // Pulls the actual displayed value for a column, per product — used to
 // auto-fit a column to its longest real value (not a guess).
 const getProcColValue = (key, p) => {
   switch (key) {
     case 'name':     return p.name||'';
-    case 'supplier':  return p.supplier||'';
-    case 'abc':      return p.abcXyz||p.abc||'';
-    case 'riskScore': return p.riskScore!=null?p.riskScore.toString():'';
-    case 'avg':      return `${p.avgMonthly.toFixed(1)} יח'`;
-    case 'trend':    return p.trend?`${Math.abs(p.trend).toFixed(0)}%`:'';
-    case 'stock':    return p.currentStock!=null?p.currentStock.toLocaleString():'';
-    case 'coverage': return p.effectiveCoverDays!=null?`${p.effectiveCoverDays} יום (${(p.effectiveCoverMonths||0).toFixed(1)} ח')`:'';
-    case 'order':    return p.suggestedOrder?p.suggestedOrder.toLocaleString():'';
+    case 'supplier': return p.supplier||'';
+    case 'order':    return p.suggestedOrder?`${p.suggestedOrder.toLocaleString()} יח׳`:'—';
+    case 'status':   return PROC_STATUS_LABEL[procStatus(p)]||'';
+    case 'stock':    return p.currentStock!=null?`${p.currentStock.toLocaleString()} יח׳`:'';
+    case 'coverage': return p.effectiveCoverDays!=null?`${p.effectiveCoverDays} יום`:'';
+    case 'avg':      return `${p.avgMonthly.toFixed(1)} יח׳`;
     default: return '';
   }
 };
 // Extra px to account for icons/badges/padding that surround the text but
 // aren't captured by a plain text measurement (varies per column).
-const PROC_COL_EXTRA_PADDING = { name:70, supplier:30, abc:40, riskScore:40, avg:40, trend:30, stock:40, coverage:40, order:50 };
+const PROC_COL_EXTRA_PADDING = { name:90, order:40, status:50, stock:40, coverage:40, avg:30, supplier:30 };
 
 // ─── IndexedDB storage for large datasets ──────────────────────
 // localStorage caps out at ~5-10MB per origin (hard browser limit, not
@@ -317,7 +357,7 @@ const KPICard = ({ title, value, formatted, subtext, icon: Icon, color, trend, s
   const colorMap = {
     blue: { bg: isDarkMode ? 'bg-blue-500/10' : 'bg-blue-50', icon: 'text-blue-500', accent: '#3b82f6', border: isDarkMode ? 'border-blue-500/20' : 'border-blue-100' },
     green: { bg: isDarkMode ? 'bg-emerald-500/10' : 'bg-emerald-50', icon: 'text-emerald-500', accent: '#10b981', border: isDarkMode ? 'border-emerald-500/20' : 'border-emerald-100' },
-    amber: { bg: isDarkMode ? 'bg-amber-500/10' : 'bg-amber-50', icon: 'text-amber-500', accent: '#f59e0b', border: isDarkMode ? 'border-amber-500/20' : 'border-amber-100' },
+    amber: { bg: isDarkMode ? 'bg-orange-500/10' : 'bg-orange-50', icon: 'text-orange-500', accent: '#f59e0b', border: isDarkMode ? 'border-orange-500/20' : 'border-orange-100' },
     red: { bg: isDarkMode ? 'bg-red-500/10' : 'bg-red-50', icon: 'text-red-500', accent: '#ef4444', border: isDarkMode ? 'border-red-500/20' : 'border-red-100' },
     purple: { bg: isDarkMode ? 'bg-purple-500/10' : 'bg-purple-50', icon: 'text-purple-500', accent: '#8b5cf6', border: isDarkMode ? 'border-purple-500/20' : 'border-purple-100' },
     cyan: { bg: isDarkMode ? 'bg-cyan-500/10' : 'bg-cyan-50', icon: 'text-cyan-500', accent: '#06b6d4', border: isDarkMode ? 'border-cyan-500/20' : 'border-cyan-100' },
@@ -782,7 +822,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
                         <tr className={`transition-colors ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50/80'}`}>
                           <td className={`px-4 py-3 font-medium ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{c.name}</td>
                           <td className="px-4 py-3">
-                            <span className={`inline-flex items-center justify-center w-6 h-6 rounded-lg text-xs font-bold ${c.abc==='A'?(isDarkMode?'bg-amber-500/20 text-amber-400':'bg-amber-100 text-amber-700'):c.abc==='B'?(isDarkMode?'bg-blue-500/20 text-blue-400':'bg-blue-100 text-blue-700'):(isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500')}`} title={`${c.revPct.toFixed(1)}% מההכנסות`}>{c.abc}</span>
+                            <span className={`inline-flex items-center justify-center w-6 h-6 rounded-lg text-xs font-bold ${c.abc==='A'?(isDarkMode?'bg-orange-500/20 text-orange-400':'bg-orange-100 text-orange-700'):c.abc==='B'?(isDarkMode?'bg-blue-500/20 text-blue-400':'bg-blue-100 text-blue-700'):(isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500')}`} title={`${c.revPct.toFixed(1)}% מההכנסות`}>{c.abc}</span>
                           </td>
                           <td className={`px-4 py-3 font-bold tabular-nums ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>{formatCurrency(c.totalRevenue)}</td>
                           <td className="px-4 py-3">{formatShort(c.avgMonthly)}</td>
@@ -792,7 +832,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
                           <td className="px-4 py-3 flex items-center gap-1.5 flex-wrap">
                             {statusBadge(c.status)}
                             {c.atRisk && (
-                              <span title="ירידה 3 חודשים רצופים בהכנסה — כדאי ליצור קשר לפני שהלקוח נוטש לגמרי" className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${isDarkMode?'bg-amber-500/20 text-amber-300':'bg-amber-100 text-amber-700'}`}>
+                              <span title="ירידה 3 חודשים רצופים בהכנסה — כדאי ליצור קשר לפני שהלקוח נוטש לגמרי" className={`inline-flex items-center gap-1 text-[10px] font-bold px-2 py-0.5 rounded-full ${isDarkMode?'bg-orange-500/20 text-orange-300':'bg-orange-100 text-orange-700'}`}>
                                 <TriangleAlert className="w-2.5 h-2.5"/>בסיכון
                               </span>
                             )}
@@ -868,7 +908,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
         <div className={`p-6 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
           <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
             <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Box className="w-5 h-5 text-pink-500"/>מוצרים מובילים (כל הלקוחות)</h3>
-            <span className={`text-[11px] px-2 py-1 rounded-lg ${isDarkMode?'bg-amber-500/10 text-amber-400':'bg-amber-50 text-amber-700'}`}>על כל התקופה בקובץ — לא ניתן לסינון לפי תאריך</span>
+            <span className={`text-[11px] px-2 py-1 rounded-lg ${isDarkMode?'bg-orange-500/10 text-orange-400':'bg-orange-50 text-orange-700'}`}>על כל התקופה בקובץ — לא ניתן לסינון לפי תאריך</span>
           </div>
           <p className={`text-xs mb-4 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>קובץ "מכירות ללקוח לפי מוצר" לא כולל עמודת חודש — הסכומים כאן הם סכום מצטבר על כל מה שיובא, בלי קשר לבורר התאריכים שמעל.</p>
           <div className="space-y-1.5">
@@ -887,7 +927,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
         <div className={`p-6 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
           <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
             <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Box className="w-5 h-5 text-pink-500"/>נקנים יחד (Cross-sell)</h3>
-            <span className={`text-[11px] px-2 py-1 rounded-lg ${isDarkMode?'bg-amber-500/10 text-amber-400':'bg-amber-50 text-amber-700'}`}>על כל התקופה בקובץ — לא ניתן לסינון לפי תאריך</span>
+            <span className={`text-[11px] px-2 py-1 rounded-lg ${isDarkMode?'bg-orange-500/10 text-orange-400':'bg-orange-50 text-orange-700'}`}>על כל התקופה בקובץ — לא ניתן לסינון לפי תאריך</span>
           </div>
           <p className={`text-xs mb-4 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>זוגות מוצרים שאותו לקוח קנה את שניהם (לא בהכרח באותה עסקה). מבוסס על {Object.keys(productsByCustomer).length.toLocaleString()} לקוחות עם פירוט מוצרים.</p>
           <div className="space-y-1.5">
@@ -968,7 +1008,7 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
     else if (revTrend <= -25) list.push({ type:'warning', icon:ArrowDownRight, text:`ירידה של ${Math.abs(revTrend).toFixed(0)}% בהכנסות החודש לעומת החודש הקודם` });
 
     if (totalRevenue > 0) {
-      if (margin < 10) list.push({ type:'warning', icon:TriangleAlert, text:`רווחיות נמוכה — ${margin.toFixed(1)}% בלבד מההכנסות` });
+      if (margin < 10) list.push({ type:'warning', icon:TriangleAlert, text:`רווחיות נמוכה — ${fmtPct(margin)} בלבד מההכנסות` });
       else if (margin >= 40) list.push({ type:'success', icon:TrendingUp, text:`רווחיות גבוהה — ${margin.toFixed(1)}% מההכנסות` });
     }
 
@@ -1021,7 +1061,7 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
         <KPICard title="הכנסות" formatted={formatShort(totalRevenue)} icon={DollarSign} color="blue" trend={revTrend} sparkData={sparkRevenue} isDarkMode={isDarkMode} onClick={() => setActiveTab('sales')} />
         <KPICard title="הוצאות" formatted={formatShort(totalExpenses)} icon={Wallet} color="red" isDarkMode={isDarkMode} onClick={() => setActiveTab('suppliers')} />
         <KPICard title="רווח נקי" formatted={formatShort(netProfit)} icon={TrendingUp} color={netProfit>=0?'green':'red'} trend={profitTrend} sparkData={sparkProfit} isDarkMode={isDarkMode} onClick={() => setActiveTab('summary')} />
-        <KPICard title="מכירות יחידות" formatted={totalUnits.toLocaleString()} icon={Package} color="amber" subtext={`${margin.toFixed(1)}% מרווח`} isDarkMode={isDarkMode} />
+        <KPICard title="מכירות יחידות" formatted={totalUnits.toLocaleString()} icon={Package} color="amber" subtext={`${fmtPct(margin)} מרווח`} isDarkMode={isDarkMode} />
       </div>
 
       {/* Main charts row */}
@@ -1051,7 +1091,7 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
               </defs>
               <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDarkMode?'#334155':'#f1f5f9'} />
               <XAxis dataKey="name" stroke={isDarkMode?'#94a3b8':'#94a3b8'} tick={{fontSize:11}} axisLine={false} tickLine={false} tickMargin={8} />
-              <YAxis stroke={isDarkMode?'#94a3b8':'#94a3b8'} tick={{fontSize:11}} axisLine={false} tickLine={false} tickFormatter={v=>`₪${v/1000}k`} />
+              <YAxis stroke={isDarkMode?'#94a3b8':'#94a3b8'} tick={{fontSize:11}} axisLine={false} tickLine={false} tickFormatter={v=>`${v<0?'-':''}₪${Math.abs(v/1000)}k`} width={58} />
               <RechartsTooltip
                 formatter={(v,n) => [formatCurrency(v), n]}
                 contentStyle={{ backgroundColor:isDarkMode?'#1e293b':'#fff', borderColor:isDarkMode?'#334155':'#e2e8f0', borderRadius:'12px', color:isDarkMode?'#fff':'#0f172a' }}
@@ -1082,7 +1122,7 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
                 className="transition-all duration-1000"
               />
               <text x="80" y="72" textAnchor="middle" className="font-bold" style={{fontSize:'22px', fill:isDarkMode?'#fff':'#1e293b', fontWeight:700}}>
-                {margin.toFixed(1)}%
+                {fmtPct(margin)}
               </text>
             </svg>
             <span className={`text-sm ${isDarkMode?'text-slate-400':'text-slate-500'}`}>מתוך ₪{(totalRevenue/1000).toFixed(0)}K הכנסות</span>
@@ -1093,7 +1133,7 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
             {[
               { label: 'פריטים ייחודיים', val: new Set(filteredSales.map(d=>d.description)).size, color: 'text-blue-500' },
               { label: 'ספקים פעילים', val: new Set(filteredSuppliers.map(d=>d.supplier)).size, color: 'text-emerald-500' },
-              { label: 'חודשי נתונים', val: new Set([...filteredSales,...filteredSuppliers].map(d=>d.date)).size, color: 'text-amber-500' },
+              { label: 'חודשי נתונים', val: new Set([...filteredSales,...filteredSuppliers].map(d=>d.date)).size, color: 'text-orange-500' },
             ].map(s => (
               <div key={s.label} className={`flex justify-between items-center py-2 border-b last:border-0 ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
                 <span className={`text-sm ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{s.label}</span>
@@ -1110,7 +1150,7 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
         <div className={`p-6 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
           <div className="flex items-center justify-between mb-5">
             <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}>
-              <Zap className="w-5 h-5 text-amber-500" /> מוצרים מובילים
+              <Zap className="w-5 h-5 text-orange-500" /> מוצרים מובילים
             </h3>
             <button onClick={() => setActiveTab('sales')} className={`text-xs px-3 py-1.5 rounded-lg transition-colors ${isDarkMode?'text-blue-400 hover:bg-blue-500/10':'text-blue-600 hover:bg-blue-50'}`}>
               הצג הכל ←
@@ -1120,7 +1160,7 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
             {topProducts.length === 0 ? <p className={`text-sm text-center py-6 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין נתוני מכירות</p> :
             topProducts.map((p, i) => (
               <div key={p.name} className="flex items-center gap-3">
-                <span className={`w-6 h-6 rounded-lg flex items-center justify-center text-xs font-bold shrink-0 ${i===0?(isDarkMode?'bg-amber-500/20 text-amber-400':'bg-amber-100 text-amber-700'):(isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500')}`}>{i+1}</span>
+                <span className={`w-6 h-6 rounded-lg flex items-center justify-center text-xs font-bold shrink-0 ${i===0?(isDarkMode?'bg-orange-500/20 text-orange-400':'bg-orange-100 text-orange-700'):(isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500')}`}>{i+1}</span>
                 <div className="flex-1 min-w-0">
                   <div className="flex justify-between mb-1">
                     <span className={`text-sm font-medium truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{p.name}</span>
@@ -1761,11 +1801,19 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
   const [leadTime, setLeadTime] = useState(1);
   const [abcFilter, setAbcFilter] = useState('all');
   const [riskFilter, setRiskFilter] = useState('all'); // 'all'|'critical'|'low'|'ok'|'unknown'
+  // Set by the action cards at the top: 'all' | 'order' | 'late'
+  const [actionFilter, setActionFilter] = useState('all');
+  // Product whose details drawer is open (by key), or null
+  const [drawerKey, setDrawerKey] = useState(null);
+  // Planning settings panel (uploads + parameters) — collapsed by default once
+  // inventory files exist, so the page opens on "what to do", not on setup.
+  const [settingsOpen, setSettingsOpen] = useState(() => { try { const sl = JSON.parse(localStorage.getItem('procurementInvSlots')||'null'); return !(sl && (sl.product || sl.masterCard)); } catch { return true; } });
   const [searchTerm, setSearchTerm] = useState('');
   // Arrived here via a "jump to procurement" link from the Sales tab — drop the
   // product name straight into this page's own search box.
   useEffect(() => { if (jumpTo?.term) setSearchTerm(jumpTo.term); }, [jumpTo]);
-  const [sortConfig, setSortConfig] = useState({ key:'totalRev', direction:'desc' });
+  // Default: most urgent first, then by order value — "what do I do first".
+  const [sortConfig, setSortConfig] = useState({ key:'statusRank', direction:'asc' });
   const [editingStock, setEditingStock] = useState(null);
   const [editingMOQ, setEditingMOQ] = useState(null);
   const [editingLeadTime, setEditingLeadTime] = useState(null); // supplier name being edited
@@ -2484,7 +2532,11 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
         coverageRiskScore*0.40 + volatilityRiskScore*0.20 + xyzRiskScore*0.15 + leadTimeRiskScore*0.15 + supplierRiskScore*0.10
       );
 
-      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, serviceLevel, projectedDemand, seasonalApplied, suggestedOrderFlat, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, priceChangePct, prevPrice, priceChangedAt, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, nextMonIdx, coverageMonths, coverageDays, incomingQty, overdue, effectiveStock, effectiveCoverDays, effectiveCoverMonths, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, risk, physicalRisk, shortNowCoveredByPO, riskScore };
+      const out = { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, serviceLevel, projectedDemand, seasonalApplied, suggestedOrderFlat, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, priceChangePct, prevPrice, priceChangedAt, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, nextMonIdx, coverageMonths, coverageDays, incomingQty, overdue, effectiveStock, effectiveCoverDays, effectiveCoverMonths, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, risk, physicalRisk, shortNowCoveredByPO, riskScore };
+      out.status = procStatus(out);
+      out.statusRank = { now:0, soon:1, watch:2, unknown:3, ok:4 }[out.status];
+      out.chip = procChip(out);
+      return out;
     });
   }, [salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates]);
 
@@ -2492,6 +2544,8 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
     let data = products;
     if (abcFilter!=='all') data=data.filter(p=>p.abc===abcFilter);
     if (riskFilter!=='all') data=data.filter(p=>p.risk===riskFilter);
+    if (actionFilter==='order') data=data.filter(p=>p.suggestedOrder>0);
+    if (actionFilter==='late') data=data.filter(p=>p.overdue);
     if (searchTerm) data=data.filter(p=>smartMatch(p.name, searchTerm)||smartMatch(p.sku, searchTerm));
     return [...data].sort((a,b)=>{
       const va=a[sortConfig.key], vb=b[sortConfig.key];
@@ -2506,9 +2560,10 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
         const cmp = String(va).localeCompare(String(vb), 'he');
         return sortConfig.direction==='asc' ? cmp : -cmp;
       }
-      return sortConfig.direction==='asc'?(va<vb?-1:va>vb?1:0):(va>vb?-1:va<vb?1:0);
+      const cmp = sortConfig.direction==='asc'?(va<vb?-1:va>vb?1:0):(va>vb?-1:va<vb?1:0);
+      return cmp || (b.orderCost||0)-(a.orderCost||0) || (b.totalRev||0)-(a.totalRev||0);
     });
-  }, [products, abcFilter, riskFilter, searchTerm, sortConfig]);
+  }, [products, abcFilter, riskFilter, actionFilter, searchTerm, sortConfig]);
 
   // ─── Progressive rendering for the main table ───────────────────
   // With large catalogs (1000+ SKUs), building/diffing every row on every
@@ -2660,6 +2715,20 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
   const totalOrderCost  = useMemo(()=>filtered.reduce((a,p)=>a+(p.orderCost||0),0),[filtered]);
   const blockedCurrencies = useMemo(() => [...new Set(products.filter(p=>p.costCurrencyBlocked).map(p=>p.costCurrencyBlocked))], [products]);
   const stockedCount = useMemo(()=>products.filter(p=>p.currentStock!==null).length,[products]);
+  // Numbers for the four action cards — always over ALL products, not the filtered table.
+  const actionKpis = useMemo(() => {
+    const toOrder = products.filter(p=>p.suggestedOrder>0 && p.currentStock!==null);
+    const stockValue = products.reduce((s,p)=>s+(p.unitCost!=null?Math.max(0,p.currentStock??0)*p.unitCost:0),0);
+    const monthlyCogs = products.reduce((s,p)=>s+(p.unitCost!=null?(p.avgMonthly||0)*p.unitCost:0),0);
+    return {
+      orderCount: toOrder.length,
+      orderCost: toOrder.reduce((s,p)=>s+(p.orderCost||0),0),
+      urgentCount: toOrder.filter(p=>p.status==='now').length,
+      lateValue: overdueOrders.reduce((s,o)=>s+(o.valueILS||0),0),
+      stockValue,
+      daysOfInventory: monthlyCogs>0 ? Math.round(stockValue/(monthlyCogs/30)) : null,
+    };
+  }, [products, overdueOrders]);
 
   // Group products-to-order by supplier — must be after filtered
   const supplierGroups = useMemo(() => {
@@ -2862,13 +2931,13 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
 
   const ABCBadge = ({cls, xyz, abcXyz}) => {
     const abcStyle = {
-      A: isDarkMode?'bg-amber-500/20 text-amber-300 border-amber-500/40':'bg-amber-50 text-amber-700 border-amber-300',
+      A: isDarkMode?'bg-orange-500/20 text-orange-300 border-orange-500/40':'bg-orange-50 text-orange-700 border-orange-300',
       B: isDarkMode?'bg-blue-500/20 text-blue-300 border-blue-500/30':'bg-blue-50 text-blue-700 border-blue-200',
       C: isDarkMode?'bg-slate-600/40 text-slate-400 border-slate-600':'bg-slate-100 text-slate-500 border-slate-200',
     };
     const xyzStyle = {
       X: isDarkMode?'text-emerald-400':'text-emerald-600',
-      Y: isDarkMode?'text-amber-400':'text-amber-600',
+      Y: isDarkMode?'text-orange-400':'text-orange-600',
       Z: isDarkMode?'text-red-400':'text-red-600',
     };
     const tooltips = {
@@ -2889,21 +2958,12 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
       </span>
     );
   };
-  const RiskBadge = ({risk, months, days}) => {
-    if (risk==='unknown') return <span className={`text-xs ${isDarkMode?'text-slate-600':'text-slate-400'}`}>—</span>;
-    const label = days != null
-      ? <><span className="font-bold">{days} יום</span><span className="opacity-60 mr-1"> ({months?.toFixed(1)} ח')</span></>
-      : <span className="font-bold">{months?.toFixed(1)} ח'</span>;
-    if (risk==='critical') return <span className="flex items-center gap-1 text-xs text-red-500 whitespace-nowrap"><TriangleAlert className="w-3 h-3 shrink-0"/>{label}</span>;
-    if (risk==='low')      return <span className="flex items-center gap-1 text-xs text-amber-500 whitespace-nowrap"><AlertTriangle className="w-3 h-3 shrink-0"/>{label}</span>;
-    return <span className={`flex items-center gap-1 text-xs whitespace-nowrap ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}><Check className="w-3 h-3 shrink-0"/>{label}</span>;
-  };
 const SeasonalityButton = (p) => (
                       <div className="relative" style={{lineHeight:0}}>
                             <button
                               onClick={e=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setSeasonHover(prev=>prev?.key===p.key?null:{key:p.key,rect:r});}}
-                              className={`p-1 rounded text-xs transition-opacity ${seasonHover?.key===p.key?'opacity-100 text-blue-500':'opacity-40 hover:opacity-100'} ${isDarkMode?'text-blue-400':'text-blue-500'}`}>
-                              📅
+                              className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs font-semibold transition-colors ${isDarkMode?'text-blue-300 hover:bg-slate-700':'text-blue-700 hover:bg-blue-50'}`}>
+                              <Calendar className="w-3.5 h-3.5"/> עונתיות לפי חודש ושנה
                             </button>
                             {seasonHover?.key===p.key && (
                               <div className={`rounded-2xl border shadow-2xl text-right ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}
@@ -2933,7 +2993,7 @@ const SeasonalityButton = (p) => (
                                 }}>
                                 {/* Header */}
                                 <div className="flex items-center justify-between mb-3 gap-3">
-                                  <p className={`text-sm font-bold shrink-0 ${isDarkMode?'text-white':'text-slate-800'}`}>📅 עונתיות חודשית</p>
+                                  <p className={`text-sm font-bold shrink-0 ${isDarkMode?'text-white':'text-slate-800'}`}>עונתיות חודשית</p>
                                   <p className={`text-xs truncate ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{p.name}</p>
                                   <button
                                     onClick={e=>{e.stopPropagation();setSeasonHover(null);}}
@@ -2988,12 +3048,12 @@ const SeasonalityButton = (p) => (
                                                 :ratio>=1.3?(isDarkMode?'bg-emerald-500/25':'bg-emerald-50')
                                                 :ratio>=1.1?(isDarkMode?'bg-emerald-500/10':'bg-emerald-50/40')
                                                 :ratio>=0.8?''
-                                                :ratio>=0.5?(isDarkMode?'bg-amber-500/15':'bg-amber-50')
+                                                :ratio>=0.5?(isDarkMode?'bg-orange-500/15':'bg-orange-50')
                                                 :(isDarkMode?'bg-red-500/15':'bg-red-50');
                                               const tc = !qty?(isDarkMode?'text-slate-700':'text-slate-300')
                                                 :ratio>=1.2?(isDarkMode?'text-emerald-300':'text-emerald-700')
                                                 :ratio>=0.8?(isDarkMode?'text-slate-200':'text-slate-700')
-                                                :ratio>=0.5?(isDarkMode?'text-amber-300':'text-amber-700')
+                                                :ratio>=0.5?(isDarkMode?'text-orange-300':'text-orange-700')
                                                 :(isDarkMode?'text-red-400':'text-red-600');
                                               return (
                                                 <td key={m} className={`text-center py-1.5 px-2 text-xs font-semibold rounded-sm ${bg} ${tc}`}>
@@ -3025,7 +3085,7 @@ const SeasonalityButton = (p) => (
                                 <div className={`flex items-center gap-4 mt-3 pt-3 border-t text-xs ${isDarkMode?'border-slate-700 text-slate-400':'border-slate-100 text-slate-500'}`}>
                                   <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-emerald-400/60 inline-block"/>שיא</span>
                                   <span className="flex items-center gap-1.5"><span className={`w-3 h-3 rounded inline-block ${isDarkMode?'bg-slate-600':'bg-slate-200'}`}/>ממוצע</span>
-                                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-amber-400/60 inline-block"/>שפל</span>
+                                  <span className="flex items-center gap-1.5"><span className="w-3 h-3 rounded bg-orange-400/60 inline-block"/>שפל</span>
                                   <span className={`mr-auto text-[10px] opacity-60`}>כמויות בפועל</span>
                                 </div>
                               </div>
@@ -3051,8 +3111,8 @@ const SeasonalityButton = (p) => (
   const renderProcTableHeader = (items) => (
     <tr>
       {PROC_COL_KEYS.map(key => {
-        const extraCls = key==='order' ? `font-bold ${isDarkMode?'text-blue-400 hover:text-blue-300':'text-blue-700 hover:text-blue-600'}` : '';
-        const sortKeyMap = { name:'name', supplier:'supplier', abc:'abc', riskScore:'riskScore', avg:'avgMonthly', trend:'trend', stock:'currentStock', coverage:'effectiveCoverDays', order:'suggestedOrder' };
+        const extraCls = key==='order' ? `font-bold ${isDarkMode?'text-slate-100':'text-slate-800'}` : '';
+        const sortKeyMap = { name:'name', supplier:'supplier', status:'statusRank', avg:'avgMonthly', stock:'currentStock', coverage:'effectiveCoverDays', order:'suggestedOrder' };
         const sortKey = sortKeyMap[key];
         return (
           <th key={key}
@@ -3068,301 +3128,243 @@ const SeasonalityButton = (p) => (
     </tr>
   );
 
-  const TrendButton = (p) => {
-    const trendCls = !p.trend?(isDarkMode?'text-slate-500':'text-slate-400'):p.trend>0?'text-emerald-500':'text-red-500';
-    const isOpen = trendHover?.key===p.key;
-    return (
-      <span className="relative inline-block" style={{lineHeight:0}}>
-        <button
-          onClick={e=>{e.stopPropagation();const r=e.currentTarget.getBoundingClientRect();setTrendHover(prev=>prev?.key===p.key?null:{key:p.key,rect:r});}}
-          className={`flex items-center gap-1 text-xs font-bold whitespace-nowrap rounded px-1 -mx-1 transition-opacity ${trendCls} ${isOpen?'opacity-100 underline':'hover:opacity-70'}`}
-          title="לחץ לגרף מגמה">
-          {p.trend>5?<ArrowUpRight className="w-3.5 h-3.5"/>:p.trend<-5?<ArrowDownRight className="w-3.5 h-3.5"/>:<Minus className="w-3.5 h-3.5"/>}
-          {p.trend?`${Math.abs(p.trend).toFixed(0)}%`:'—'}
-        </button>
-        {isOpen && (
-          <div className={`rounded-2xl border shadow-2xl text-right ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}
-            onClick={e=>e.stopPropagation()}
-            style={{
-              position:'fixed', zIndex:9999, width: Math.min(440, window.innerWidth-16), padding:'16px', lineHeight:'normal',
-              ...(trendHover?.rect ? {
-                ...(trendHover.rect.top > 350
-                  ? { bottom: window.innerHeight - trendHover.rect.top + 8 }
-                  : { top: trendHover.rect.bottom + 8 }),
-                ...(()=>{
-                  const popupW = Math.min(440, window.innerWidth - 16);
-                  const wantedRight = window.innerWidth - trendHover.rect.right + 8;
-                  const right = Math.max(8, Math.min(wantedRight, window.innerWidth - popupW - 8));
-                  return { right };
-                })(),
-              } : { top:100, right:8 })
-            }}>
-            {/* Header */}
-            <div className="flex items-center justify-between mb-2 gap-3">
-              <p className={`text-sm font-bold shrink-0 ${isDarkMode?'text-white':'text-slate-800'}`}>📈 גרף מגמה — 12 חודשים</p>
-              <button onClick={e=>{e.stopPropagation();setTrendHover(null);}}
-                className={`shrink-0 p-1 rounded-full transition-colors ${isDarkMode?'hover:bg-slate-700 text-slate-400 hover:text-white':'hover:bg-slate-100 text-slate-400 hover:text-slate-700'}`}>
-                <X className="w-4 h-4"/>
-              </button>
-            </div>
-            <p className={`text-xs truncate mb-3 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{p.name}</p>
-            {(!p.trendSeries || p.trendSeries.every(d=>!d.qty)) ? (
-              <p className={`text-xs py-8 text-center ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין מספיק נתונים להצגת גרף</p>
-            ) : (
-              <>
-                <div style={{width: Math.min(408, window.innerWidth-48), height:200}}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={p.trendSeries} margin={{top:5,right:5,bottom:0,left:-15}}>
-                      <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode?'#334155':'#e2e8f0'} vertical={false}/>
-                      <XAxis dataKey="month" tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false}/>
-                      <YAxis tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false} width={32}/>
-                      <RechartsTooltip
-                        content={({active, payload, label}) => {
-                          if (!active || !payload?.length) return null;
-                          // Read straight from the underlying data row ({month, qty}) instead of
-                          // matching a specific series — avoids any ambiguity with the avg line.
-                          const row = payload[0]?.payload;
-                          if (!row) return null;
-                          const qty = row.qty||0;
-                          const diff = p.avgMonthly>0 ? Math.round((qty/p.avgMonthly - 1)*100) : null;
-                          return (
-                            <div style={{background:isDarkMode?'#1e293b':'#fff', border:`1px solid ${isDarkMode?'#334155':'#e2e8f0'}`, borderRadius:8, fontSize:12, padding:'8px 10px', direction:'rtl'}}>
-                              <p style={{color:isDarkMode?'#e2e8f0':'#1e293b', fontWeight:'bold', marginBottom:4}}>{label}</p>
-                              <p style={{color:isDarkMode?'#cbd5e1':'#334155'}}>{qty.toLocaleString()} יח' נמכרו</p>
-                              {diff!=null && <p style={{color: diff>=0?'#10b981':'#ef4444', fontSize:11, marginTop:2}}>{diff>=0?'+':''}{diff}% מהממוצע ({p.avgMonthly.toFixed(1)})</p>}
-                            </div>
-                          );
-                        }}
-                      />
-                      <Bar dataKey="qty" name="נמכר" radius={[4,4,0,0]}>
-                        {p.trendSeries.map((d,i)=>(
-                          <Cell key={i} fill={d.qty >= (p.avgMonthly||0) ? '#10b981' : (isDarkMode?'#475569':'#cbd5e1')}/>
-                        ))}
-                      </Bar>
-                      {p.avgMonthly>0 && (
-                        <Line type="monotone" dataKey={()=>p.avgMonthly} stroke="#3b82f6" strokeWidth={1.5} strokeDasharray="4 3" dot={false} activeDot={false} name="ממוצע" isAnimationActive={false}/>
-                      )}
-                    </ComposedChart>
-                  </ResponsiveContainer>
-                </div>
-                <div className={`flex items-center justify-between mt-2 text-[11px] ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
-                  <span className="flex items-center gap-1"><span className="inline-block w-2.5 h-2.5 rounded-sm" style={{background:'#10b981'}}/>מעל הממוצע</span>
-                  <span className="flex items-center gap-1"><span className="inline-block w-4 border-t border-dashed" style={{borderColor:'#3b82f6'}}/>ממוצע ({p.avgMonthly.toFixed(1)})</span>
-                  <span className={`font-bold ${p.trend>0?'text-emerald-500':p.trend<0?'text-red-500':''}`}>מגמה: {p.trend?`${p.trend>0?'+':''}${p.trend.toFixed(0)}%`:'—'}</span>
-                </div>
-              </>
-            )}
-          </div>
-        )}
-      </span>
-    );
-  };
-  // Combined risk score badge — color-coded 0-100, with a tooltip that spells
-  // out the weighting so the number isn't a black box.
-  const RiskScoreBadge = ({ p }) => {
-    if (p.riskScore==null) return <span className={`text-xs ${isDarkMode?'text-slate-600':'text-slate-400'}`}>—</span>;
-    const s = p.riskScore;
-    const color = s>=70 ? 'red' : s>=40 ? 'amber' : 'emerald';
-    const cls = {
-      red:    isDarkMode?'bg-red-500/15 text-red-300 border-red-500/30':'bg-red-50 text-red-700 border-red-200',
-      amber:  isDarkMode?'bg-amber-500/15 text-amber-300 border-amber-500/30':'bg-amber-50 text-amber-700 border-amber-200',
-      emerald:isDarkMode?'bg-emerald-500/15 text-emerald-300 border-emerald-500/30':'bg-emerald-50 text-emerald-700 border-emerald-200',
-    }[color];
-    return (
-      <span className={`inline-flex items-center gap-1 px-2 py-1 rounded-lg text-xs font-bold border tabular-nums ${cls}`}
-        title="ציון סיכון משוקלל: כיסוי מלאי (40%) · תנודתיות ביקוש (20%) · יציבות XYZ (15%) · זמן אספקה (15%) · ריכוזיות ספק (10%). ציון גבוה = כדאי לבדוק קודם, לא תחזית ודאית.">
-        {s}
-      </span>
-    );
-  };
+// One row = one decision. Name (+ABC, SKU, a single note), how much to
+// order, one status, stock + on the way, coverage, average, supplier.
+// Everything else lives in the product drawer (click the row).
 const renderProductRow = (p) => {
                 const isEditing = editingStock===p.key;
-                const rowBg = p.risk==='critical'?(isDarkMode?'bg-red-900/10':'bg-red-50/60'):p.risk==='low'?(isDarkMode?'bg-amber-900/5':'bg-amber-50/30'):'';
+                const st = p.status || procStatus(p);
+                const chip = p.chip;
+                const coverPct = p.effectiveCoverDays!=null ? Math.min(100, p.effectiveCoverDays/((p.effectiveLeadTime+monthsToStock)*30||1)*100) : 0;
+                const isSel = drawerKey===p.key;
                 return (
-                  <tr key={p.key} className={`transition-all duration-150 group cursor-default ${isDarkMode?'hover:bg-slate-700/50':'hover:bg-blue-50/40'} ${rowBg}`}>
+                  <tr key={p.key}
+                    onClick={()=>setDrawerKey(p.key)}
+                    onKeyDown={e=>{ if (e.key==='Enter' && e.target===e.currentTarget) setDrawerKey(p.key); }}
+                    tabIndex={0}
+                    aria-label={`${p.name} — פתח פרטים`}
+                    className={`transition-colors cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${isSel?(isDarkMode?'bg-slate-700/60':'bg-blue-50/70'):(isDarkMode?'hover:bg-slate-700/40':'hover:bg-slate-50')}`}>
+                    {/* Name */}
                     <td className="px-4 py-3 overflow-hidden">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <p className={`font-medium text-sm ${isDarkMode?'text-slate-100':'text-slate-800'} truncate`} title={p.name}>{p.name}</p>
-                        {p.lifecycle==='growing'  && <span title="צמיחה" className="text-xs">🚀</span>}
-                        {p.lifecycle==='declining' && <span title="דעיכה" className="text-xs">⚠️</span>}
-                        {p.lifecycle==='dying'     && <span title="גוסס" className="text-xs">🔴</span>}
-                        {p.incomingQty>0 && (p.overdue
-                          ? <span title={`בדרך: ${p.incomingQty} יח' — מתוכן ${p.overdue.qty} באיחור (עד ${p.overdue.maxDays} ימים)`} className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isDarkMode?'bg-red-500/20 text-red-300':'bg-red-50 text-red-700'}`}>📦 {p.incomingQty} · ⏰ איחור</span>
-                          : <span title={`בדרך: ${p.incomingQty} יח'`} className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-50 text-blue-700'}`}>📦 {p.incomingQty}</span>)}
-                        {p.priceChangePct!=null && Math.abs(p.priceChangePct)>=0.5 && (
-                          <span title={`מחיר קניה השתנה מ-${p.prevPrice} ל-${p.unitCostOriginal} (${p.priceChangedAt})`}
-                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${p.priceChangePct>0?(isDarkMode?'bg-red-500/15 text-red-300':'bg-red-50 text-red-600'):(isDarkMode?'bg-emerald-500/15 text-emerald-300':'bg-emerald-50 text-emerald-700')}`}>
-                            מחיר {p.priceChangePct>0?'↑':'↓'}{Math.abs(p.priceChangePct).toFixed(0)}%
-                          </span>
-                        )}
+                      <div className="flex items-center gap-2 min-w-0">
+                        <p className={`font-semibold text-sm truncate ${isDarkMode?'text-slate-100':'text-slate-800'}`} title={p.name}>{p.name}</p>
+                        <span title={`סיווג ${p.abcXyz}`} className={`shrink-0 text-[11px] font-bold px-1.5 py-0.5 rounded ${isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-100 text-slate-600'}`}>{p.abc}</span>
                       </div>
-                      <div className="flex items-center gap-2 mt-0.5 flex-wrap">
-                        {p.sku&&p.sku!==p.name&&<span className={`text-xs font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}</span>}
-                        {editingMOQ===p.key ? (
-                          <input type="number" autoFocus defaultValue={p.moq??''}
-                            onBlur={e=>{saveMOQ(p.key,e.target.value);setEditingMOQ(null);}}
-                            onKeyDown={e=>{if(e.key==='Enter'){saveMOQ(p.key,e.target.value);setEditingMOQ(null);}if(e.key==='Escape')setEditingMOQ(null);}}
-                            style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#a855f7'}:{}}
-                            className="w-16 px-1.5 py-0.5 border-2 border-purple-500 rounded text-[10px] text-right focus:outline-none" placeholder="MOQ"
-                          />
-                        ) : (
-                          <button onClick={()=>setEditingMOQ(p.key)} title="כמות מינימום להזמנה (MOQ) — לחץ לעריכה"
-                            className={`text-[10px] font-medium px-1.5 py-0.5 rounded border transition-colors ${p.moq
-                              ?(isDarkMode?'border-purple-500/40 bg-purple-500/10 text-purple-300 hover:bg-purple-500/20':'border-purple-200 bg-purple-50 text-purple-600 hover:bg-purple-100')
-                              :(isDarkMode?'border-dashed border-slate-700 text-slate-600 hover:text-purple-400':'border-dashed border-slate-300 text-slate-400 hover:text-purple-500')}`}>
-                            {p.moq ? `MOQ ${p.moq}` : '+MOQ'}
-                          </button>
-                        )}
+                      <div className="flex items-center gap-2 mt-1 min-w-0">
+                        {p.sku&&p.sku!==p.name&&<span className={`text-xs font-mono shrink-0 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.sku}</span>}
+                        {chip && <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded truncate ${procChipCls(chip.k, isDarkMode)}`}>{chip.t}</span>}
                       </div>
-                      {p.moq>0 && p.suggestedOrderRaw>0 && p.suggestedOrder!==p.suggestedOrderRaw && (
-                        <div className={`text-[10px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
-                          חושב {p.suggestedOrderRaw} · עוגל ל-MOQ
+                    </td>
+                    {/* Order */}
+                    <td className="px-4 py-3">
+                      {p.suggestedOrder>0 ? (
+                        <div className="flex flex-col">
+                          <span className={`text-lg font-bold tabular-nums leading-tight ${isDarkMode?'text-white':'text-slate-900'}`}>{p.suggestedOrder.toLocaleString()} <span className="text-xs font-medium opacity-60">יח׳</span></span>
+                          {p.orderCost ? <span className={`text-xs tabular-nums ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{formatShort(p.orderCost)}</span>
+                            : p.costCurrencyBlocked ? <span className={`text-xs ${isDarkMode?'text-orange-300':'text-orange-700'}`} title="חסר שער חליפין בהגדרות">חסר שער {p.costCurrencyBlocked}</span> : null}
                         </div>
-                      )}
-                      {SeasonalityButton(p)}
-                      {onJumpToSales && (
-                        <button onClick={e=>{e.stopPropagation();onJumpToSales(p.name);}} title="עבור למכירות למוצר הזה — הכנסה, מגמה ו-ABC"
-                          className={`p-1 rounded text-xs transition-opacity opacity-40 hover:opacity-100 ${isDarkMode?'text-blue-400':'text-blue-500'}`}>
-                          <TrendingUp className="w-3.5 h-3.5"/>
-                        </button>
-                      )}
+                      ) : <span className={`text-sm ${isDarkMode?'text-slate-500':'text-slate-400'}`}>—</span>}
                     </td>
-                    <td className="px-4 py-3 overflow-hidden">
-                      <span className={`text-sm truncate block ${isDarkMode?'text-slate-300':'text-slate-600'}`} title={p.supplier||''}>{p.supplier||'—'}</span>
-                      {p.currency && p.currency!=='ILS' && <span className={`text-[10px] ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.currency}</span>}
-                    </td>
-                    <td className="px-4 py-3.5"><ABCBadge cls={p.abc} xyz={p.xyz} abcXyz={p.abcXyz}/></td>
-                    <td className="px-4 py-3.5"><RiskScoreBadge p={p}/></td>
-                    {/* Avg + Forecast combined */}
+                    {/* Status */}
                     <td className="px-4 py-3">
-                      <div className="flex flex-col gap-0.5">
-                        <div className="flex items-baseline gap-1.5 flex-wrap">
-                          <span className={`font-bold tabular-nums text-sm ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{p.avgMonthly.toFixed(1)}</span>
-                          <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>יח'</span>
-                          {p.isLimitedData && (
-                            <span title={`נתונים מ-${p.avgDataMonths} חודשים בלבד — ממוצע לא אמין`}
-                              className={`text-[10px] font-bold px-1.5 py-0.5 rounded cursor-help ${isDarkMode?'bg-amber-500/20 text-amber-400':'bg-amber-100 text-amber-700'}`}>
-                              ⚠ {p.avgDataMonths}m
-                            </span>
-                          )}
-                          {!p.isLimitedData && p.avgDataMonths > 0 && (
-                            <span title={`ממוצע מבוסס על ${p.avgDataMonths} חודשים (מתוך ${p.windowMonths||'?'} חודשי חלון)`}
-                              className={`text-[10px] px-1 rounded cursor-help ${isDarkMode?'text-slate-600':'text-slate-400'}`}>
-                              {p.avgDataMonths}/{p.windowMonths||'?'}m
-                            </span>
-                          )}
-                        </div>
-                        {p.forecastNext>0 && <div className={`text-xs flex items-center gap-1 ${isDarkMode?'text-blue-400':'text-blue-600'}`}
-                          title={p.seasonalityReliable ? `כולל התאמה עונתית (מקדם ×${p.seasonalFactor.toFixed(2)})` : 'אין מספיק היסטוריה (2+ שנים) להתאמה עונתית'}>
-                          <TrendingUp className="w-3 h-3"/>תחזית: {p.forecastNext}
-                          {p.seasonalityReliable && p.seasonalFactor!==1 && <span className="opacity-70">🍂</span>}
-                        </div>}
-                        {(p.safetyStock>0 || p.minStock>0) && <div className={`text-xs flex items-center gap-1 ${isDarkMode?'text-purple-400':'text-purple-600'}`}
-                          title={`מלאי בטחון מחושב לרמת שירות ${p.serviceLevel}% (מוצר ${p.abc})${p.minStock>p.safetyStock?` · מינימום מ-Priority (${p.minStock}) גבוה יותר ולכן הוא שקובע`:''}`}>
-                          <Activity className="w-3 h-3"/>בטחון: {Math.max(p.safetyStock, p.minStock||0)}
-                          <span className="opacity-60 text-[10px]">{p.minStock>p.safetyStock?'(מינ׳)':`(${p.serviceLevel}%)`}</span>
-                        </div>}
-                      </div>
+                      <span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${procStatusCls(st, isDarkMode)}`}>
+                        <span className="w-2 h-2 rounded-full shrink-0" style={{background: procDotColor[st]}}/>
+                        {PROC_STATUS_LABEL[st]}
+                      </span>
                     </td>
-                    {/* Trend */}
-                    <td className="px-4 py-3">
-                      {TrendButton(p)}
-                    </td>
-                    {/* Stock — editable, shows minStock hint below */}
-                    <td className="px-4 py-3">
+                    {/* Stock (editable) + on the way */}
+                    <td className="px-4 py-3" onClick={e=>e.stopPropagation()}>
                       {isEditing ? (
-                        <input type="number" autoFocus defaultValue={p.currentStock??''}
+                        <input type="number" autoFocus defaultValue={p.currentStock??''} aria-label="מלאי נוכחי"
                           onBlur={e=>{saveStock(p.key,e.target.value);setEditingStock(null);}}
                           onKeyDown={e=>{if(e.key==='Enter'){saveStock(p.key,e.target.value);setEditingStock(null);}if(e.key==='Escape')setEditingStock(null);}}
                           style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#3b82f6'}:{}}
-                          className="w-20 px-2 py-1.5 border-2 border-blue-500 rounded-lg text-xs text-right focus:outline-none" placeholder="0"
+                          className="w-24 px-2 py-1.5 border-2 border-blue-500 rounded-lg text-sm text-right focus:outline-none" placeholder="0"
                         />
                       ) : (
-                        <div>
-                          <button onClick={()=>setEditingStock(p.key)}
-                            className={`flex flex-col items-start px-3 py-2 rounded-xl text-xs border-2 transition-colors group-hover:border-blue-400
-                              ${p.currentStock!==null
-                                ?(p.currentStock<=0
-                                  ?(isDarkMode?'border-red-500/60 bg-red-900/20 text-red-300':'border-red-300 bg-red-50 text-red-700')
-                                  :(isDarkMode?'border-slate-700 bg-slate-700/50 text-slate-300':'border-slate-200 bg-white text-slate-700'))
-                                :(isDarkMode?'border-dashed border-slate-700 text-slate-500 hover:text-blue-400':'border-dashed border-slate-300 text-slate-400 hover:text-blue-500')}`}
-                            title="לחץ לעריכה">
-                            {p.currentStock!==null ? (
-                              <>
-                                <span className={`font-bold tabular-nums text-base leading-tight ${p.currentStock<=0?(isDarkMode?'text-red-400':'text-red-600'):(isDarkMode?'text-white':'text-slate-800')}`}>
-                                  {p.currentStock.toLocaleString()}
-                                </span>
-                                <span className={`text-[10px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>יח'{p.minStock?' · מינ׳ '+p.minStock:''}</span>
-                              </>
-                            ) : (
-                              <span className="flex items-center gap-1 py-1"><RefreshCw className="w-3 h-3"/>הזן מלאי</span>
-                            )}
-                          </button>
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">
-                      <RiskBadge risk={p.risk} months={p.effectiveCoverMonths} days={p.effectiveCoverDays}/>
-                      {p.incomingQty>0 && p.coverageDays!=null && (
-                        <div className={`text-[10px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`} title="הכיסוי למעלה כולל את מה שבדרך">
-                          במלאי בלבד: {p.coverageDays} יום
-                        </div>
-                      )}
-                      {p.shortNowCoveredByPO && (
-                        <div title="המלאי הפיזי נמוך עכשיו, אבל ההזמנות שבדרך מכסות את הצורך — אין צורך להזמין שוב, כן כדאי לוודא שההזמנה מגיעה בזמן"
-                          className={`text-[10px] font-bold mt-0.5 ${isDarkMode?'text-amber-400':'text-amber-600'}`}>
-                          ⚠ חסר עכשיו · מכוסה בהזמנה
-                        </div>
-                      )}
-                      {p.effectiveCoverDays!==null && (
-                        <div className={`mt-1.5 h-1.5 rounded-full overflow-hidden w-16 ${isDarkMode?'bg-slate-700':'bg-slate-200'}`}>
-                          <div className="h-full rounded-full transition-all duration-500" style={{
-                            width: Math.min(100,(p.effectiveCoverDays/(monthsToStock*30+1)*100)).toFixed(0)+'%',
-                            background: p.risk==='critical'?'#ef4444':p.risk==='low'?'#f59e0b':'#10b981'
-                          }}/>
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">
-                      {p.suggestedOrder>0 ? (
-                        <div className="flex flex-col items-start gap-1">
-                          <div className={`flex items-center gap-2 px-3 py-2 rounded-xl font-bold border-2 whitespace-nowrap
-                            ${p.risk==='critical'
-                              ?(isDarkMode?'bg-red-500/20 border-red-500 text-red-300':'bg-red-50 border-red-400 text-red-700')
-                              :p.risk==='low'
-                              ?(isDarkMode?'bg-amber-500/20 border-amber-500 text-amber-300':'bg-amber-50 border-amber-400 text-amber-700')
-                              :(isDarkMode?'bg-blue-500/15 border-blue-500/50 text-blue-300':'bg-blue-50 border-blue-300 text-blue-700')}`}>
-                            <ShoppingCart className="w-4 h-4"/>
-                            <span className="text-base tabular-nums">{p.suggestedOrder.toLocaleString()}</span>
-                            <span className="text-xs font-normal opacity-70">יח'</span>
-                          </div>
-                          {p.orderCost ? (
-                            <span title={p.costConverted?`עלות ב-${p.costConverted} — הומרה לפי השער שהוגדר בהגדרות`:undefined} className={`text-xs px-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
-                              {formatShort(p.orderCost)}{p.costConverted && <span className="opacity-70"> ≈{currencySymbol(p.costConverted)}</span>}
-                            </span>
-                          ) : p.costCurrencyBlocked ? (
-                            <span title="חסר שער חליפין בהגדרות — העלות לא חושבה" className={`text-xs px-1 ${isDarkMode?'text-amber-400':'text-amber-600'}`}>⚠ {p.costCurrencyBlocked}</span>
-                          ) : null}
-                          {p.incomingQty>0 && <span className={`text-[10px] px-1 ${isDarkMode?'text-blue-400':'text-blue-600'}`}>📦 כבר קוזזו {p.incomingQty} יח' שבדרך</span>}
-                          {p.seasonalApplied && (
-                            <span title={`הכמות מחושבת לפי העונתיות של החודשים הקרובים. לפי ממוצע שטוח היה יוצא ${p.suggestedOrderFlat.toLocaleString()} יח'.`}
-                              className={`text-[10px] px-1 cursor-help ${isDarkMode?'text-orange-300':'text-orange-600'}`}>
-                              🍂 עונתי · שטוח: {p.suggestedOrderFlat.toLocaleString()}
-                            </span>
+                        <button type="button" onClick={()=>setEditingStock(p.key)} title="לחץ לעריכת המלאי"
+                          className={`flex flex-col items-start text-right rounded-lg px-2 py-1 -mx-2 transition-colors ${isDarkMode?'hover:bg-slate-700':'hover:bg-slate-100'}`}>
+                          {p.currentStock!==null ? (
+                            <span className={`text-sm font-semibold tabular-nums ${p.currentStock<=0?(isDarkMode?'text-red-300':'text-red-700'):(isDarkMode?'text-slate-100':'text-slate-800')}`}>{p.currentStock.toLocaleString()} יח׳</span>
+                          ) : (
+                            <span className={`text-sm ${isDarkMode?'text-slate-400':'text-slate-500'}`}>הזן מלאי</span>
                           )}
-                        </div>
-                      ) : (
-                        <div className="flex flex-col items-start gap-1">
-                          <span className={`inline-flex items-center gap-1.5 text-xs font-medium px-3 py-2 rounded-xl border ${isDarkMode?'bg-emerald-500/10 border-emerald-500/20 text-emerald-400':'bg-emerald-50 border-emerald-200 text-emerald-600'}`}>
-                            <Check className="w-3.5 h-3.5"/> מספיק
+                          <span className={`text-xs ${p.overdue?(isDarkMode?'text-red-300':'text-red-700'):(isDarkMode?'text-slate-400':'text-slate-500')}`}>
+                            {p.incomingQty>0 ? `+ ${p.incomingQty.toLocaleString()} בדרך` : 'אין בדרך'}
                           </span>
-                          {p.incomingQty>0 && <span className={`text-[10px] px-1 ${isDarkMode?'text-blue-400':'text-blue-600'}`}>📦 כולל {p.incomingQty} יח' שבדרך</span>}
-                        </div>
+                        </button>
                       )}
+                    </td>
+                    {/* Coverage (stock + on the way) */}
+                    <td className="px-4 py-3">
+                      {p.effectiveCoverDays!=null ? (
+                        <div className="flex flex-col gap-1.5">
+                          <span className={`text-sm font-semibold tabular-nums ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{p.effectiveCoverDays.toLocaleString()} יום</span>
+                          <div className={`h-1.5 w-24 rounded-full overflow-hidden ${isDarkMode?'bg-slate-700':'bg-slate-200'}`}>
+                            <div className="h-full rounded-full" style={{ width: coverPct.toFixed(0)+'%', background: procDotColor[st] }}/>
+                          </div>
+                        </div>
+                      ) : <span className={`text-sm ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.avgMonthly>0?'—':'אין מכירות'}</span>}
+                    </td>
+                    {/* Average */}
+                    <td className={`px-4 py-3 text-sm tabular-nums ${isDarkMode?'text-slate-300':'text-slate-700'}`}>
+                      {p.avgMonthly>0 ? `${p.avgMonthly.toFixed(1)} יח׳` : '—'}
+                    </td>
+                    {/* Supplier */}
+                    <td className="px-4 py-3 overflow-hidden">
+                      <span className={`text-sm truncate block ${isDarkMode?'text-slate-300':'text-slate-600'}`} title={p.supplier||''}>{p.supplier||'—'}</span>
                     </td>
                   </tr>
                 );
 };
+
+  // ── Product drawer — every detail that used to crowd the row ──
+  const renderProductDrawer = () => {
+    const p = drawerKey ? products.find(x=>x.key===drawerKey) : null;
+    if (!p) return null;
+    const st = p.status || procStatus(p);
+    const buffer = Math.max(p.safetyStock||0, p.minStock||0);
+    const horizon = p.effectiveLeadTime + monthsToStock;
+    const need = Math.max(0, Math.ceil((p.projectedDemand||0) + buffer - (p.currentStock??0) - (p.incomingQty||0)));
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const card = isDarkMode?'bg-slate-900/60':'bg-slate-50';
+    const productOrders = ordersEnriched.filter(o => (o.productKey||o.productName)===p.key || o.productKey===p.sku || o.productName===p.name);
+    const calcRows = [
+      { label: `צפי מכירות ל-${horizon} חודשים (אספקה ${p.effectiveLeadTime} + יעד ${monthsToStock})${p.seasonalApplied?' · לפי עונתיות':''}`, value: `${Math.round(p.projectedDemand||0).toLocaleString()} יח׳` },
+      { label: p.minStock>p.safetyStock ? `מלאי ביטחון — מינימום מ-Priority` : `מלאי ביטחון (רמת שירות ${p.serviceLevel}%)`, value: `+ ${buffer.toLocaleString()} יח׳` },
+      { label: 'פחות מלאי קיים', value: `− ${Math.max(0,p.currentStock??0).toLocaleString()} יח׳` },
+      { label: 'פחות מה שבדרך', value: `− ${(p.incomingQty||0).toLocaleString()} יח׳` },
+      { label: 'חסר', value: `${need.toLocaleString()} יח׳` },
+      ...(p.moq ? [{ label: `אחרי עיגול למינימום הזמנה (${p.moq})`, value: `${p.suggestedOrder.toLocaleString()} יח׳`, total:true }] : [{ label: 'להזמין', value: `${p.suggestedOrder.toLocaleString()} יח׳`, total:true }]),
+    ];
+    // Portal to <body>: an animated (transformed) ancestor would otherwise
+    // turn position:fixed into position-relative-to-that-ancestor.
+    return createPortal(
+      <div className={`fixed inset-0 z-50 ${isDarkMode?'dark':''}`} role="dialog" aria-modal="true" aria-label={`פרטי מוצר: ${p.name}`} onKeyDown={e=>{ if (e.key==='Escape') setDrawerKey(null); }}>
+        <div className="absolute inset-0 bg-slate-900/30" onClick={()=>setDrawerKey(null)}/>
+        <aside className={`absolute top-0 bottom-0 left-0 w-full max-w-[500px] overflow-y-auto shadow-2xl animate-in slide-in-from-left duration-200 ${isDarkMode?'bg-slate-800 text-slate-200':'bg-white text-slate-700'}`} dir="rtl">
+          <div className="p-6 space-y-6">
+            {/* Header */}
+            <div className="flex items-start gap-3">
+              <div className="flex-1 min-w-0">
+                <h2 className={`text-xl font-bold leading-snug ${strong}`}>{p.name}</h2>
+                <p className={`text-sm mt-1 ${muted}`}>{[p.sku&&p.sku!==p.name?p.sku:null, p.supplier, `סיווג ${p.abcXyz}`].filter(Boolean).join(' · ')}</p>
+                <span className={`inline-flex items-center gap-1.5 mt-2 px-2.5 py-1 rounded-full text-xs font-semibold ${procStatusCls(st, isDarkMode)}`}>
+                  <span className="w-2 h-2 rounded-full" style={{background: procDotColor[st]}}/>{PROC_STATUS_LABEL[st]}
+                </span>
+                {p.chip && <span className={`inline-block mr-2 mt-2 text-xs font-semibold px-2 py-1 rounded ${procChipCls(p.chip.k, isDarkMode)}`}>{p.chip.t}</span>}
+              </div>
+              <button type="button" autoFocus onClick={()=>setDrawerKey(null)} aria-label="סגור" className={`p-2 rounded-lg border ${isDarkMode?'border-slate-600 hover:bg-slate-700':'border-slate-200 hover:bg-slate-50'}`}><X className="w-4 h-4"/></button>
+            </div>
+
+            {/* Key numbers */}
+            <div className="grid grid-cols-3 gap-3">
+              {[
+                ['להזמין', p.suggestedOrder>0 ? `${p.suggestedOrder.toLocaleString()} יח׳` : '—'],
+                ['עלות', p.orderCost ? formatShort(p.orderCost) : (p.orderCostOriginal ? formatUnitCost(Math.round(p.orderCostOriginal), p.currency) : '—')],
+                ['כיסוי כולל בדרך', p.effectiveCoverDays!=null ? `${p.effectiveCoverDays} יום` : '—'],
+              ].map(([l,v]) => (
+                <div key={l} className={`rounded-xl px-3 py-3 ${card}`}>
+                  <p className={`text-xs ${muted}`}>{l}</p>
+                  <p className={`text-lg font-bold tabular-nums mt-0.5 ${strong}`}>{v}</p>
+                </div>
+              ))}
+            </div>
+
+            {/* Why this quantity */}
+            <section>
+              <h3 className={`text-sm font-bold mb-2 ${strong}`}>למה הכמות הזו?</h3>
+              <div className={`rounded-xl border overflow-hidden text-sm ${isDarkMode?'border-slate-700':'border-slate-200'}`}>
+                {calcRows.map((r,i) => (
+                  <div key={i} className={`flex justify-between gap-3 px-4 py-2.5 ${i>0?(isDarkMode?'border-t border-slate-700':'border-t border-slate-100'):''} ${r.total?(isDarkMode?'bg-slate-900/60 font-bold':'bg-slate-50 font-bold'):''}`}>
+                    <span>{r.label}</span><span className="tabular-nums whitespace-nowrap font-semibold">{r.value}</span>
+                  </div>
+                ))}
+              </div>
+            </section>
+
+            {/* Sales chart */}
+            <section>
+              <div className="flex items-center justify-between mb-2">
+                <h3 className={`text-sm font-bold ${strong}`}>מכירות — 12 חודשים</h3>
+                <span className={`text-xs ${muted}`}>ממוצע {p.avgMonthly.toFixed(1)} · תחזית לחודש הבא {p.forecastNext} · מגמה {p.trend?`${p.trend>0?'+':''}${p.trend.toFixed(0)}%`:'—'}</span>
+              </div>
+              {(!p.trendSeries || p.trendSeries.every(d=>!d.qty)) ? (
+                <p className={`text-xs py-6 text-center ${muted}`}>אין מכירות ב-12 החודשים האחרונים</p>
+              ) : (
+                <div style={{width:'100%', height:160}}>
+                  <ResponsiveContainer width="100%" height="100%">
+                    <ComposedChart data={p.trendSeries} margin={{top:5,right:0,bottom:0,left:-20}}>
+                      <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode?'#334155':'#e2e8f0'} vertical={false}/>
+                      <XAxis dataKey="month" tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false} interval={0}/>
+                      <YAxis tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false} width={34}/>
+                      <RechartsTooltip formatter={(v)=>[`${v} יח׳`,'נמכר']} contentStyle={{direction:'rtl', borderRadius:8, fontSize:12}}/>
+                      <Bar dataKey="qty" fill="#1F5FBF" radius={[3,3,0,0]}/>
+                      {p.avgMonthly>0 && <Line type="monotone" dataKey={()=>p.avgMonthly} stroke="#8A919E" strokeWidth={1.5} strokeDasharray="4 3" dot={false} activeDot={false} isAnimationActive={false}/>}
+                    </ComposedChart>
+                  </ResponsiveContainer>
+                </div>
+              )}
+              <div className="mt-2">{SeasonalityButton(p)}</div>
+            </section>
+
+            {/* Purchasing */}
+            <section>
+              <h3 className={`text-sm font-bold mb-2 ${strong}`}>רכש</h3>
+              <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
+                <dt className={muted}>זמן אספקה</dt><dd className={`font-semibold ${strong}`}>{p.effectiveLeadTime} ח׳{p.leadTimeOverridden?' (לפי ספק)':' (כללי)'}</dd>
+                <dt className={muted}>מחיר קניה</dt>
+                <dd className={`font-semibold ${strong}`}>
+                  {p.unitCostOriginal!=null ? formatUnitCost(p.unitCostOriginal, p.currency) : '—'}
+                  {p.priceChangePct!=null && Math.abs(p.priceChangePct)>=0.5 && <span className={`mr-2 text-xs ${p.priceChangePct>0?(isDarkMode?'text-orange-300':'text-orange-700'):muted}`}>({p.priceChangePct>0?'עלה':'ירד'} {Math.abs(p.priceChangePct).toFixed(1)}% מ-{formatUnitCost(p.prevPrice, p.currency)})</span>}
+                </dd>
+                <dt className={muted}>מינימום הזמנה (MOQ)</dt>
+                <dd>
+                  {editingMOQ===p.key ? (
+                    <input type="number" autoFocus defaultValue={p.moq??''} aria-label="מינימום הזמנה"
+                      onBlur={e=>{saveMOQ(p.key,e.target.value);setEditingMOQ(null);}}
+                      onKeyDown={e=>{e.stopPropagation(); if(e.key==='Enter'){saveMOQ(p.key,e.target.value);setEditingMOQ(null);} if(e.key==='Escape')setEditingMOQ(null);}}
+                      style={isDarkMode?{background:'#1e293b',color:'#f1f5f9'}:{}}
+                      className="w-24 px-2 py-1 border-2 border-blue-500 rounded-lg text-sm text-right focus:outline-none"/>
+                  ) : (
+                    <button type="button" onClick={()=>setEditingMOQ(p.key)} className={`font-semibold underline decoration-dotted underline-offset-4 ${isDarkMode?'text-blue-300':'text-blue-700'}`}>{p.moq ? `${p.moq} יח׳` : 'הוסף'}</button>
+                  )}
+                </dd>
+                <dt className={muted}>מינימום מלאי (Priority)</dt><dd className={`font-semibold ${strong}`}>{p.minStock ?? '—'}</dd>
+                <dt className={muted}>ציון סיכון</dt><dd className={`font-semibold ${strong}`} title="כיסוי מלאי 40% · תנודתיות ביקוש 20% · יציבות XYZ 15% · זמן אספקה 15% · ריכוזיות ספק 10%">{p.riskScore} / 100</dd>
+              </dl>
+            </section>
+
+            {/* Open orders for this product */}
+            {productOrders.length>0 && (
+              <section>
+                <h3 className={`text-sm font-bold mb-2 ${strong}`}>בדרך ({productOrders.length})</h3>
+                <div className="space-y-2">
+                  {productOrders.map(o => (
+                    <div key={o.id} className={`flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm ${card}`}>
+                      <span>{o.orderedQty.toLocaleString()} יח׳{o.poNumber?` · ${o.poNumber}`:''}</span>
+                      <span className={o.isOverdue?(isDarkMode?'text-red-300 font-semibold':'text-red-700 font-semibold'):muted}>
+                        {o.isOverdue ? `באיחור ${o.daysLate} ימים` : (o.expectedDate ? `צפוי ${o.expectedDate}` : 'ללא תאריך')}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </section>
+            )}
+
+            {onJumpToSales && (
+              <button type="button" onClick={()=>{ setDrawerKey(null); onJumpToSales(p.name); }}
+                className={`w-full flex items-center justify-center gap-2 py-2.5 rounded-xl border text-sm font-semibold ${isDarkMode?'border-slate-600 hover:bg-slate-700':'border-slate-200 hover:bg-slate-50'}`}>
+                <TrendingUp className="w-4 h-4"/> פתח את המוצר במכירות
+              </button>
+            )}
+          </div>
+        </aside>
+      </div>,
+      document.body
+    );
+  };
 
   const MiniSparkline = ({data}) => {
     if (!data||data.length<2) return null;
@@ -3414,9 +3416,9 @@ const renderProductRow = (p) => {
     {aiInsightOpen && (
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
         <div className={`rounded-2xl shadow-2xl w-full max-w-2xl max-h-[80vh] flex flex-col overflow-hidden ${isDarkMode?'bg-slate-800 border border-slate-700':'bg-white'}`}>
-          <div className={`p-5 border-b flex justify-between items-center ${isDarkMode?'border-slate-700 bg-slate-900/50':'border-slate-100 bg-gradient-to-l from-violet-50 to-white'}`}>
+          <div className={`p-5 border-b flex justify-between items-center ${isDarkMode?'border-slate-700 bg-slate-900/50':'border-slate-100 bg-gradient-to-l from-blue-50 to-white'}`}>
             <div className="flex items-center gap-3">
-              <div className={`p-2 rounded-xl ${isDarkMode?'bg-violet-500/20':'bg-violet-100'}`}><Sparkles className="w-5 h-5 text-violet-500"/></div>
+              <div className={`p-2 rounded-xl ${isDarkMode?'bg-blue-500/20':'bg-blue-100'}`}><Sparkles className="w-5 h-5 text-blue-500"/></div>
               <h2 className={`text-lg font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>תובנות רכש AI</h2>
             </div>
             <button onClick={()=>setAiInsightOpen(false)} className={`p-2 rounded-full ${isDarkMode?'hover:bg-slate-700':'hover:bg-slate-100'}`}><X className={`w-5 h-5 ${isDarkMode?'text-slate-400':'text-slate-500'}`}/></button>
@@ -3424,7 +3426,7 @@ const renderProductRow = (p) => {
           <div className="p-6 overflow-y-auto flex-1 text-right" dir="rtl">
             {aiInsightLoading ? (
               <div className="flex flex-col items-center py-12 gap-4">
-                <Loader2 className="w-10 h-10 text-violet-500 animate-spin"/>
+                <Loader2 className="w-10 h-10 text-blue-500 animate-spin"/>
                 <p className={`font-medium animate-pulse ${isDarkMode?'text-slate-400':'text-slate-500'}`}>מנתח מלאי ורכש...</p>
               </div>
             ) : <p className={`whitespace-pre-wrap leading-relaxed text-sm ${isDarkMode?'text-slate-300':'text-slate-700'}`}>{aiInsightText}</p>}
@@ -3435,6 +3437,7 @@ const renderProductRow = (p) => {
         </div>
       </div>
     )}
+    {renderProductDrawer()}
     <div className="space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-500">
 
       {/* Import banner */}
@@ -3445,18 +3448,90 @@ const renderProductRow = (p) => {
           <div className="flex gap-3 text-xs mr-auto">
             {importStats.withQty > 0 && <span className={`px-2 py-1 rounded-lg ${isDarkMode?'bg-emerald-500/10':'bg-emerald-100'}`}>✓ {importStats.withQty} עם כמות מלאי</span>}
             {importStats.withCost > 0 && <span className={`px-2 py-1 rounded-lg ${isDarkMode?'bg-blue-500/10':'bg-blue-100 text-blue-800'}`}>✓ {importStats.withCost} עם מחיר קניה</span>}
-            {importStats.withMinStock > 0 && <span className={`px-2 py-1 rounded-lg ${isDarkMode?'bg-amber-500/10':'bg-amber-100 text-amber-800'}`}>✓ {importStats.withMinStock} עם מינימום מלאי</span>}
-            {importStats.withQty === 0 && <span className={`px-2 py-1 rounded-lg ${isDarkMode?'bg-amber-500/10':'bg-amber-100 text-amber-800'}`}>⚠ אין עמודת כמות — הזן מלאי ידנית או ייצא "יתרות מלאי" מ-Priority</span>}
+            {importStats.withMinStock > 0 && <span className={`px-2 py-1 rounded-lg ${isDarkMode?'bg-orange-500/10':'bg-orange-100 text-orange-800'}`}>✓ {importStats.withMinStock} עם מינימום מלאי</span>}
+            {importStats.withQty === 0 && <span className={`px-2 py-1 rounded-lg ${isDarkMode?'bg-orange-500/10':'bg-orange-100 text-orange-800'}`}>⚠ אין עמודת כמות — הזן מלאי ידנית או ייצא "יתרות מלאי" מ-Priority</span>}
           </div>
           <button onClick={()=>setShowBanner(false)}><X className="w-4 h-4 opacity-50 hover:opacity-100"/></button>
         </div>
       )}
 
+      {/* ── What needs action — four cards that also filter the table ── */}
+      {(() => {
+        const cardCls = (active) => `text-right flex flex-col gap-1.5 p-4 rounded-2xl border transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 ${active
+          ? (isDarkMode?'bg-slate-800 border-slate-300 ring-1 ring-slate-300':'bg-white border-slate-900 ring-1 ring-slate-900')
+          : (isDarkMode?'bg-slate-800 border-slate-700 hover:border-slate-500':'bg-white border-slate-200 hover:border-slate-400')}`;
+        const lbl = `text-sm font-semibold flex items-center gap-2 ${isDarkMode?'text-slate-300':'text-slate-600'}`;
+        const big = `text-3xl font-bold tabular-nums ${isDarkMode?'text-white':'text-slate-900'}`;
+        const sub = `text-sm ${isDarkMode?'text-slate-400':'text-slate-500'}`;
+        const small = `text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`;
+        const isProducts = viewMode==='products';
+        const pick = (key) => {
+          if (key==='dead') { setActionFilter('all'); setViewMode('dead'); return; }
+          setViewMode('products');
+          setActionFilter(prev => (key==='all' || (prev===key && isProducts)) ? 'all' : key);
+        };
+        return (
+          <section aria-label="מה דורש פעולה" className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+            <button type="button" onClick={()=>pick('order')} aria-pressed={isProducts&&actionFilter==='order'} className={cardCls(isProducts&&actionFilter==='order')}>
+              <span className={lbl}><span className="w-2 h-2 rounded-full" style={{background:procDotColor.now}}/>להזמין</span>
+              <span className="flex items-baseline gap-2"><span className={big}>{actionKpis.orderCount}</span><span className={sub}>מוצרים{actionKpis.orderCost>0?` · ${formatShort(actionKpis.orderCost)}`:''}</span></span>
+              <span className={small}>{stockedCount>0 ? `${actionKpis.urgentCount} דחופים — המלאי ייגמר לפני שהזמנה תגיע` : 'העלה קובץ מלאי כדי לחשב'}</span>
+            </button>
+            <button type="button" onClick={()=>pick('late')} aria-pressed={isProducts&&actionFilter==='late'} className={cardCls(isProducts&&actionFilter==='late')}>
+              <span className={lbl}><span className="w-2 h-2 rounded-full" style={{background:procDotColor.soon}}/>הזמנות באיחור</span>
+              <span className="flex items-baseline gap-2"><span className={big}>{overdueOrders.length}</span><span className={sub}>הזמנות{actionKpis.lateValue>0?` · ${formatShort(actionKpis.lateValue)}`:''}</span></span>
+              <span className={small}>{overdueOrders.length>0 ? 'תאריך האספקה עבר — כדאי להתקשר לספק' : 'אין הזמנות שעבר מועד האספקה שלהן'}</span>
+            </button>
+            <button type="button" onClick={()=>pick('dead')} aria-pressed={viewMode==='dead'} className={cardCls(viewMode==='dead')}>
+              <span className={lbl}><span className="w-2 h-2 rounded-full" style={{background:procDotColor.unknown}}/>מלאי תקוע</span>
+              <span className="flex items-baseline gap-2"><span className={big}>{formatShort(deadStockValue)}</span><span className={sub}>{deadStockData.length} פריטים</span></span>
+              <span className={small}>לא נמכרו {deadStockDays} יום ומעלה</span>
+            </button>
+            <button type="button" onClick={()=>pick('all')} className={cardCls(false)}>
+              <span className={lbl}><span className="w-2 h-2 rounded-full" style={{background:'#1F5FBF'}}/>ימי מלאי</span>
+              <span className="flex items-baseline gap-2"><span className={big}>{actionKpis.daysOfInventory ?? '—'}</span><span className={sub}>ימים{actionKpis.stockValue>0?` · שווי ${formatShort(actionKpis.stockValue)}`:''}</span></span>
+              <span className={small}>לחיצה מציגה את כל המוצרים</span>
+            </button>
+          </section>
+        );
+      })()}
+
+      {/* ── Planning settings: one summary line; uploads & parameters open on demand ── */}
+      <section aria-label="הגדרות תכנון" className={`rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+        <div className={`flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 text-sm ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+          <button type="button" onClick={()=>setSettingsOpen(v=>!v)} aria-expanded={settingsOpen}
+            className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border font-semibold ${isDarkMode?'border-slate-600 text-slate-200 hover:bg-slate-700':'border-slate-300 text-slate-700 hover:bg-slate-50'}`}>
+            <SlidersHorizontal className="w-4 h-4"/> הגדרות תכנון וקבצים
+            <ChevronDown className={`w-4 h-4 transition-transform ${settingsOpen?'rotate-180':''}`}/>
+          </button>
+          <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>מלאי יעד</b> {monthsToStock} ח׳</span>
+          <span className="opacity-40">|</span>
+          <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>זמן אספקה</b> {leadTime} ח׳{Object.keys(leadTimeMap).length>0?` · ${Object.keys(leadTimeMap).length} ספקים עם זמן משלהם`:''}</span>
+          <span className="opacity-40">|</span>
+          <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>בסיס ממוצע</b> {avgWindowMonths===0?'כל הנתונים':`${avgWindowMonths} ח׳`}</span>
+          <span className="opacity-40">|</span>
+          <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>קבצים</b> {(() => {
+            const ts = [invSlots.product?.importedAt, invSlots.masterCard?.importedAt].filter(Boolean);
+            return ts.length ? `עודכנו ${new Date(Math.max(...ts)).toLocaleDateString('he-IL')}` : 'לא נטענו';
+          })()}</span>
+          <div className="flex-1"/>
+          {!invSlots.product && !invSlots.masterCard && stockedCount===0 && (
+            <button type="button" onClick={()=>setSettingsOpen(true)} className={`text-xs font-semibold px-2 py-1 rounded ${procChipCls('watch', isDarkMode)}`}>לא נטען קובץ מלאי</button>
+          )}
+          {completeness.total>0 && completeness.withStock>0 && completeness.withStock<completeness.total && (
+            <button type="button" onClick={()=>setSettingsOpen(true)} className={`text-xs font-semibold px-2 py-1 rounded ${procChipCls('watch', isDarkMode)}`}>{completeness.total-completeness.withStock} מוצרים בלי מלאי</button>
+          )}
+          {completeness.total>0 && completeness.withCost<completeness.total && (
+            <button type="button" onClick={()=>setSettingsOpen(true)} className={`text-xs font-semibold px-2 py-1 rounded ${procChipCls('watch', isDarkMode)}`}>{completeness.total-completeness.withCost} מוצרים בלי מחיר קניה</button>
+          )}
+        </div>
+        {settingsOpen && (
+          <div className={`border-t p-4 space-y-4 ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
       {/* Top row: upload + config */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         {/* Inventory upload — two independent, optional slots */}
         <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-          <h3 className={`font-bold text-sm mb-3 flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Package className="w-4 h-4 text-amber-500"/> מלאי נוכחי</h3>
+          <h3 className={`font-bold text-sm mb-3 flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Package className="w-4 h-4 text-orange-500"/> מלאי נוכחי</h3>
           {invUploadError && (
             <div className={`flex items-start gap-2 px-3 py-2.5 rounded-xl text-xs font-medium mb-3 ${isDarkMode?'bg-red-500/10 text-red-300 border border-red-500/20':'bg-red-50 text-red-700 border border-red-200'}`}>
               <TriangleAlert className="w-4 h-4 shrink-0 mt-0.5"/>
@@ -3493,11 +3568,11 @@ const renderProductRow = (p) => {
                       <button onClick={()=>clearInvSlot(slot.key)} title="הסר תווית קובץ זה (לא מוחק את הנתונים שכבר מוזגו)" className={`p-2.5 rounded-lg ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-500 hover:bg-red-50'}`}><Trash2 className="w-4 h-4"/></button>
                     </div>
                   ) : (
-                    <label className={`flex items-center gap-3 px-3 py-3 rounded-xl border-2 border-dashed cursor-pointer transition-all group ${isDarkMode?'border-slate-600 hover:border-amber-500/50 hover:bg-amber-500/5':'border-slate-200 hover:border-amber-400 hover:bg-amber-50'}`}>
-                      {invLoading ? <Loader2 className="w-5 h-5 animate-spin text-amber-500 shrink-0"/> : (
-                        <div className={`p-2 rounded-lg shrink-0 ${isDarkMode?'bg-slate-700 group-hover:bg-amber-500/20':'bg-slate-100 group-hover:bg-amber-100'}`}><Upload className={`w-4 h-4 ${isDarkMode?'text-slate-400 group-hover:text-amber-400':'text-slate-400 group-hover:text-amber-600'}`}/></div>
+                    <label className={`flex items-center gap-3 px-3 py-3 rounded-xl border-2 border-dashed cursor-pointer transition-all group ${isDarkMode?'border-slate-600 hover:border-orange-500/50 hover:bg-orange-500/5':'border-slate-200 hover:border-orange-400 hover:bg-orange-50'}`}>
+                      {invLoading ? <Loader2 className="w-5 h-5 animate-spin text-orange-500 shrink-0"/> : (
+                        <div className={`p-2 rounded-lg shrink-0 ${isDarkMode?'bg-slate-700 group-hover:bg-orange-500/20':'bg-slate-100 group-hover:bg-orange-100'}`}><Upload className={`w-4 h-4 ${isDarkMode?'text-slate-400 group-hover:text-orange-400':'text-slate-400 group-hover:text-orange-600'}`}/></div>
                       )}
-                      <span className={`text-xs font-medium ${isDarkMode?'text-slate-400 group-hover:text-amber-300':'text-slate-500 group-hover:text-amber-700'}`}>חסר — לחץ להעלאה</span>
+                      <span className={`text-xs font-medium ${isDarkMode?'text-slate-400 group-hover:text-orange-300':'text-slate-500 group-hover:text-orange-700'}`}>חסר — לחץ להעלאה</span>
                       <input type="file" accept=".csv,.xlsx,.xls" onChange={e=>handleInvUpload(e, slot.key)} className="hidden" disabled={invLoading}/>
                     </label>
                   )}
@@ -3548,10 +3623,10 @@ const renderProductRow = (p) => {
                 </span>
               </div>
               <div className={`flex rounded-xl p-1 ${isDarkMode?'bg-slate-900':'bg-slate-100'}`}>
-                {[[6,'6m'],[12,'12m'],[18,'18m'],[24,'24m'],[0,'הכל']].map(([v,label])=>(
+                {[[6,'6 ח׳'],[12,'12 ח׳'],[18,'18 ח׳'],[24,'24 ח׳'],[0,'הכל']].map(([v,label])=>(
                   <button key={v} onClick={()=>setAvgWindowMonths(v)}
                     className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-all ${avgWindowMonths===v
-                      ?(isDarkMode?'bg-purple-600 text-white shadow-md':'bg-purple-600 text-white shadow-md')
+                      ?(isDarkMode?'bg-blue-600 text-white shadow-md':'bg-blue-600 text-white shadow-md')
                       :(isDarkMode?'text-slate-400 hover:text-slate-200':'text-slate-500 hover:text-slate-700')}`}>
                     {label}
                   </button>
@@ -3572,13 +3647,13 @@ const renderProductRow = (p) => {
       </div>
 
       {/* Free period comparison toggle */}
-      <button onClick={()=>setShowProcCompare(p=>!p)} className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-medium border transition-colors ${showProcCompare?(isDarkMode?'bg-purple-500/20 border-purple-500/30 text-purple-300':'bg-purple-50 border-purple-200 text-purple-700'):(isDarkMode?'border-slate-700 text-slate-400 hover:text-white bg-slate-800':'border-slate-200 text-slate-500 hover:text-slate-700 bg-white')}`}>
+      <button onClick={()=>setShowProcCompare(p=>!p)} className={`flex items-center gap-2 px-4 py-2.5 rounded-xl text-xs font-medium border transition-colors ${showProcCompare?(isDarkMode?'bg-blue-500/20 border-blue-500/30 text-blue-300':'bg-blue-50 border-blue-200 text-blue-700'):(isDarkMode?'border-slate-700 text-slate-400 hover:text-white bg-slate-800':'border-slate-200 text-slate-500 hover:text-slate-700 bg-white')}`}>
         <Sliders className="w-3.5 h-3.5"/> השוואת תקופות לביקוש
       </button>
 
       {showProcCompare && procCompareStats && (
         <div className={`p-6 rounded-2xl border animate-in fade-in duration-300 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-          <h3 className={`font-bold flex items-center gap-2 mb-4 ${isDarkMode?'text-white':'text-slate-800'}`}><Sliders className="w-5 h-5 text-purple-500"/>השוואת תקופות — האם הביקוש השתנה?</h3>
+          <h3 className={`font-bold flex items-center gap-2 mb-4 ${isDarkMode?'text-white':'text-slate-800'}`}><Sliders className="w-5 h-5 text-blue-500"/>השוואת תקופות — האם הביקוש השתנה?</h3>
           <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-5">
             {[['א',procPeriodA,setProcPeriodA],['ב',procPeriodB,setProcPeriodB]].map(([label,period,setPeriod])=>(
               <div key={label} className={`flex items-center gap-2 px-3 py-2.5 rounded-xl border ${isDarkMode?'bg-slate-900 border-slate-700':'bg-slate-50 border-slate-200'}`}>
@@ -3634,6 +3709,63 @@ const renderProductRow = (p) => {
         </div>
       )}
 
+      {/* Data Completeness Panel */}
+      {products.length > 0 && (
+        <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+          <div className={`px-5 py-3 border-b flex items-center justify-between ${isDarkMode?'border-slate-700 bg-slate-900/40':'border-slate-100 bg-slate-50'}`}>
+            <div className="flex items-center gap-2">
+              <Activity className={`w-4 h-4 ${isDarkMode?'text-slate-400':'text-slate-500'}`}/>
+              <span className={`text-sm font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>שלמות נתונים</span>
+              <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>— {completeness.total} פריטים סה"כ</span>
+            </div>
+            {completeness.noData > 0 && (
+              <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${isDarkMode?'bg-orange-500/15 text-orange-400':'bg-orange-50 text-orange-700'}`}>
+                ⚠ {completeness.noData} פריטים ללא נתונים
+              </span>
+            )}
+          </div>
+          <div className="px-5 py-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
+            {[
+              { label:'מלאי נוכחי', count:completeness.withStock, total:completeness.total, pct:completeness.stockPct, tip:'הזן מלאי בטבלה או יבא מ-Priority', color:'blue' },
+              { label:'מחיר קניה',  count:completeness.withCost,  total:completeness.total, pct:completeness.costPct,  tip:'הזן דרך קובץ LOGPART-2 מ-Priority', color:'emerald' },
+              { label:'הכיסוי מלא', count:completeness.withAll,   total:completeness.total, pct:completeness.allPct,   tip:'מלאי + מחיר — נדרש לחישוב מלא', color:'violet' },
+            ].map(({ label, count, total, pct, tip, color }) => (
+              <div key={label} title={tip} className="space-y-1.5 cursor-help">
+                <div className="flex justify-between items-center">
+                  <span className={`text-xs font-medium ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{label}</span>
+                  <span className={`text-xs font-bold ${
+                    pct >= 80 ? (isDarkMode?'text-emerald-400':'text-emerald-600') :
+                    pct >= 50 ? (isDarkMode?'text-orange-400':'text-orange-600') :
+                                (isDarkMode?'text-red-400':'text-red-600')}`}>
+                    {count}/{total} ({pct}%)
+                  </span>
+                </div>
+                <div className={`h-2 rounded-full overflow-hidden ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
+                  <div className="h-full rounded-full transition-all duration-700"
+                    style={{
+                      width: pct+'%',
+                      background: pct >= 80
+                        ? '#2E8B57'
+                        : pct >= 50 ? '#D9822B' : '#C8322B'
+                    }}/>
+                </div>
+                {pct < 100 && <p className={`text-[10px] ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{tip}</p>}
+              </div>
+            ))}
+          </div>
+          {completeness.withOrders > 0 && (
+            <div className={`px-5 py-2.5 border-t text-xs flex items-center gap-2 ${isDarkMode?'border-slate-700 bg-blue-500/5 text-blue-400':'border-slate-100 bg-blue-50 text-blue-700'}`}>
+              <Package className="w-3.5 h-3.5 shrink-0"/>
+              {completeness.withOrders} מוצרים עם הזמנות פתוחות בדרך — מחושבות אוטומטית בכיסוי
+            </div>
+          )}
+        </div>
+      )}
+
+          </div>
+        )}
+      </section>
+
       {/* ABC-XYZ Legend */}
       {showLegend && (
         <div className={`rounded-2xl border p-5 animate-in fade-in slide-in-from-top-2 duration-300 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
@@ -3651,7 +3783,7 @@ const renderProductRow = (p) => {
                   {cls:'C', xyz:'', color:'gray',  text:'~5% בלבד — שקול הפחתת סוגים, הזמנה לפי דרישה בלבד'},
                 ].map(r=>(
                   <div key={r.cls} className="flex items-start gap-3">
-                    <span className={`px-2 py-0.5 rounded text-xs font-bold border shrink-0 mt-0.5 ${r.cls==='A'?(isDarkMode?'bg-amber-500/20 text-amber-300 border-amber-500/30':'bg-amber-50 text-amber-700 border-amber-200'):r.cls==='B'?(isDarkMode?'bg-blue-500/20 text-blue-300 border-blue-500/30':'bg-blue-50 text-blue-700 border-blue-200'):(isDarkMode?'bg-slate-600/40 text-slate-400 border-slate-600':'bg-slate-100 text-slate-500 border-slate-200')}`}>{r.cls}</span>
+                    <span className={`px-2 py-0.5 rounded text-xs font-bold border shrink-0 mt-0.5 ${r.cls==='A'?(isDarkMode?'bg-orange-500/20 text-orange-300 border-orange-500/30':'bg-orange-50 text-orange-700 border-orange-200'):r.cls==='B'?(isDarkMode?'bg-blue-500/20 text-blue-300 border-blue-500/30':'bg-blue-50 text-blue-700 border-blue-200'):(isDarkMode?'bg-slate-600/40 text-slate-400 border-slate-600':'bg-slate-100 text-slate-500 border-slate-200')}`}>{r.cls}</span>
                     <p className={`text-xs ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{r.text}</p>
                   </div>
                 ))}
@@ -3667,7 +3799,7 @@ const renderProductRow = (p) => {
                   {xyz:'Z', color:'red',     cv:'CV > 1.0', text:'ביקוש אי-סדיר — הזמנה לפי דרישה, סיכון גבוה'},
                 ].map(r=>(
                   <div key={r.xyz} className="flex items-start gap-3">
-                    <span className={`px-2 py-0.5 rounded text-xs font-bold border shrink-0 mt-0.5 ${r.xyz==='X'?(isDarkMode?'bg-emerald-500/20 text-emerald-300 border-emerald-500/30':'bg-emerald-50 text-emerald-700 border-emerald-200'):r.xyz==='Y'?(isDarkMode?'bg-amber-500/20 text-amber-300 border-amber-500/30':'bg-amber-50 text-amber-700 border-amber-200'):(isDarkMode?'bg-red-500/20 text-red-300 border-red-500/30':'bg-red-50 text-red-700 border-red-200')}`}>{r.xyz}</span>
+                    <span className={`px-2 py-0.5 rounded text-xs font-bold border shrink-0 mt-0.5 ${r.xyz==='X'?(isDarkMode?'bg-emerald-500/20 text-emerald-300 border-emerald-500/30':'bg-emerald-50 text-emerald-700 border-emerald-200'):r.xyz==='Y'?(isDarkMode?'bg-orange-500/20 text-orange-300 border-orange-500/30':'bg-orange-50 text-orange-700 border-orange-200'):(isDarkMode?'bg-red-500/20 text-red-300 border-red-500/30':'bg-red-50 text-red-700 border-red-200')}`}>{r.xyz}</span>
                     <div>
                       <span className={`text-[10px] font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{r.cv} · </span>
                       <span className={`text-xs ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{r.text}</span>
@@ -3696,100 +3828,40 @@ const renderProductRow = (p) => {
         </div>
       )}
 
-      {/* Data Completeness Panel */}
-      {products.length > 0 && (
-        <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-          <div className={`px-5 py-3 border-b flex items-center justify-between ${isDarkMode?'border-slate-700 bg-slate-900/40':'border-slate-100 bg-slate-50'}`}>
-            <div className="flex items-center gap-2">
-              <Activity className={`w-4 h-4 ${isDarkMode?'text-slate-400':'text-slate-500'}`}/>
-              <span className={`text-sm font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>שלמות נתונים</span>
-              <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>— {completeness.total} פריטים סה"כ</span>
-            </div>
-            {completeness.noData > 0 && (
-              <span className={`text-xs font-medium px-2.5 py-1 rounded-full ${isDarkMode?'bg-amber-500/15 text-amber-400':'bg-amber-50 text-amber-700'}`}>
-                ⚠ {completeness.noData} פריטים ללא נתונים
-              </span>
-            )}
-          </div>
-          <div className="px-5 py-4 grid grid-cols-1 sm:grid-cols-3 gap-4">
-            {[
-              { label:'מלאי נוכחי', count:completeness.withStock, total:completeness.total, pct:completeness.stockPct, tip:'הזן מלאי בטבלה או יבא מ-Priority', color:'blue' },
-              { label:'מחיר קניה',  count:completeness.withCost,  total:completeness.total, pct:completeness.costPct,  tip:'הזן דרך קובץ LOGPART-2 מ-Priority', color:'emerald' },
-              { label:'הכיסוי מלא', count:completeness.withAll,   total:completeness.total, pct:completeness.allPct,   tip:'מלאי + מחיר — נדרש לחישוב מלא', color:'violet' },
-            ].map(({ label, count, total, pct, tip, color }) => (
-              <div key={label} title={tip} className="space-y-1.5 cursor-help">
-                <div className="flex justify-between items-center">
-                  <span className={`text-xs font-medium ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{label}</span>
-                  <span className={`text-xs font-bold ${
-                    pct >= 80 ? (isDarkMode?'text-emerald-400':'text-emerald-600') :
-                    pct >= 50 ? (isDarkMode?'text-amber-400':'text-amber-600') :
-                                (isDarkMode?'text-red-400':'text-red-600')}`}>
-                    {count}/{total} ({pct}%)
-                  </span>
-                </div>
-                <div className={`h-2 rounded-full overflow-hidden ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
-                  <div className="h-full rounded-full transition-all duration-700"
-                    style={{
-                      width: pct+'%',
-                      background: pct >= 80
-                        ? (color==='blue'?'#3b82f6':color==='emerald'?'#10b981':'#8b5cf6')
-                        : pct >= 50 ? '#f59e0b' : '#ef4444'
-                    }}/>
-                </div>
-                {pct < 100 && <p className={`text-[10px] ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{tip}</p>}
-              </div>
-            ))}
-          </div>
-          {completeness.withOrders > 0 && (
-            <div className={`px-5 py-2.5 border-t text-xs flex items-center gap-2 ${isDarkMode?'border-slate-700 bg-blue-500/5 text-blue-400':'border-slate-100 bg-blue-50 text-blue-700'}`}>
-              <Package className="w-3.5 h-3.5 shrink-0"/>
-              {completeness.withOrders} מוצרים עם הזמנות פתוחות בדרך — מחושבות אוטומטית בכיסוי
-            </div>
-          )}
-        </div>
-      )}
-
-      {/* KPIs */}
-      <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
-        <KPICard title="מוצרי A" formatted={abcCounts.A.toString()} icon={Star}        color="amber"  subtext="~80% מההכנסה" isDarkMode={isDarkMode}/>
-        <KPICard title="מוצרי B" formatted={abcCounts.B.toString()} icon={CircleDot}   color="blue"   subtext="~15% מההכנסה" isDarkMode={isDarkMode}/>
-        <KPICard title="מוצרי C" formatted={abcCounts.C.toString()} icon={Minus}       color="purple" subtext="~5% מההכנסה"  isDarkMode={isDarkMode}/>
-        <KPICard title="סיכון מלאי" formatted={(riskCounts.critical+riskCounts.low).toString()} icon={riskCounts.critical>0?TriangleAlert:AlertTriangle} color={riskCounts.critical>0?'red':riskCounts.low>0?'amber':'green'} subtext={stockedCount>0?`${riskCounts.critical} קריטי · ${riskCounts.low} נמוך`:'העלה מלאי לחישוב'} isDarkMode={isDarkMode}/>
-      </div>
-
-      {/* View toggle */}
+      {/* View tabs — grouped by purpose: decide · follow up · analyze */}
       <div className="flex items-center gap-3 flex-wrap">
-        <div className={`flex flex-wrap rounded-xl p-1 border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
-          {[['products', ClipboardList, 'לפי מוצר'], ['suppliers', Truck, 'לפי ספק'], ['orders', ShoppingCart, 'הזמנות פתוחות'], ['schedule', Calendar, 'לוח זמנים'], ['prices', DollarSign, 'מחירי רכש'], ['whatif', Activity, 'תרחיש'], ['dead', Trash2, 'פריטים מתים']].map(([mode, Icon, label]) => (
-            <button key={mode} onClick={() => setViewMode(mode)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${viewMode===mode
-                ? (isDarkMode?'bg-slate-700 text-white shadow-sm':'bg-slate-900 text-white shadow-sm')
-                : (isDarkMode?'text-slate-400 hover:text-slate-200':'text-slate-500 hover:text-slate-700')}`}>
-              <Icon className="w-4 h-4"/>{label}
-              {mode==='suppliers' && supplierGroups.length>0 && (
-                <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='suppliers'?'bg-white/20 text-white':'bg-blue-100 text-blue-700'}`}>{supplierGroups.length}</span>
-              )}
-              {mode==='orders' && openOrders.length>0 && (
-                <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='orders'?'bg-blue-300/30 text-blue-100':'bg-blue-100 text-blue-700'}`}>{openOrders.length}</span>
-              )}
-              {mode==='orders' && overdueOrders.length>0 && (
-                <span title={`${overdueOrders.length} הזמנות באיחור`} className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='orders'?'bg-red-400/30 text-red-100':'bg-red-100 text-red-700'}`}>⏰ {overdueOrders.length}</span>
-              )}
-              {mode==='prices' && (priceChanges.filter(p=>p.priceChangePct>0).length + poPriceDeviations.filter(o=>o.poPriceDiffPct>0).length)>0 && (
-                <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='prices'?'bg-red-400/30 text-red-100':'bg-red-100 text-red-700'}`}>↑{priceChanges.filter(p=>p.priceChangePct>0).length + poPriceDeviations.filter(o=>o.poPriceDiffPct>0).length}</span>
-              )}
-              {mode==='schedule' && scheduleData.filter(p=>p.urgency==='critical'||p.urgency==='urgent').length>0 && (
-                <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='schedule'?'bg-red-300/30 text-red-200':'bg-red-100 text-red-700'}`}>{scheduleData.filter(p=>p.urgency==='critical'||p.urgency==='urgent').length}</span>
-              )}
-              {mode==='dead' && deadStockData.length>0 && (
-                <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='dead'?'bg-red-400/30 text-red-200':'bg-red-100 text-red-700'}`}>{deadStockData.length}</span>
-              )}
-            </button>
-          ))}
+        <div role="tablist" aria-label="תצוגות רכש" className={`flex flex-wrap items-center gap-1 rounded-xl p-1 border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+          {(() => {
+            const lateCount = overdueOrders.length;
+            const priceUp = priceChanges.filter(p=>p.priceChangePct>0).length + poPriceDeviations.filter(o=>o.poPriceDiffPct>0).length;
+            const urgentSched = scheduleData.filter(p=>p.urgency==='critical'||p.urgency==='urgent').length;
+            const groups = [
+              ['החלטות', [['products','לפי מוצר',null], ['suppliers','לפי ספק',null], ['schedule','לוח זמנים', urgentSched>0?{n:urgentSched,k:'now'}:null]]],
+              ['מעקב', [['orders','הזמנות פתוחות', lateCount>0?{n:`${lateCount} באיחור`,k:'now'}:(openOrders.length?{n:openOrders.length,k:'muted'}:null)], ['prices','מחירי רכש', priceUp>0?{n:`${priceUp} עליות`,k:'watch'}:null]]],
+              ['ניתוח', [['whatif','תרחיש',null], ['dead','מלאי תקוע', deadStockData.length?{n:deadStockData.length,k:'muted'}:null]]],
+            ];
+            return groups.map(([gLabel, tabs], gi) => (
+              <React.Fragment key={gLabel}>
+                {gi>0 && <span aria-hidden="true" className={`w-px h-6 mx-1 ${isDarkMode?'bg-slate-700':'bg-slate-200'}`}/>}
+                <span className={`text-xs px-1.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{gLabel}</span>
+                {tabs.map(([mode,label,badge]) => (
+                  <button key={mode} type="button" role="tab" aria-selected={viewMode===mode}
+                    onClick={() => { setViewMode(mode); if (mode!=='products') setActionFilter('all'); }}
+                    className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold whitespace-nowrap transition-colors ${viewMode===mode
+                      ? (isDarkMode?'bg-slate-200 text-slate-900':'bg-slate-900 text-white')
+                      : (isDarkMode?'text-slate-300 hover:bg-slate-700':'text-slate-600 hover:bg-slate-100')}`}>
+                    {label}
+                    {badge && <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded ${viewMode===mode?'bg-white/20 text-inherit':procChipCls(badge.k, isDarkMode)}`}>{badge.n}</span>}
+                  </button>
+                ))}
+              </React.Fragment>
+            ));
+          })()}
         </div>
-        <button onClick={generateProcurementInsight}
-          className="flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-violet-600 to-purple-600 hover:from-violet-700 hover:to-purple-700 text-white rounded-xl font-medium text-sm transition-all hover:-translate-y-0.5 active:scale-95 shadow-lg shadow-violet-500/20">
-          <Sparkles className="w-4 h-4 text-yellow-200 animate-pulse"/> תובנות רכש AI
+        <div className="flex-1"/>
+        <button type="button" onClick={generateProcurementInsight}
+          className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-semibold transition-colors ${isDarkMode?'border-slate-600 text-slate-200 hover:bg-slate-700':'border-slate-300 text-slate-700 bg-white hover:bg-slate-50'}`}>
+          <Sparkles className="w-4 h-4"/> תובנות רכש AI
         </button>
         {viewMode==='suppliers' && supplierGroups.length>0 && (
           <div className="flex items-center gap-3">
@@ -3877,10 +3949,10 @@ const renderProductRow = (p) => {
                       const rel = supplierReliability[g.name];
                       const configuredDays = Math.round(((leadTimeMap[g.name]!=null)?leadTimeMap[g.name]:leadTime)*30);
                       const slower = rel?.avgLeadDays!=null && rel.avgLeadDays > configuredDays*1.2 + 3;
-                      const doiCls = g.daysOfInventory==null ? '' : g.daysOfInventory===Infinity || g.daysOfInventory>180 ? 'text-red-500 font-bold' : g.daysOfInventory>90 ? 'text-amber-500 font-bold' : (isDarkMode?'text-emerald-400':'text-emerald-600');
+                      const doiCls = g.daysOfInventory==null ? '' : g.daysOfInventory===Infinity || g.daysOfInventory>180 ? 'text-red-500 font-bold' : g.daysOfInventory>90 ? 'text-orange-500 font-bold' : (isDarkMode?'text-emerald-400':'text-emerald-600');
                       return (
                         <tr key={g.name} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
-                          <td className={`px-4 py-2 font-medium ${isDarkMode?'text-slate-200':'text-slate-800'}`}>{g.name}{g.missingCost>0 && <span title={`${g.missingCost} פריטים עם מלאי ללא מחיר קניה — לא נכללו בשווי`} className="text-amber-500 mr-1">⚠</span>}</td>
+                          <td className={`px-4 py-2 font-medium ${isDarkMode?'text-slate-200':'text-slate-800'}`}>{g.name}{g.missingCost>0 && <span title={`${g.missingCost} פריטים עם מלאי ללא מחיר קניה — לא נכללו בשווי`} className="text-orange-500 mr-1">⚠</span>}</td>
                           <td className="px-4 py-2 tabular-nums">{g.stockValue>0?formatShort(g.stockValue):'—'}</td>
                           <td className={`px-4 py-2 tabular-nums ${doiCls}`}>{g.daysOfInventory==null?'—':g.daysOfInventory===Infinity?'אין מכירות':g.daysOfInventory}</td>
                           <td className="px-4 py-2 tabular-nums">{g.turnsPerYear!=null?g.turnsPerYear.toFixed(1):'—'}</td>
@@ -3893,13 +3965,13 @@ const renderProductRow = (p) => {
                             {slower && (
                               <button onClick={()=>saveLeadTime(g.name, Math.max(0.5, Math.round(rel.avgLeadDays/30*2)/2))}
                                 title="עדכן את זמן האספקה של הספק לפי מה שקורה בפועל"
-                                className={`mr-2 text-[10px] px-1.5 py-0.5 rounded border ${isDarkMode?'border-purple-500/40 text-purple-300 hover:bg-purple-500/20':'border-purple-200 text-purple-600 hover:bg-purple-50'}`}>
+                                className={`mr-2 text-[10px] px-1.5 py-0.5 rounded border ${isDarkMode?'border-blue-500/40 text-blue-300 hover:bg-blue-500/20':'border-blue-200 text-blue-600 hover:bg-blue-50'}`}>
                                 עדכן ל-{Math.max(0.5, Math.round(rel.avgLeadDays/30*2)/2)} ח'
                               </button>
                             )}
                           </td>
                           <td className={`px-4 py-2 tabular-nums ${rel?.onTimePct!=null && rel.onTimePct<70?'text-red-500 font-bold':''}`}>{rel?.onTimePct!=null?`${rel.onTimePct}% (${rel.onTimeBase})`:'—'}</td>
-                          <td className={`px-4 py-2 tabular-nums ${rel?.openOverdue>0?'text-red-500 font-bold':''}`}>{rel?.openOverdue>0?`⏰ ${rel.openOverdue}`:'—'}</td>
+                          <td className={`px-4 py-2 tabular-nums ${rel?.openOverdue>0?'text-red-500 font-bold':''}`}>{rel?.openOverdue>0?`${rel.openOverdue}`:'—'}</td>
                         </tr>
                       );
                     })}
@@ -3948,14 +4020,14 @@ const renderProductRow = (p) => {
                             onClick={e=>e.stopPropagation()}
                             onBlur={e=>{saveLeadTime(grp.name,e.target.value);setEditingLeadTime(null);}}
                             onKeyDown={e=>{if(e.key==='Enter'){saveLeadTime(grp.name,e.target.value);setEditingLeadTime(null);}if(e.key==='Escape')setEditingLeadTime(null);}}
-                            style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#a855f7'}:{}}
-                            className="w-16 px-1.5 py-0.5 border-2 border-purple-500 rounded text-[11px] text-right focus:outline-none" placeholder="חודש"
+                            style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#3b82f6'}:{}}
+                            className="w-16 px-1.5 py-0.5 border-2 border-blue-500 rounded text-[11px] text-right focus:outline-none" placeholder="חודש"
                           />
                         ) : (
                           <button onClick={e=>{e.stopPropagation();setEditingLeadTime(grp.name);}} title="זמן אספקה (לידטיים) לספק הזה — לחץ לעריכה, אחרת נלקח הזמן הגלובלי"
                             className={`text-[11px] font-medium px-1.5 py-0.5 rounded border transition-colors ${leadTimeMap[grp.name]!=null
-                              ?(isDarkMode?'border-purple-500/40 bg-purple-500/10 text-purple-300 hover:bg-purple-500/20':'border-purple-200 bg-purple-50 text-purple-600 hover:bg-purple-100')
-                              :(isDarkMode?'border-dashed border-slate-700 text-slate-600 hover:text-purple-400':'border-dashed border-slate-300 text-slate-400 hover:text-purple-500')}`}>
+                              ?(isDarkMode?'border-blue-500/40 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20':'border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100')
+                              :(isDarkMode?'border-dashed border-slate-700 text-slate-600 hover:text-blue-400':'border-dashed border-slate-300 text-slate-400 hover:text-blue-500')}`}>
                             {leadTimeMap[grp.name]!=null ? `זמן אספקה: ${leadTimeMap[grp.name]} חודש` : `+זמן אספקה (גלובלי: ${leadTime})`}
                           </button>
                         )}
@@ -3970,7 +4042,7 @@ const renderProductRow = (p) => {
                               onChange={e=>{e.stopPropagation(); saveSupplierCurrency(grp.name, e.target.value, grp.items);}}
                               title="קבע את המטבע של הספק הזה לכל המוצרים שלו — עוקף את מה שזוהה (או לא זוהה) מקובץ הייבוא"
                               style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#334155'}:{}}
-                              className={`text-[11px] font-medium px-1.5 py-0.5 rounded border cursor-pointer ${uniform===''?(isDarkMode?'border-amber-500/40 bg-amber-500/10 text-amber-300':'border-amber-300 bg-amber-50 text-amber-700'):(isDarkMode?'border-slate-700 text-slate-300':'border-slate-200 text-slate-600')}`}>
+                              className={`text-[11px] font-medium px-1.5 py-0.5 rounded border cursor-pointer ${uniform===''?(isDarkMode?'border-orange-500/40 bg-orange-500/10 text-orange-300':'border-orange-300 bg-orange-50 text-orange-700'):(isDarkMode?'border-slate-700 text-slate-300':'border-slate-200 text-slate-600')}`}>
                               {uniform==='' && <option value="" disabled>מטבע מעורב — בחר</option>}
                               <option value="ILS">₪ ILS</option>
                               <option value="EUR">€ EUR</option>
@@ -3980,7 +4052,7 @@ const renderProductRow = (p) => {
                         })()}
                       </div>
                       {Object.keys(grp.costByCurrency).length>1 && (
-                        <p className={`text-[10px] mt-0.5 ${isDarkMode?'text-amber-500/70':'text-amber-600'}`}>⚠ הספק הזה מיובא במספר מטבעות — סימן לזיהוי מטבע לא אחיד מהקובץ. השתמש בבורר המטבע למעלה כדי לתקן לכל המוצרים של הספק בבת אחת</p>
+                        <p className={`text-[10px] mt-0.5 ${isDarkMode?'text-orange-500/70':'text-orange-600'}`}>⚠ הספק הזה מיובא במספר מטבעות — סימן לזיהוי מטבע לא אחיד מהקובץ. השתמש בבורר המטבע למעלה כדי לתקן לכל המוצרים של הספק בבת אחת</p>
                       )}
                     </div>
                     {/* Total units badge */}
@@ -4186,7 +4258,7 @@ const renderProductRow = (p) => {
                   <button onClick={()=>setShowOverdueOnly(v=>!v)}
                     title="הזמנות שתאריך האספקה הצפוי שלהן כבר עבר — לחץ להציג רק אותן"
                     className={`flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg border transition-colors ${showOverdueOnly?'bg-red-600 text-white border-red-600':(isDarkMode?'bg-red-500/15 text-red-300 border-red-500/30':'bg-red-50 text-red-700 border-red-200')}`}>
-                    ⏰ {overdueOrders.length} באיחור{showOverdueOnly?' · מציג רק אותן':''}
+                    {overdueOrders.length} באיחור{showOverdueOnly?' · מציג רק אותן':''}
                   </button>
                 )}
                 {[['ordered','הוזמן','#3b82f6'],['in_transit','בדרך','#10b981'],['delayed','מאחר','#ef4444']].map(([s,l,color])=>{
@@ -4204,7 +4276,7 @@ const renderProductRow = (p) => {
                   )}
                   {ordersBlockedCurrencies.length>0 && (
                     <span title={`הזמנות ב-${ordersBlockedCurrencies.join('/')} לא נכללות בסה"כ — הזן שער חליפין ב-⚙️ הגדרות, או קבע מטבע לספק בתצוגת "ספקים"`}
-                      className={`flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-lg ${isDarkMode?'bg-amber-500/15 text-amber-300':'bg-amber-50 text-amber-700'}`}>
+                      className={`flex items-center gap-1 text-xs font-medium px-2 py-1 rounded-lg ${isDarkMode?'bg-orange-500/15 text-orange-300':'bg-orange-50 text-orange-700'}`}>
                       <TriangleAlert className="w-3 h-3"/> חסר שער ל-{ordersBlockedCurrencies.join('/')}
                     </span>
                   )}
@@ -4318,13 +4390,13 @@ const renderProductRow = (p) => {
                                 {formatCurrency(order.valueILS)}{order.costConverted && <span className="text-[10px] font-normal opacity-60 mr-1">≈{currencySymbol(order.costConverted)}</span>}
                               </span>
                             ) : order.costCurrencyBlocked ? (
-                              <span title="חסר שער חליפין בהגדרות" className={isDarkMode?'text-amber-400':'text-amber-600'}>⚠ {order.costCurrencyBlocked}</span>
+                              <span title="חסר שער חליפין בהגדרות" className={isDarkMode?'text-orange-400':'text-orange-600'}>⚠ {order.costCurrencyBlocked}</span>
                             ) : '—'}
                           </td>
                           <td className={`px-4 py-3.5 text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{order.orderDate||'—'}</td>
                           <td className={`px-4 py-3.5 text-xs ${isOverdue?'text-red-500 font-bold':(isDarkMode?'text-slate-400':'text-slate-500')}`}>
                             {order.expectedDate||'—'}
-                            {isOverdue && <div className="text-[10px]">⏰ באיחור {order.daysLate} ימים</div>}
+                            {isOverdue && <div className="text-[10px]">באיחור {order.daysLate} ימים</div>}
                           </td>
                           <td className="px-4 py-3.5">
                             <select value={order.status} onChange={e=>updateOrder(order.id,'status',e.target.value)}
@@ -4386,7 +4458,7 @@ const renderProductRow = (p) => {
             </div>
           ) : (
             <div className="space-y-3">
-              {[['critical','⛔ הזמן עכשיו','#ef4444'],['urgent','⚡ הזמן תוך שבוע','#f59e0b'],['soon','📅 הזמן תוך שבועיים','#3b82f6'],['planned','🗓 תכנן לחודש הבא','#8b5cf6'],['later','✅ אין צורך דחוף','#10b981']].map(([urg, label, color]) => {
+              {[['critical','הזמן עכשיו','#C8322B'],['urgent','הזמן תוך שבוע','#D9822B'],['soon','הזמן תוך שבועיים','#D9822B'],['planned','תכנן לחודש הבא','#1F5FBF'],['later','אין צורך דחוף','#2E8B57']].map(([urg, label, color]) => {
                 const items = scheduleData.filter(p=>p.urgency===urg);
                 if (!items.length) return null;
                 return (
@@ -4441,7 +4513,7 @@ const renderProductRow = (p) => {
           {/* Config */}
           <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
             <div className="flex items-center gap-3 mb-4">
-              <div className={`p-2.5 rounded-xl ${isDarkMode?'bg-violet-500/15':'bg-violet-50'}`}><Activity className="w-5 h-5 text-violet-500"/></div>
+              <div className={`p-2.5 rounded-xl ${isDarkMode?'bg-blue-500/15':'bg-blue-50'}`}><Activity className="w-5 h-5 text-blue-500"/></div>
               <div>
                 <p className={`font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>תרחיש ביקוש</p>
                 <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>מה יקרה להזמנות אם הביקוש ישתנה?</p>
@@ -4457,7 +4529,7 @@ const renderProductRow = (p) => {
                 </div>
                 <input type="range" min={0.5} max={2.0} step={0.05} value={whatIfMultiplier}
                   onChange={e=>setWhatIfMultiplier(parseFloat(e.target.value))}
-                  className="w-full accent-violet-500"/>
+                  className="w-full accent-blue-500"/>
                 <div className="flex justify-between text-xs mt-1">
                   {[-50,-25,0,'+25','+50','+100'].map((l,i)=>(
                     <span key={i} className={isDarkMode?'text-slate-600':'text-slate-400'}>{l}%</span>
@@ -4467,7 +4539,7 @@ const renderProductRow = (p) => {
               <div className="flex gap-2 flex-wrap">
                 {[0.7,0.85,1.0,1.2,1.5,2.0].map(v=>(
                   <button key={v} onClick={()=>setWhatIfMultiplier(v)}
-                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${whatIfMultiplier===v?(isDarkMode?'bg-violet-500/20 border-violet-500 text-violet-300':'bg-violet-50 border-violet-400 text-violet-700'):(isDarkMode?'border-slate-700 text-slate-400':'border-slate-200 text-slate-500')}`}>
+                    className={`px-3 py-1.5 rounded-lg text-xs font-medium border transition-all ${whatIfMultiplier===v?(isDarkMode?'bg-blue-500/20 border-blue-500 text-blue-300':'bg-blue-50 border-blue-400 text-blue-700'):(isDarkMode?'border-slate-700 text-slate-400':'border-slate-200 text-slate-500')}`}>
                     {v>1?'+':''}{Math.round((v-1)*100)}%
                   </button>
                 ))}
@@ -4485,9 +4557,9 @@ const renderProductRow = (p) => {
               <div className={`grid grid-cols-2 sm:grid-cols-4 gap-4`}>
                 {[
                   {label:'יחידות (בסיס)', val:totalBase.toLocaleString(), sub:'הזמנה רגילה'},
-                  {label:'יחידות (תרחיש)', val:totalAdj.toLocaleString(), sub:`שינוי: ${totalAdj>totalBase?'+':''}${(totalAdj-totalBase).toLocaleString()}`, color: totalAdj>totalBase?'text-amber-500':'text-emerald-500'},
+                  {label:'יחידות (תרחיש)', val:totalAdj.toLocaleString(), sub:`שינוי: ${totalAdj>totalBase?'+':''}${(totalAdj-totalBase).toLocaleString()}`, color: totalAdj>totalBase?'text-orange-500':'text-emerald-500'},
                   {label:'עלות (בסיס)', val:formatShort(totalCostBase), sub:''},
-                  {label:'עלות (תרחיש)', val:formatShort(totalCostAdj), sub:`${totalCostAdj>totalCostBase?'+':''}${formatShort(totalCostAdj-totalCostBase)}`, color: totalCostAdj>totalCostBase?'text-amber-500':'text-emerald-500'},
+                  {label:'עלות (תרחיש)', val:formatShort(totalCostAdj), sub:`${totalCostAdj>totalCostBase?'+':''}${formatShort(totalCostAdj-totalCostBase)}`, color: totalCostAdj>totalCostBase?'text-orange-500':'text-emerald-500'},
                 ].map(k=>(
                   <div key={k.label} className={`p-4 rounded-xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
                     <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{k.label}</p>
@@ -4514,13 +4586,13 @@ const renderProductRow = (p) => {
                     <th className="px-4 py-3">ממוצע תרחיש</th>
                     <th className="px-4 py-3">כיסוי (יום)</th>
                     <th className="px-4 py-3">הזמנה בסיס</th>
-                    <th className={`px-4 py-3 font-bold ${isDarkMode?'text-violet-400':'text-violet-700'}`}>הזמנה תרחיש</th>
+                    <th className={`px-4 py-3 font-bold ${isDarkMode?'text-blue-400':'text-blue-700'}`}>הזמנה תרחיש</th>
                     <th className="px-4 py-3">שינוי</th>
                   </tr>
                 </thead>
                 <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
                   {whatIfProducts.slice(0,50).map(p=>(
-                    <tr key={p.key} className={`${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'} ${p.orderDelta>0?(isDarkMode?'':'bg-amber-50/30'):''}`}>
+                    <tr key={p.key} className={`${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'} ${p.orderDelta>0?(isDarkMode?'':'bg-orange-50/30'):''}`}>
                       <td className="px-4 py-3">
                         <p className={`font-medium text-sm truncate max-w-[180px] ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{p.name}</p>
                       </td>
@@ -4531,10 +4603,10 @@ const renderProductRow = (p) => {
                         {p.adjCovDays??'—'}
                       </td>
                       <td className={`px-4 py-3 tabular-nums ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{p.suggestedOrder}</td>
-                      <td className={`px-4 py-3 tabular-nums font-bold ${isDarkMode?'text-violet-300':'text-violet-700'}`}>{p.adjOrder}</td>
+                      <td className={`px-4 py-3 tabular-nums font-bold ${isDarkMode?'text-blue-300':'text-blue-700'}`}>{p.adjOrder}</td>
                       <td className="px-4 py-3">
                         {p.orderDelta !== 0 && (
-                          <span className={`text-xs font-bold ${p.orderDelta>0?(isDarkMode?'text-amber-400':'text-amber-600'):(isDarkMode?'text-emerald-400':'text-emerald-600')}`}>
+                          <span className={`text-xs font-bold ${p.orderDelta>0?(isDarkMode?'text-orange-400':'text-orange-600'):(isDarkMode?'text-emerald-400':'text-emerald-600')}`}>
                             {p.orderDelta>0?'+':''}{p.orderDelta}
                           </span>
                         )}
@@ -4703,10 +4775,10 @@ const renderProductRow = (p) => {
               <div className={`px-5 py-4 border-b flex flex-wrap items-center justify-between gap-3 ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
                 <div className="flex items-center gap-3">
                   <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}>
-                    <Trash2 className="w-4 h-4 text-red-400"/> {deadStockData.length} פריטים לא זמים
+                    <Trash2 className="w-4 h-4 text-red-400"/> {deadStockData.length} פריטים לא זזים
                   </h3>
                   {deadStockData.some(p=>p.costCurrencyBlocked) && (
-                    <span title="חלק מהפריטים בעלות במטבע זר בלי שער מוגדר — הערך שלהם לא נכלל בסה״כ" className={`flex items-center gap-1 text-[11px] font-medium px-2 py-1 rounded-lg ${isDarkMode?'bg-amber-500/15 text-amber-300':'bg-amber-50 text-amber-700'}`}>
+                    <span title="חלק מהפריטים בעלות במטבע זר בלי שער מוגדר — הערך שלהם לא נכלל בסה״כ" className={`flex items-center gap-1 text-[11px] font-medium px-2 py-1 rounded-lg ${isDarkMode?'bg-orange-500/15 text-orange-300':'bg-orange-50 text-orange-700'}`}>
                       <TriangleAlert className="w-3 h-3"/> יש פריטים בערך לא ידוע (מטבע זר)
                     </span>
                   )}
@@ -4758,7 +4830,7 @@ const renderProductRow = (p) => {
                         <td className="px-4 py-3.5">
                           <span className={`font-bold tabular-nums px-2.5 py-1 rounded-lg text-sm
                             ${p.neverSold||(p.daysSince||0)>180?(isDarkMode?'bg-red-500/20 text-red-300':'bg-red-100 text-red-700')
-                              :(p.daysSince||0)>90?(isDarkMode?'bg-amber-500/20 text-amber-300':'bg-amber-100 text-amber-700')
+                              :(p.daysSince||0)>90?(isDarkMode?'bg-orange-500/20 text-orange-300':'bg-orange-100 text-orange-700')
                               :(isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-100 text-slate-600')}`}>
                             {p.neverSold ? 'לא נמכר כלל' : `${p.daysSince??'—'} יום`}
                           </span>
@@ -4809,62 +4881,37 @@ const renderProductRow = (p) => {
         <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
         <div className={`px-5 py-4 border-b flex flex-wrap justify-between items-center gap-3 ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
           <div className="flex items-center gap-3 flex-wrap">
-            <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}>
-              <ClipboardList className="w-4 h-4 text-slate-400"/> טבלת רכש
-              <span className={`text-xs font-normal px-2 py-0.5 rounded-full ${isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500'}`}>{filtered.length}</span>
-              {(riskFilter!=='all'||abcFilter!=='all') && (
-                <button onClick={()=>{setRiskFilter('all');setAbcFilter('all');}}
-                  className={`text-xs px-2 py-0.5 rounded-full flex items-center gap-1 ${isDarkMode?'bg-blue-500/20 text-blue-300 hover:bg-blue-500/30':'bg-blue-50 text-blue-600 hover:bg-blue-100'}`}>
-                  <X className="w-3 h-3"/> נקה פילטרים
+            <h3 className={`text-base font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}>
+              {{all:'כל המוצרים', order:'מוצרים להזמנה', late:'מוצרים עם הזמנה באיחור'}[actionFilter]||'כל המוצרים'}
+              <span className={`text-xs font-normal ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{filtered.length.toLocaleString()} מוצרים · לחיצה על שורה פותחת פרטים</span>
+              {(riskFilter!=='all'||abcFilter!=='all'||actionFilter!=='all') && (
+                <button type="button" onClick={()=>{setRiskFilter('all');setAbcFilter('all');setActionFilter('all');}}
+                  className={`text-xs px-2 py-0.5 rounded-full flex items-center gap-1 font-normal ${isDarkMode?'bg-slate-700 text-slate-200 hover:bg-slate-600':'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>
+                  <X className="w-3 h-3"/> נקה סינון
                 </button>
               )}
             </h3>
-            <div className={`flex rounded-lg p-1 text-xs ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
-              {[['all','הכל'],['A','A'],['B','B'],['C','C']].map(([k,l])=>(
-                <button key={k} onClick={()=>setAbcFilter(k)} className={`px-2.5 py-1 rounded-md transition-all font-medium ${abcFilter===k?(isDarkMode?'bg-slate-600 text-white shadow':'bg-white shadow text-slate-800'):(isDarkMode?'text-slate-400':'text-slate-500')}`}>{l}</button>
+            <div role="group" aria-label="סינון לפי סיווג ABC" className={`flex rounded-lg p-1 text-xs ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
+              {[['all','כל הסיווגים'],['A','A'],['B','B'],['C','C']].map(([k,l])=>(
+                <button type="button" key={k} onClick={()=>setAbcFilter(k)} aria-pressed={abcFilter===k} className={`px-2.5 py-1 rounded-md transition-all font-semibold ${abcFilter===k?(isDarkMode?'bg-slate-600 text-white shadow':'bg-white shadow text-slate-800'):(isDarkMode?'text-slate-400':'text-slate-500')}`}>{l}</button>
               ))}
             </div>
-            {/* Risk filter */}
-            <div className={`flex rounded-lg p-1 text-xs ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
-              {[
-                ['all',     'הכל',    null],
-                ['critical','⛔ קריטי', 'text-red-500'],
-                ['low',     '⚠ נמוך',  'text-amber-500'],
-                ['ok',      '✅ תקין', 'text-emerald-500'],
-                ['unknown', '— לא ידוע',null],
-              ].map(([k,l,cls])=>(
-                <button key={k} onClick={()=>setRiskFilter(k)}
-                  className={`px-2.5 py-1 rounded-md transition-all font-medium whitespace-nowrap ${riskFilter===k?(isDarkMode?'bg-slate-600 text-white shadow':'bg-white shadow text-slate-800'):(cls?cls:(isDarkMode?'text-slate-400':'text-slate-500'))}`}>
-                  {l}
-                  {k!=='all' && riskFilter==='all' && (
-                    <span className={`mr-1 text-[10px] opacity-60`}>{k==='critical'?riskCounts.critical:k==='low'?riskCounts.low:k==='ok'?riskCounts.ok:riskCounts.unknown}</span>
-                  )}
-                </button>
-              ))}
-            </div>
-            <button onClick={()=>setShowLegend(p=>!p)}
-              className={`flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-xs border transition-colors ${showLegend?(isDarkMode?'bg-slate-700 border-slate-500 text-white':'bg-slate-200 border-slate-300 text-slate-800'):(isDarkMode?'border-slate-700 text-slate-400 hover:text-white':'border-slate-200 text-slate-500 hover:text-slate-700')}`}>
-              <Info className="w-3.5 h-3.5"/> מקרא ABC-XYZ
+            <button type="button" onClick={()=>setShowLegend(p=>!p)} aria-expanded={showLegend}
+              className={`flex items-center gap-1.5 text-xs font-semibold ${isDarkMode?'text-blue-300 hover:text-blue-200':'text-blue-700 hover:text-blue-800'}`}>
+              <Info className="w-3.5 h-3.5"/> מה זה A/B/C?
             </button>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
-            {totalOrderUnits>0 && (
-              <div className={`flex items-center gap-2 text-xs px-3 py-1.5 rounded-lg border font-medium ${isDarkMode?'bg-blue-500/10 border-blue-500/20 text-blue-300':'bg-blue-50 border-blue-100 text-blue-700'}`}>
-                <ShoppingCart className="w-3.5 h-3.5"/>
-                {totalOrderUnits.toLocaleString()} יח\'
-                {totalOrderCost>0 && <span className={`mr-1 pr-1 border-r ${isDarkMode?'border-blue-500/30':'border-blue-200'}`}>{formatShort(totalOrderCost)}</span>}
-              </div>
-            )}
             {blockedCurrencies.length>0 && (
               <div title={`מוצרים בעלות ${blockedCurrencies.join('/')} לא נכללים בסכומים (עלות הזמנה, ערך מלאי) — הזן שער חליפין ב-⚙️ הגדרות כדי לכלול אותם`}
-                className={`flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg border font-medium ${isDarkMode?'bg-amber-500/10 border-amber-500/25 text-amber-300':'bg-amber-50 border-amber-200 text-amber-700'}`}>
-                <TriangleAlert className="w-3.5 h-3.5"/> חסר שער ל-{blockedCurrencies.join('/')}
+                className={`flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-lg font-semibold ${procChipCls('watch', isDarkMode)}`}>
+                חסר שער ל-{blockedCurrencies.join('/')}
               </div>
             )}
             <div className="relative">
               <Search className={`absolute right-3 top-2.5 w-3.5 h-3.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}/>
-              <input type="text" placeholder="חיפוש... (השתמש ב * להשלמה, למשל: מנוע*1000)" value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}
-                className={`pl-4 pr-9 py-2 border rounded-xl text-xs w-36 focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'bg-slate-900 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
+              <input type="search" aria-label="חיפוש מוצר או מק״ט" placeholder="חיפוש מוצר או מק״ט (* = כל טקסט)" value={searchTerm} onChange={e=>setSearchTerm(e.target.value)}
+                className={`pl-4 pr-9 py-2 border rounded-xl text-sm w-64 focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'bg-slate-900 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
             </div>
             <button
               disabled={exporting || !filtered.length}
@@ -4964,9 +5011,9 @@ const renderProductRow = (p) => {
             </thead>
             <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
               {visibleProducts.map(renderProductRow)}
-              {!filtered.length&&<tr><td colSpan={9} className={`px-4 py-16 text-center text-sm ${isDarkMode?'text-slate-600':'text-slate-400'}`}>לא נמצאו מוצרים</td></tr>}
+              {!filtered.length&&<tr><td colSpan={PROC_COL_KEYS.length} className={`px-4 py-16 text-center text-sm ${isDarkMode?'text-slate-600':'text-slate-400'}`}>לא נמצאו מוצרים</td></tr>}
               {visibleCount < filtered.length && (
-                <tr ref={loadMoreSentinelRef}><td colSpan={9} className={`px-4 py-4 text-center text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>טוען עוד מוצרים…</td></tr>
+                <tr ref={loadMoreSentinelRef}><td colSpan={PROC_COL_KEYS.length} className={`px-4 py-4 text-center text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>טוען עוד מוצרים…</td></tr>
               )}
             </tbody>
           </table>
@@ -4977,12 +5024,10 @@ const renderProductRow = (p) => {
           </div>
         )}
         <div className={`px-5 py-3 border-t flex flex-wrap gap-4 text-xs ${isDarkMode?'border-slate-700 text-slate-500':'border-slate-100 text-slate-400'}`}>
-          <span><span className="font-bold text-amber-500">A</span> = 80%</span>
-          <span><span className="font-bold text-blue-500">B</span> = 15%</span>
-          <span><span className="font-bold text-slate-400">C</span> = 5%</span>
-          <span className="flex items-center gap-1"><TriangleAlert className="w-3 h-3 text-red-500"/> קריטי: (מלאי + בדרך) &lt; זמן אספקה</span>
-          <span className="flex items-center gap-1"><AlertTriangle className="w-3 h-3 text-amber-500"/> נמוך: (מלאי + בדרך) &lt; יעד</span>
-          <span className="mr-auto italic">לחץ על מלאי לעריכה · נשמר אוטומטית</span>
+          {[['now','המלאי ייגמר לפני שהזמנה חדשה תגיע'],['soon','צריך להזמין, אבל יש עוד זמן'],['watch','אין מה להזמין — לוודא שההזמנה שבדרך מגיעה'],['ok','מלאי מספיק']].map(([k,t]) => (
+            <span key={k} className="flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{background:procDotColor[k]}}/><b className={isDarkMode?'text-slate-300':'text-slate-600'}>{PROC_STATUS_LABEL[k]}</b> {t}</span>
+          ))}
+          <span className="mr-auto">לחיצה על המלאי עורכת אותו · נשמר אוטומטית</span>
         </div>
       </div>
       )} {/* end viewMode === products */}
@@ -5538,7 +5583,7 @@ const App = () => {
   const [chatThinking, setChatThinking] = useState(false);
   const [clearModalOpen, setClearModalOpen] = useState(false);
 
-  const [showNotifications, setShowNotifications] = useState(false);
+  const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   // Global setting: most customers are invoiced only at month-end/start of next
   // month, so the most recent calendar month is structurally incomplete at any
   // point before that invoicing run finishes. When on, this excludes the latest
@@ -6384,7 +6429,7 @@ const App = () => {
     { id:'sales', label:'מכירות', icon:TrendingUp, color:'text-blue-400' },
     { id:'customers', label:'לקוחות', icon:User, color:'text-pink-400' },
     { id:'suppliers', label:'רכש וספקים', icon:Truck, color:'text-emerald-400' },
-    { id:'procurement', label:'תכנון רכש', icon:ShoppingCart, color:'text-amber-400' },
+    { id:'procurement', label:'תכנון רכש', icon:ShoppingCart, color:'text-orange-400' },
     { id:'summary', label:'רווח והפסד', icon:BarChart3, color:'text-violet-400' },
   ];
 
@@ -6506,7 +6551,7 @@ const App = () => {
                             <div key={name} className={`flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-xs group ${isDarkMode?'hover:bg-slate-700/50':'hover:bg-slate-50'}`}>
                               <span className={`flex-1 truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{name}</span>
                               <button onClick={()=>{jumpToSales(name); setGlobalSearchOpen(false); setGlobalQuery('');}} className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-50 text-blue-700'}`}>מכירות</button>
-                              <button onClick={()=>{jumpToProcurement(name); setGlobalSearchOpen(false); setGlobalQuery('');}} className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${isDarkMode?'bg-amber-500/20 text-amber-300':'bg-amber-50 text-amber-700'}`}>רכש</button>
+                              <button onClick={()=>{jumpToProcurement(name); setGlobalSearchOpen(false); setGlobalQuery('');}} className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${isDarkMode?'bg-orange-500/20 text-orange-300':'bg-orange-50 text-orange-700'}`}>רכש</button>
                             </div>
                           ))}
                         </div>
@@ -6531,49 +6576,68 @@ const App = () => {
             {/* Quick date filters */}
             {availableDates.length>0 && (
               <div className={`hidden xl:flex items-center p-1 rounded-lg border gap-0.5 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-slate-100 border-slate-200'}`}>
-                {[[3,'3M'],['year','השנה'],[null,'הכל']].map(([f,l])=>(
+                {[[3,'3 חודשים'],['year','השנה'],[null,'הכל']].map(([f,l])=>(
                   <button key={l} onClick={()=>setQuickDate(f)} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${isDarkMode?'text-slate-400 hover:bg-slate-700 hover:text-white':'text-slate-600 hover:bg-white hover:text-slate-900 hover:shadow-sm'}`}>{l}</button>
                 ))}
               </div>
             )}
             <button onClick={()=>setExcludeCurrentMonth(p=>!p)}
               title="חלק מהלקוחות מתחייבים רק בסוף/תחילת חודש, אז החודש הנוכחי בדרך כלל חסר. כשמופעל, האפליקציה מתעלמת מהחודש האחרון בחישובי ממוצע/מגמה/תחזית/נטישה (אבל עדיין מציגה אותו בטבלאות וגרפים)."
-              className={`flex items-center gap-2 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${excludeCurrentMonth?(isDarkMode?'bg-amber-500/10 border-amber-500/30 text-amber-300':'bg-amber-50 border-amber-200 text-amber-700'):(isDarkMode?'border-slate-700 text-slate-500 hover:text-slate-300':'border-slate-200 text-slate-400 hover:text-slate-600')}`}>
+              className={`flex items-center gap-2 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${excludeCurrentMonth?(isDarkMode?'bg-orange-500/10 border-orange-500/30 text-orange-300':'bg-orange-50 border-orange-200 text-orange-700'):(isDarkMode?'border-slate-700 text-slate-500 hover:text-slate-300':'border-slate-200 text-slate-400 hover:text-slate-600')}`}>
               <Calendar className="w-3.5 h-3.5 shrink-0"/>
               <span className="hidden sm:inline whitespace-nowrap">חודש נוכחי לא סופי</span>
-              <div className={`relative w-7 h-4 rounded-full shrink-0 transition-colors ${excludeCurrentMonth?'bg-amber-500':(isDarkMode?'bg-slate-600':'bg-slate-300')}`}>
+              <div className={`relative w-7 h-4 rounded-full shrink-0 transition-colors ${excludeCurrentMonth?'bg-orange-500':(isDarkMode?'bg-slate-600':'bg-slate-300')}`}>
                 <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${excludeCurrentMonth?'translate-x-0.5':'translate-x-3.5'}`}/>
               </div>
             </button>
-            <button onClick={toggleTheme} className={`p-2.5 rounded-xl transition-all ${isDarkMode?'bg-slate-800 text-yellow-400 hover:bg-slate-700':'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
-              {isDarkMode?<Sun className="w-4 h-4"/>:<Moon className="w-4 h-4"/>}
-            </button>
-            <div className="relative">
-              <button onClick={()=>setShowNotifications(p=>!p)} className={`p-2.5 rounded-xl relative ${isDarkMode?'bg-slate-800 text-slate-300 hover:bg-slate-700':'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
-                <Bell className="w-4 h-4"/>
-                {notifications.length>0 && <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full animate-pulse"/>}
+            {/* Backup reminder — a small header button instead of a full-width banner on every page */}
+            {backupReminderDays !== null && idbLoadFailed.length === 0 && (
+              <button type="button" onClick={()=>setSettingsOpen(true)}
+                title={backupReminderDays === -1 ? 'עדיין לא יצרת קובץ גיבוי. הנתונים שמורים רק בדפדפן הזה — ניקוי היסטוריה או תקלה ימחקו אותם.' : `עברו ${backupReminderDays} ימים מהגיבוי האחרון`}
+                className={`hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold ${isDarkMode?'bg-orange-500/15 text-orange-300 hover:bg-orange-500/25':'bg-orange-50 text-orange-800 hover:bg-orange-100'}`}>
+                <FileSpreadsheet className="w-3.5 h-3.5"/>{backupReminderDays === -1 ? 'אין גיבוי' : `גיבוי לפני ${backupReminderDays} ימים`}
               </button>
-              {showNotifications && (
-                <div className={`absolute left-0 mt-2 w-72 rounded-xl shadow-2xl border p-4 z-50 animate-in fade-in zoom-in duration-150 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
-                  <h4 className={`font-bold text-sm mb-3 ${isDarkMode?'text-white':'text-slate-800'}`}>התראות</h4>
-                  {notifications.length>0 ? notifications.map(n=>(
-                    <div key={n.id} className={`p-2.5 rounded-lg text-xs flex items-start gap-2 mb-2 ${n.type==='success'?'bg-emerald-500/10 text-emerald-600':n.type==='warning'?'bg-red-500/10 text-red-600':'bg-blue-500/10 text-blue-600'}`}>
-                      <div className={`w-1.5 h-1.5 rounded-full mt-1 shrink-0 ${n.type==='success'?'bg-emerald-500':n.type==='warning'?'bg-red-500':'bg-blue-500'}`}/>
-                      {n.text}
+            )}
+            {/* One menu for the rarely-used controls: theme, notifications, settings, backup */}
+            <div className="relative">
+              <button type="button" onClick={()=>setHeaderMenuOpen(p=>!p)} aria-expanded={headerMenuOpen} aria-label="עוד — מצב כהה, התראות, הגדרות"
+                className={`relative p-2.5 rounded-xl transition-all ${isDarkMode?'bg-slate-800 text-slate-300 hover:bg-slate-700':'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}>
+                <MoreHorizontal className="w-4 h-4"/>
+                {(notifications.length>0 || !apiKey) && <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-orange-500 rounded-full"/>}
+              </button>
+              {headerMenuOpen && (
+                <>
+                  <div className="fixed inset-0 z-40" onClick={()=>setHeaderMenuOpen(false)}/>
+                  <div role="menu" className={`absolute left-0 mt-2 w-80 rounded-xl shadow-2xl border p-2 z-50 animate-in fade-in zoom-in duration-150 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+                    <button role="menuitem" type="button" onClick={()=>{toggleTheme(); setHeaderMenuOpen(false);}}
+                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-right ${isDarkMode?'text-slate-200 hover:bg-slate-700':'text-slate-700 hover:bg-slate-50'}`}>
+                      {isDarkMode?<Sun className="w-4 h-4"/>:<Moon className="w-4 h-4"/>}{isDarkMode?'מצב בהיר':'מצב כהה'}
+                    </button>
+                    <button role="menuitem" type="button" onClick={()=>{setSettingsOpen(true); setHeaderMenuOpen(false);}}
+                      className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-right ${isDarkMode?'text-slate-200 hover:bg-slate-700':'text-slate-700 hover:bg-slate-50'}`}>
+                      <Settings className="w-4 h-4"/>הגדרות, שערי מטבע וגיבוי
+                      {!apiKey && <span className={`mr-auto whitespace-nowrap text-[11px] font-semibold px-1.5 py-0.5 rounded ${isDarkMode?'bg-orange-500/15 text-orange-300':'bg-orange-50 text-orange-800'}`}>חסר מפתח AI</span>}
+                    </button>
+                    {backupReminderDays !== null && (
+                      <button role="menuitem" type="button" onClick={()=>{snoozeBackupReminder(); setHeaderMenuOpen(false);}}
+                        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-right ${isDarkMode?'text-slate-200 hover:bg-slate-700':'text-slate-700 hover:bg-slate-50'}`}>
+                        <Bell className="w-4 h-4"/>הזכר לי לגבות בעוד 3 ימים
+                      </button>
+                    )}
+                    <div className={`mt-1 pt-2 border-t px-3 ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+                      <p className={`text-xs font-semibold mb-2 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>התראות</p>
+                      {notifications.length>0 ? notifications.map(n=>(
+                        <div key={n.id} className={`p-2 rounded-lg text-xs flex items-start gap-2 mb-1.5 ${n.type==='success'?(isDarkMode?'bg-emerald-500/10 text-emerald-300':'bg-emerald-50 text-emerald-800'):n.type==='warning'?(isDarkMode?'bg-orange-500/10 text-orange-300':'bg-orange-50 text-orange-800'):(isDarkMode?'bg-blue-500/10 text-blue-300':'bg-blue-50 text-blue-800')}`}>
+                          {n.text}
+                        </div>
+                      )) : <p className={`text-xs pb-2 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין התראות</p>}
                     </div>
-                  )) : <p className={`text-xs text-center py-3 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין התראות</p>}
-                </div>
+                  </div>
+                </>
               )}
             </div>
-            {/* Settings button — shows dot if no API key */}
-            <button onClick={()=>setSettingsOpen(true)}
-              className={`relative p-2.5 rounded-xl transition-all ${isDarkMode?'bg-slate-800 text-slate-300 hover:bg-slate-700':'bg-slate-100 text-slate-600 hover:bg-slate-200'}`}
-              title="הגדרות">
-              <Settings className="w-4 h-4"/>
-              {!apiKey && <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-amber-400 rounded-full" title="מפתח AI לא מוגדר"/>}
-            </button>
-            <button onClick={generateAI} className="hidden sm:flex items-center gap-2 px-4 py-2 bg-gradient-to-r from-blue-600 to-indigo-600 hover:from-blue-700 hover:to-indigo-700 text-white rounded-xl shadow-lg shadow-blue-500/20 font-medium text-sm transition-all hover:-translate-y-0.5 active:scale-95">
-              <Sparkles className="w-4 h-4 text-yellow-200"/>
+            <button type="button" onClick={generateAI} className="hidden sm:flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl font-semibold text-sm transition-colors">
+              <Sparkles className="w-4 h-4"/>
               <span className="hidden sm:inline">תובנות AI</span>
             </button>
           </div>
@@ -6593,19 +6657,6 @@ const App = () => {
                 </p>
               </div>
               <button onClick={()=>window.location.reload()} className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold ${isDarkMode?'bg-red-500/20 hover:bg-red-500/30':'bg-red-100 hover:bg-red-200'}`}>רענן דף</button>
-            </div>
-          )}
-          {/* Backup reminder — the JSON export is the only safety net until cloud sync exists */}
-          {backupReminderDays !== null && idbLoadFailed.length === 0 && (
-            <div className={`flex items-center gap-3 px-5 py-3 rounded-2xl border ${isDarkMode?'bg-amber-500/10 border-amber-500/25 text-amber-300':'bg-amber-50 border-amber-200 text-amber-800'}`}>
-              <FileSpreadsheet className="w-4 h-4 shrink-0"/>
-              <p className="flex-1 text-xs sm:text-sm">
-                {backupReminderDays === -1
-                  ? 'עדיין לא יצרת קובץ גיבוי. הנתונים שמורים רק בדפדפן הזה — ניקוי היסטוריה או תקלה ימחקו אותם.'
-                  : `עברו ${backupReminderDays} ימים מהגיבוי האחרון. מומלץ לייצא גיבוי עדכני.`}
-              </p>
-              <button onClick={()=>setSettingsOpen(true)} className={`shrink-0 px-3 py-1.5 rounded-lg text-xs font-bold ${isDarkMode?'bg-amber-500/20 hover:bg-amber-500/30':'bg-amber-100 hover:bg-amber-200'}`}>גבה עכשיו</button>
-              <button onClick={snoozeBackupReminder} title="הזכר לי בעוד 3 ימים" className="shrink-0 opacity-50 hover:opacity-100"><X className="w-4 h-4"/></button>
             </div>
           )}
           {/* Overview */}
@@ -6720,7 +6771,7 @@ const App = () => {
                   )}
                   {/* Saved views */}
                   <div className="relative" data-saved-views>
-                    <button onClick={()=>setShowSavedViews(p=>!p)} className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border-2 transition-colors ${isDarkMode?'bg-amber-500/10 border-amber-500/40 text-amber-300 hover:bg-amber-500/20':'bg-amber-50 border-amber-300 text-amber-700 hover:bg-amber-100'}`}>
+                    <button onClick={()=>setShowSavedViews(p=>!p)} className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-bold border-2 transition-colors ${isDarkMode?'bg-orange-500/10 border-orange-500/40 text-orange-300 hover:bg-orange-500/20':'bg-orange-50 border-orange-300 text-orange-700 hover:bg-orange-100'}`}>
                       <Star className="w-3.5 h-3.5 fill-current"/> תצוגות שמורות {savedViews.length>0?`(${savedViews.length})`:''}
                     </button>
                     {showSavedViews && (
@@ -7112,13 +7163,13 @@ const App = () => {
                     </div>
                   </div>
                   {hasBlockedCurrency && (
-                    <div className={`px-5 py-2 text-xs flex items-center gap-2 ${isDarkMode?'bg-amber-500/10 text-amber-400':'bg-amber-50 text-amber-700'}`}>
+                    <div className={`px-5 py-2 text-xs flex items-center gap-2 ${isDarkMode?'bg-orange-500/10 text-orange-400':'bg-orange-50 text-orange-700'}`}>
                       <TriangleAlert className="w-3.5 h-3.5"/> חלק מהמוצרים מיובאים בעלות במטבע שאינו ₪ — הרווח לא חושב להם. הזן שער חליפין ב-⚙️ הגדרות והרווח יחושב גם להם
                     </div>
                   )}
                   {/* Legend — explains ABC/XYZ, margin, and the time scope behind the numbers */}
                   <div className={`px-5 py-2.5 border-b flex flex-wrap gap-x-4 gap-y-1.5 text-[11px] ${isDarkMode?'border-slate-700 text-slate-500':'border-slate-100 text-slate-400'}`}>
-                    <span><span className="font-bold text-amber-500">A</span>=80% מההכנסה · <span className="font-bold text-blue-500">B</span>=עד 95% · <span className="font-bold text-slate-400">C</span>=שאר 5%</span>
+                    <span><span className="font-bold text-orange-500">A</span>=80% מההכנסה · <span className="font-bold text-blue-500">B</span>=עד 95% · <span className="font-bold text-slate-400">C</span>=שאר 5%</span>
                     <span>X/Y/Z = יציבות ביקוש (יציב→לא צפוי)</span>
                     {hasAnyMargin && <span>רווח = הכנסה − (כמות × עלות) · תיאורטי, לא כולל הוצאות תפעול · ≈€/≈$ = עלות שהומרה לפי שער מההגדרות</span>}
                     <span>כמות והכנסה: לפי טווח התאריכים שנבחר מעל הטבלה · גרף המגמה (בלחיצה על %) מציג תמיד 12 חודשים אחרונים בפועל</span>
@@ -7145,7 +7196,7 @@ const App = () => {
                               {p.sku && <span className={`ml-2 text-xs font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.sku}</span>}
                             </td>
                             <td className="px-5 py-3.5">
-                              <span className={`inline-flex items-center justify-center px-1.5 h-6 rounded-lg text-xs font-bold ${p.abc==='A'?(isDarkMode?'bg-amber-500/20 text-amber-400':'bg-amber-100 text-amber-700'):p.abc==='B'?(isDarkMode?'bg-blue-500/20 text-blue-400':'bg-blue-100 text-blue-700'):(isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500')}`} title={`${p.revPct.toFixed(1)}% מההכנסות · ${p.xyz==='X'?'ביקוש יציב':p.xyz==='Y'?'ביקוש משתנה':'ביקוש לא צפוי'} (CV)`}>{p.abc}{p.xyz}</span>
+                              <span className={`inline-flex items-center justify-center px-1.5 h-6 rounded-lg text-xs font-bold ${p.abc==='A'?(isDarkMode?'bg-orange-500/20 text-orange-400':'bg-orange-100 text-orange-700'):p.abc==='B'?(isDarkMode?'bg-blue-500/20 text-blue-400':'bg-blue-100 text-blue-700'):(isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500')}`} title={`${p.revPct.toFixed(1)}% מההכנסות · ${p.xyz==='X'?'ביקוש יציב':p.xyz==='Y'?'ביקוש משתנה':'ביקוש לא צפוי'} (CV)`}>{p.abc}{p.xyz}</span>
                             </td>
                             <td className="px-5 py-3.5">{p.totalQty.toLocaleString()}</td>
                             <td className={`px-5 py-3.5 font-bold tabular-nums ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>{formatCurrency(p.totalRev)}</td>
@@ -7156,7 +7207,7 @@ const App = () => {
                             {hasAnyMargin && <td className={`px-5 py-3.5 text-xs font-medium ${p.marginPct==null?(isDarkMode?'text-slate-600':'text-slate-300'):p.marginPct>=0?'text-emerald-500':'text-red-500'}`}>{p.marginPct!=null?`${p.marginPct.toFixed(1)}%`:'—'}</td>}
                             <td className="px-5 py-3.5">
                               <button onClick={()=>jumpToProcurement(p.name)} title="עבור לתכנון רכש למוצר הזה — מלאי, כיסוי, תחזית ועונתיות"
-                                className={`flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-colors ${isDarkMode?'text-amber-400 hover:bg-amber-500/10':'text-amber-600 hover:bg-amber-50'}`}>
+                                className={`flex items-center gap-1 text-xs px-2 py-1 rounded-lg transition-colors ${isDarkMode?'text-orange-400 hover:bg-orange-500/10':'text-orange-600 hover:bg-orange-50'}`}>
                                 <ShoppingCart className="w-3.5 h-3.5"/> רכש
                               </button>
                             </td>
