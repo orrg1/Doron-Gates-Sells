@@ -106,7 +106,7 @@ const getProcColValue = (key, p) => {
     case 'avg':      return `${p.avgMonthly.toFixed(1)} יח'`;
     case 'trend':    return p.trend?`${Math.abs(p.trend).toFixed(0)}%`:'';
     case 'stock':    return p.currentStock!=null?p.currentStock.toLocaleString():'';
-    case 'coverage': return p.coverageDays!=null?`${p.coverageDays} יום (${(p.coverageMonths||0).toFixed(1)} ח')`:'';
+    case 'coverage': return p.effectiveCoverDays!=null?`${p.effectiveCoverDays} יום (${(p.effectiveCoverMonths||0).toFixed(1)} ח')`:'';
     case 'order':    return p.suggestedOrder?p.suggestedOrder.toLocaleString():'';
     default: return '';
   }
@@ -1621,9 +1621,83 @@ const parseCustomerProductFile = (rows) => {
 const MONTH_FULL_LABELS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
 const MONTH_ABBR_LABELS_SHORT = ['ינו','פבר','מרץ','אפר','מאי','יונ','יול','אוג','ספט','אוק','נוב','דצמ'];
 
+// Parses both date formats that reach the procurement page: Priority exports
+// arrive as "dd/mm/yyyy" (he-IL), the manual order form stores "yyyy-mm-dd".
+// `new Date("15/07/2026")` is Invalid Date, which is why overdue detection
+// never fired for Priority-imported orders — every date must go through here.
+const parseFlexDate = (s) => {
+  if (!s) return null;
+  if (s instanceof Date) return isNaN(s.getTime()) ? null : s;
+  const str = String(s).trim();
+  if (str.includes('/')) { const [d,m,y] = str.split('/').map(Number); if (d&&m&&y) return new Date(y<100?2000+y:y, m-1, d); return null; }
+  if (/^\d{4}-\d{1,2}-\d{1,2}/.test(str)) { const [y,m,d] = str.slice(0,10).split('-').map(Number); return new Date(y, m-1, d); }
+  return null;
+};
+const DAY_MS = 24*60*60*1000;
+const startOfToday = () => { const t = new Date(); t.setHours(0,0,0,0); return t; };
+
+// Service level per ABC class — A items must not run out (98%), C items
+// shouldn't tie up cash in buffer stock (90%). Z = standard-normal quantile.
+const SERVICE_LEVEL = { A:{ z:2.05, pct:98 }, B:{ z:1.65, pct:95 }, C:{ z:1.28, pct:90 } };
+
+// Single source of truth for "how much to order" — used by the main table
+// AND the what-if scenario, so the two can never drift apart again.
+//   demand over the horizon (lead time + months of stock), month by month,
+//   scaled by the seasonal index of each upcoming calendar month when the
+//   product has enough history for seasonality to be trusted
+// + buffer  = max(statistical safety stock, Priority minimum stock)
+// − stock on hand − quantity already on the way
+// then rounded up to the supplier's MOQ.
+const calcOrderPlan = ({ avgMonthly, stdDev, abc, leadTime, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq, multiplier = 1 }) => {
+  const base = avgMonthly * multiplier;
+  const horizon = Math.max(0, leadTime + monthsToStock);
+  let projectedDemand = 0;
+  const useSeason = seasonalityReliable && nextMonIdx >= 0 && Array.isArray(seasonalityIdx);
+  for (let i = 0; i < Math.ceil(horizon); i++) {
+    const portion = Math.min(1, horizon - i);
+    const f = useSeason ? Math.max(0.5, Math.min(2.0, seasonalityIdx[(nextMonIdx + i) % 12] || 1)) : 1;
+    projectedDemand += base * f * portion;
+  }
+  const flatDemand = base * horizon;
+  const sl = SERVICE_LEVEL[abc] || SERVICE_LEVEL.B;
+  const safetyStock = Math.ceil(sl.z * (stdDev||0) * Math.sqrt(multiplier) * Math.sqrt(Math.max(leadTime, 0.5)));
+  const buffer = Math.max(safetyStock, minStock || 0);
+  const raw = Math.max(0, Math.ceil(projectedDemand + buffer - (effectiveStock || 0)));
+  const rounded = (moq && moq > 0 && raw > 0) ? Math.ceil(raw / moq) * moq : raw;
+  const rawFlat = Math.max(0, Math.ceil(flatDemand + buffer - (effectiveStock || 0)));
+  return { suggestedOrder: rounded, suggestedOrderRaw: raw, suggestedOrderFlat: rawFlat, projectedDemand, safetyStock, buffer, serviceLevel: sl.pct, seasonalApplied: useSeason && Math.abs(projectedDemand - flatDemand) > 0.5 };
+};
+
+// Builds a downloadable RTL .xls from an HTML table body (same approach used
+// everywhere else in the app — ExcelJS doesn't load reliably from CDN).
+const downloadXls = (sheetName, bodyHtml, fileName) => {
+  const html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="UTF-8"><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>${sheetName}</x:Name><x:WorksheetOptions><x:DisplayRightToLeft/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml></head><body>${bodyHtml}</body></html>`;
+  const blob = new Blob(['﻿'+html], { type:'application/vnd.ms-excel;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a'); a.style.display='none'; a.href=url; a.setAttribute('download', fileName);
+  document.body.appendChild(a); a.click();
+  setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 200);
+};
+const escHtml = (s) => String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+
 // ─── PROCUREMENT PAGE ──────────────────────────────────
-const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth }) => {
+const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
+  // SKU → product name, captured from the inventory file. Needed so items
+  // that are in stock but never appear in sales can still be shown by name
+  // in the dead-stock report (before this, they didn't exist anywhere).
+  const [nameMap, setNameMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementNames')||'{}'); } catch { return {}; } });
+  // SKU → [{d:'yyyy-mm-dd', c:cost, cur}] — a new entry is appended whenever an
+  // inventory import brings a different purchase price than the last one seen.
+  const [costHistory, setCostHistory] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementCostHistory')||'{}'); } catch { return {}; } });
+  // Log of orders that were received — the only way to measure how long a
+  // supplier REALLY takes vs. the lead time configured for it.
+  const [receiptLog, setReceiptLog] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementReceiptLog')||'[]'); } catch { return []; } });
+  const saveReceiptLog = (log) => {
+    const trimmed = log.slice(-2000);
+    setReceiptLog(trimmed);
+    try { localStorage.setItem('procurementReceiptLog', JSON.stringify(trimmed)); } catch { /* best-effort */ }
+  };
   const [minStockMap, setMinStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementMinStock')||'{}'); } catch { return {}; } });
   const [supplierMap, setSupplierMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementSupplier')||'{}'); } catch { return {}; } });
   const [moqMap, setMoqMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementMOQ')||'{}'); } catch { return {}; } });
@@ -1775,20 +1849,32 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
       const valueILS = costUsable ? o.value*rate : null;
       const costCurrencyBlocked = o.value>0 && isForeign && rate==null ? currency : null;
       const unitPriceOriginal = (o.value>0 && o.orderedQty>0) ? o.value/o.orderedQty : null;
-      return { ...o, currency, valueILS, costCurrencyBlocked, costConverted: costUsable && isForeign ? currency : null, unitPriceOriginal };
+      // PO price vs. the catalog purchase price ("מחיר קניה אחרון") — same
+      // currency on both sides, so no conversion is involved in the comparison.
+      const catalogCost = costMap[o.productKey]??costMap[o.productName]??null;
+      const poPriceDiffPct = (unitPriceOriginal!=null && catalogCost>0) ? ((unitPriceOriginal-catalogCost)/catalogCost)*100 : null;
+      // Overdue — expected delivery date has passed and it's still open.
+      const expectedDt = parseFlexDate(o.expectedDate);
+      const today = startOfToday();
+      const isOverdue = !!expectedDt && expectedDt < today && o.status !== 'received';
+      const daysLate = isOverdue ? Math.round((today - expectedDt)/DAY_MS) : 0;
+      return { ...o, currency, valueILS, costCurrencyBlocked, costConverted: costUsable && isForeign ? currency : null, unitPriceOriginal, catalogCost, poPriceDiffPct, isOverdue, daysLate };
     });
-  }, [openOrders, currencyMap, exchangeRates]);
+  }, [openOrders, currencyMap, exchangeRates, costMap]);
+  const overdueOrders = useMemo(() => ordersEnriched.filter(o=>o.isOverdue), [ordersEnriched]);
+  const [showOverdueOnly, setShowOverdueOnly] = useState(false);
+  // Per product: how much of what's "on the way" is actually late.
+  const overdueByProduct = useMemo(() => {
+    const m = {};
+    overdueOrders.forEach(o => { const k=o.productKey||o.productName; if(!m[k]) m[k]={qty:0,maxDays:0}; m[k].qty+=o.orderedQty||0; m[k].maxDays=Math.max(m[k].maxDays,o.daysLate); });
+    return m;
+  }, [overdueOrders]);
   const ordersBlockedCurrencies = useMemo(() => [...new Set(ordersEnriched.filter(o=>o.costCurrencyBlocked).map(o=>o.costCurrencyBlocked))], [ordersEnriched]);
 
   // ── Cash flow forecast — buckets open orders by expected delivery month ──
   // Uses valueILS (above) so mixed-currency open orders don't get summed as
   // if they were all ₪.
-  const parseOrderDate = (s) => {
-    if (!s) return null;
-    if (s.includes('/')) { const [d,m,y] = s.split('/').map(Number); return (d&&m&&y) ? new Date(y,m-1,d) : null; }
-    if (s.includes('-')) { const [y,m,d] = s.split('-').map(Number); return (y&&m&&d) ? new Date(y,m-1,d) : null; }
-    return null;
-  };
+  const parseOrderDate = parseFlexDate;
   const cashFlowForecast = useMemo(() => {
     const active = ordersEnriched.filter(o => o.status !== 'received');
     const buckets = {};
@@ -1858,6 +1944,20 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
         setOrdersLoading(false);
         return;
       }
+      // Orders that were open in the previous Priority import and are gone
+      // from this one were (almost always) received in between. Log them as
+      // received today — an estimate, flagged as such — so supplier
+      // reliability can be measured without manual bookkeeping.
+      const idOf = (o) => `${o.poNumber||''}|${o.productKey||o.productName||''}`;
+      const newIds = new Set(parsed.map(idOf));
+      const todayIso = new Date().toISOString().slice(0,10);
+      const vanished = openOrders.filter(o => o.fromPriority && o.poNumber && !newIds.has(idOf(o)));
+      if (vanished.length) {
+        saveReceiptLog([...receiptLog, ...vanished.map(o => ({
+          supplier:o.supplier||'', productKey:o.productKey||o.productName, poNumber:o.poNumber,
+          orderDate:o.orderDate||'', expectedDate:o.expectedDate||'', receivedDate:todayIso, qty:o.orderedQty||0, estimated:true,
+        }))]);
+      }
       // Remove existing fromPriority orders and replace with new import
       const manual = openOrders.filter(o => !o.fromPriority);
       const merged = [...manual, ...parsed];
@@ -1906,15 +2006,16 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
   };
 
   const sortedOpenOrders = useMemo(() => {
-    if (!ordersSortConfig.key) return ordersEnriched;
-    return [...ordersEnriched].sort((a,b) => {
+    const base = showOverdueOnly ? ordersEnriched.filter(o=>o.isOverdue) : ordersEnriched;
+    if (!ordersSortConfig.key) return base;
+    return [...base].sort((a,b) => {
       const va = a[ordersSortConfig.key] ?? '', vb = b[ordersSortConfig.key] ?? '';
       let cmp;
       if (typeof va === 'number' || typeof vb === 'number') cmp = (va||0) - (vb||0);
       else cmp = String(va).localeCompare(String(vb), 'he');
       return ordersSortConfig.direction === 'asc' ? cmp : -cmp;
     });
-  }, [ordersEnriched, ordersSortConfig]);
+  }, [ordersEnriched, ordersSortConfig, showOverdueOnly]);
   const reqOrdersSort = (key) => setOrdersSortConfig(p => ({ key, direction: p.key===key && p.direction==='asc' ? 'desc' : 'asc' }));
 
   const saveStock = (key, val) => {
@@ -1981,6 +2082,8 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
         +'== נמוך ==\n'+lowLines+'\n\n'
         +'== A לרכש ==\n'+topALines+'\n\n'
         +'סה"כ להזמנה: '+totalOrder.toLocaleString()+' יח\' | עלות: ₪'+Math.round(totalCost).toLocaleString()+'\n\n'
+        +'== הזמנות באיחור ==\n'+(overdueOrders.length ? overdueOrders.slice(0,8).map(o=>'• '+o.productName+' מ-'+(o.supplier||'?')+': איחור '+o.daysLate+' ימים, '+o.orderedQty+' יח\'').join('\n') : 'אין')+'\n\n'
+        +'== עליות מחיר קניה ==\n'+(priceChanges.filter(p=>p.priceChangePct>0).length ? priceChanges.filter(p=>p.priceChangePct>0).slice(0,6).map(p=>'• '+p.name+': +'+p.priceChangePct.toFixed(1)+'%').join('\n') : 'אין')+'\n\n'
         +'תן: 1) עדיפויות 2) אזהרות 3) המלצה לשיפור.';
       const text = await callGemini(prompt, apiKey);
       setAiInsightText(text);
@@ -2008,7 +2111,37 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     saveOrders(openOrders.map(o => o.id===id ? {...o, [field]: field==='orderedQty'?parseFloat(val)||0:val} : o));
   };
   const deleteOrder = (id) => saveOrders(openOrders.filter(o=>o.id!==id));
-  const receiveOrder = (id) => saveOrders(openOrders.filter(o=>o.id!==id)); // remove when received
+  const receiveOrder = (id) => {
+    const o = openOrders.find(x=>x.id===id);
+    if (o) saveReceiptLog([...receiptLog, {
+      supplier:o.supplier||'', productKey:o.productKey||o.productName, poNumber:o.poNumber||'',
+      orderDate:o.orderDate||'', expectedDate:o.expectedDate||'', receivedDate:new Date().toISOString().slice(0,10), qty:o.orderedQty||0, estimated:false,
+    }]);
+    saveOrders(openOrders.filter(x=>x.id!==id)); // remove when received
+  };
+
+  // ── Supplier reliability — real lead time & on-time rate from received orders ──
+  const supplierReliability = useMemo(() => {
+    const out = {};
+    receiptLog.forEach(r => {
+      const sup = r.supplier || 'ספק לא ידוע';
+      if (!out[sup]) out[sup] = { deliveries:0, leadDaysSum:0, leadDaysN:0, onTimeN:0, onTimeBase:0, estimatedN:0, openOverdue:0, openCount:0 };
+      const s = out[sup]; s.deliveries++; if (r.estimated) s.estimatedN++;
+      const od = parseFlexDate(r.orderDate), rd = parseFlexDate(r.receivedDate), ed = parseFlexDate(r.expectedDate);
+      if (od && rd && rd >= od) { s.leadDaysSum += (rd-od)/DAY_MS; s.leadDaysN++; }
+      if (ed && rd) { s.onTimeBase++; if (rd <= new Date(ed.getTime() + 3*DAY_MS)) s.onTimeN++; } // 3-day grace
+    });
+    ordersEnriched.forEach(o => {
+      const sup = o.supplier || 'ספק לא ידוע';
+      if (!out[sup]) out[sup] = { deliveries:0, leadDaysSum:0, leadDaysN:0, onTimeN:0, onTimeBase:0, estimatedN:0, openOverdue:0, openCount:0 };
+      out[sup].openCount++; if (o.isOverdue) out[sup].openOverdue++;
+    });
+    Object.values(out).forEach(s => {
+      s.avgLeadDays = s.leadDaysN ? Math.round(s.leadDaysSum/s.leadDaysN) : null;
+      s.onTimePct = s.onTimeBase ? Math.round(s.onTimeN/s.onTimeBase*100) : null;
+    });
+    return out;
+  }, [receiptLog, ordersEnriched]);
 
   // Map incoming quantities by product key for use in calculations
   const incomingMap = useMemo(() => {
@@ -2031,16 +2164,36 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
         return;
       }
       const ns = {...stockMap}, nc = {...costMap}, nm = {...minStockMap}, nsup = {...supplierMap}, nmoq = {...moqMap}, ncur = {...currencyMap};
+      const nnames = {...nameMap}, nhist = {...costHistory};
+      const todayIso = new Date().toISOString().slice(0,10);
       parsed.forEach(item => {
         const k = item.sku||item.name;
+        if (item.name && item.name!==k) nnames[k] = item.name;
         if (item.quantity !== null) ns[k] = item.quantity;
-        if (item.cost !== null) nc[k] = item.cost;
+        if (item.cost !== null) {
+          // Price history: append only when the price actually changed (or on
+          // first sight), so the history reflects real price moves, not imports.
+          const cur = item.currency || ncur[k] || 'ILS';
+          const hist = nhist[k] ? [...nhist[k]] : [];
+          const last = hist[hist.length-1];
+          if (!last || Math.abs(last.c - item.cost) > 1e-9 || last.cur !== cur) {
+            if (last && last.d === todayIso) hist[hist.length-1] = { d:todayIso, c:item.cost, cur };
+            else hist.push({ d:todayIso, c:item.cost, cur });
+            nhist[k] = hist.slice(-24);
+          }
+          nc[k] = item.cost;
+        }
         if (item.minStock !== null) nm[k] = item.minStock;
         if (item.supplier) nsup[k] = item.supplier;
         if (item.moq !== null) nmoq[k] = item.moq;
         if (item.currency) ncur[k] = item.currency;
       });
       setStockMap(ns); setCostMap(nc); setMinStockMap(nm); setSupplierMap(nsup); setMoqMap(nmoq); setCurrencyMap(ncur);
+      setNameMap(nnames); setCostHistory(nhist);
+      try {
+        localStorage.setItem('procurementNames', JSON.stringify(nnames));
+        localStorage.setItem('procurementCostHistory', JSON.stringify(nhist));
+      } catch { /* non-critical — reported below if the main maps also fail */ }
       // Same class of failure as the customer-file uploads: writing this much
       // data can hit the browser's storage quota. If it does, the in-memory
       // state above still updates (so the table looks fine right now), but
@@ -2108,6 +2261,9 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
 
   const clearInventory = () => {
     setStockMap({}); setCostMap({}); setMinStockMap({}); setSupplierMap({}); setMoqMap({}); setCurrencyMap({});
+    setNameMap({}); localStorage.removeItem('procurementNames');
+    // Price history is intentionally kept — it's the record of past prices,
+    // and wiping it on every inventory reset would defeat its purpose.
     setInvFileName(''); setImportStats(null); setInvSlots({ product:null, masterCard:null });
     localStorage.removeItem('procurementStock'); localStorage.removeItem('procurementCost');
     localStorage.removeItem('procurementMinStock'); localStorage.removeItem('procurementSupplier');
@@ -2134,10 +2290,13 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     const map = {};
     salesData.forEach(row => {
       const key = row.sku||row.description; if (!key) return;
-      if (!map[key]) map[key] = { sku:row.sku||'', name:row.description||key, monthlyData:{}, totalQty:0, totalRev:0 };
+      if (!map[key]) map[key] = { sku:row.sku||'', name:row.description||key, monthlyData:{}, monthlyRev:{}, totalQty:0, totalRev:0 };
       map[key].totalQty += row.quantity||0;
       map[key].totalRev += row.total||0;
-      if (row.date) map[key].monthlyData[row.date] = (map[key].monthlyData[row.date]||0)+(row.quantity||0);
+      if (row.date) {
+        map[key].monthlyData[row.date] = (map[key].monthlyData[row.date]||0)+(row.quantity||0);
+        map[key].monthlyRev[row.date]  = (map[key].monthlyRev[row.date]||0)+(row.total||0);
+      }
     });
     // All months in dataset (used for sparkline / seasonality base)
     // Most customers are invoiced only at month-end/start of next month, so the
@@ -2151,50 +2310,52 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     const allMonths = avgWindowMonths === 0
       ? allMonthsFull
       : allMonthsFull.slice(-avgWindowMonths);
-    // Build window-filtered sales totals for each product
     const windowMonthSet = new Set(allMonths);
-    const totalRev = Object.values(map).reduce((a,c)=>a+c.totalRev,0);
-    let cumulative = 0;
-    const sorted = Object.values(map).sort((a,b)=>b.totalRev-a.totalRev);
-    sorted.forEach(p => {
-      const pct = totalRev>0?(p.totalRev/totalRev)*100:0;
-      cumulative += pct; p.revPct=pct;
-      p.abc = cumulative<=80?'A':cumulative<=95?'B':'C';
-      // Build windowed monthlyData for average calculation
-      p.monthlyDataWindow = Object.fromEntries(
-        Object.entries(p.monthlyData).filter(([d]) => windowMonthSet.has(d))
-      );
+    // ── ABC on the SAME window as the averages ──
+    // Previously ABC used all-time revenue while averages used the window, so a
+    // product that was big two years ago and has since faded stayed an "A".
+    Object.values(map).forEach(p => {
+      p.windowRev = Object.entries(p.monthlyRev).reduce((s,[d,v]) => windowMonthSet.has(d) ? s+v : s, 0);
+      p.monthlyDataWindow = Object.fromEntries(Object.entries(p.monthlyData).filter(([d]) => windowMonthSet.has(d)));
     });
+    const totalWindowRev = Object.values(map).reduce((a,c)=>a+Math.max(0,c.windowRev),0);
+    let cumulative = 0;
+    const sorted = Object.values(map).sort((a,b)=>b.windowRev-a.windowRev || b.totalRev-a.totalRev);
+    sorted.forEach(p => {
+      const pct = totalWindowRev>0 ? (Math.max(0,p.windowRev)/totalWindowRev)*100 : 0;
+      // Classify by the running share BEFORE this product — so the product
+      // that crosses the 80% line is still an A (otherwise a dominant best
+      // seller holding e.g. 85% alone would be labelled B).
+      const before = cumulative;
+      cumulative += pct; p.revPct = pct;
+      p.abc = p.windowRev<=0 ? 'C' : before<80 ? 'A' : before<95 ? 'B' : 'C';
+    });
+    const MONTH_ABBR = ['ינו','פבר','מרץ','אפר','מאי','יונ','יול','אוג','ספט','אוק','נוב','דצמ'];
+    const lastMonthStr = allMonths[allMonths.length-1] || '';
+    const lastMonIdx = MONTH_ABBR.indexOf(lastMonthStr.split('-')[0]);
+    const nextMonIdx = lastMonIdx !== -1 ? (lastMonIdx+1)%12 : -1;
     return sorted.map(p => {
       const key = p.sku||p.name;
       // ── Average monthly demand — calendar-based, zero-filled ──
       // Averaged over every calendar month from the product's FIRST sale
       // within the window through the end of the window — including months
-      // with zero sales. This matters a lot for intermittent-demand products
-      // (e.g. a handful of units every few months): dividing only by the
-      // months that had a sale (the old approach) skips the zero months in
-      // between and overstates the true monthly rate — e.g. 12 units sold
-      // across 2 active months out of a 12-month span used to average out
-      // to 6/month instead of the real ~1/month. It still avoids diluting a
-      // genuinely new product's average by NOT counting calendar months
-      // before its first sale.
+      // with zero sales, so intermittent products aren't overstated. It still
+      // avoids diluting a genuinely new product by NOT counting calendar
+      // months before its first sale.
       const firstActiveIdx = allMonths.findIndex(m => (p.monthlyDataWindow[m]||0) > 0);
-      let avgMonthly, avgDataMonths, isLimitedData;
+      let avgMonthly, avgDataMonths, isLimitedData, cappedVals = [];
       if (firstActiveIdx === -1) {
         avgMonthly = 0; avgDataMonths = 0; isLimitedData = true;
       } else {
-        const relevantMonths = allMonths.slice(firstActiveIdx); // calendar months since first sale, zero-filled
+        const relevantMonths = allMonths.slice(firstActiveIdx);
         const rawVals = relevantMonths.map(m => p.monthlyDataWindow[m]||0);
         const activeVals = rawVals.filter(v => v>0);
         // Cap (never drop) a rare abnormally-large single month — e.g. one
-        // bulk order — at 3× the median of active months, so one outlier
-        // doesn't dominate the average. Zero months are real "no demand"
-        // data, not anomalies, and are never touched or excluded.
-        let cappedVals = rawVals;
+        // bulk order — at 3× the median of active months.
+        cappedVals = rawVals;
         if (activeVals.length >= 3) {
           const sortedActive = [...activeVals].sort((a,b)=>a-b);
-          const median = sortedActive[Math.floor(sortedActive.length/2)];
-          const cap = median * 3;
+          const cap = sortedActive[Math.floor(sortedActive.length/2)] * 3;
           cappedVals = rawVals.map(v => v > cap ? cap : v);
         }
         avgMonthly = cappedVals.reduce((a,b)=>a+b,0) / relevantMonths.length;
@@ -2202,28 +2363,18 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
         isLimitedData = avgDataMonths < 3;
       }
       const sparkline = allMonths.slice(-6).map(m=>({m, v:p.monthlyData[m]||0}));
-      // Richer 12-month series for the trend popup chart (sparkline stays at 6 for compact use elsewhere)
       const trendSeries = allMonths.slice(-12).map(m=>({month:m, qty:p.monthlyData[m]||0}));
       const last3 = allMonths.slice(-3).reduce((a,m)=>a+(p.monthlyData[m]||0),0)/3;
       const prev3 = allMonths.slice(-6,-3).reduce((a,m)=>a+(p.monthlyData[m]||0),0)/3;
       const trend = prev3>0?((last3-prev3)/prev3)*100:0;
-      // match by key, sku, or name
       const currentStock = stockMap[key]??stockMap[p.sku]??stockMap[p.name]??null;
       const minStock     = minStockMap[key]??minStockMap[p.sku]??minStockMap[p.name]??null;
       const supplier     = supplierMap[key]??supplierMap[p.sku]??supplierMap[p.name]??null;
       const currency     = currencyMap[key]??currencyMap[p.sku]??currencyMap[p.name]??null;
       // ── Unit cost — original currency AND ₪-converted ──
-      // costMap holds the raw imported cost, in whatever currency the
-      // inventory file specified (ILS/EUR/USD). unitCost (ILS) is what every
-      // aggregate/total ₪ figure in this page must use (KPI cards, PDF
-      // summary, dead-stock value, what-if totals) — otherwise a €120 line
-      // and a ₪120 line get summed as if equal, which is exactly the bug
-      // this fixes. unitCostOriginal stays in the native currency for
-      // per-row/per-currency displays (e.g. the supplier PDF, which
-      // correctly shows "€120" rather than converting for a document a
-      // supplier will actually be paid in). When a foreign cost has no
-      // matching rate in Settings, unitCost is null (flagged via
-      // costCurrencyBlocked) rather than silently treated as 1:1 ₪.
+      // unitCost (₪) feeds every aggregate; unitCostOriginal stays in the
+      // supplier's currency for per-row / supplier-facing displays. A foreign
+      // cost with no rate in Settings is null (flagged), never silently 1:1.
       const unitCostOriginal = costMap[key]??costMap[p.sku]??costMap[p.name]??null;
       const isForeignCost = currency && currency!=='ILS';
       const fxRate = !isForeignCost ? 1 : (exchangeRates?.[currency]>0 ? exchangeRates[currency] : null);
@@ -2231,69 +2382,57 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
       const unitCost = costUsable ? unitCostOriginal*fxRate : null;
       const costConverted = costUsable && isForeignCost ? currency : null;
       const costCurrencyBlocked = unitCostOriginal!=null && !costUsable ? currency : null;
+      // ── Purchase price movement (from import history) ──
+      const hist = costHistory[key]??costHistory[p.sku]??costHistory[p.name]??null;
+      let priceChangePct = null, prevPrice = null, priceChangedAt = null;
+      if (hist && hist.length >= 2) {
+        const last = hist[hist.length-1], prev = hist[hist.length-2];
+        if (prev.c > 0 && last.cur === prev.cur) { priceChangePct = (last.c-prev.c)/prev.c*100; prevPrice = prev.c; priceChangedAt = last.d; }
+      }
       const avgDaily      = avgMonthly / 30;
       const coverageMonths = (currentStock!==null&&avgMonthly>0)?currentStock/avgMonthly:null;
       const coverageDays   = (currentStock!==null&&avgDaily>0)?Math.round(currentStock/avgDaily):null;
       // ── Seasonality index — average per calendar month vs overall annual average ──
-      const MONTH_ABBR = ['ינו','פבר','מרץ','אפר','מאי','יונ','יול','אוג','ספט','אוק','נוב','דצמ'];
       const monthlyAvgs = MONTH_ABBR.map(mName => {
         const vals = Object.entries(p.monthlyData).filter(([d])=>d.startsWith(mName+'-')).map(([,v])=>v);
         return vals.length ? vals.reduce((a,b)=>a+b,0)/vals.length : 0;
       });
-      // Per-year breakdown — robust parsing for both '24' and '2024' year formats
       const monthlyByYear = MONTH_ABBR.map(mName => {
         const yearMap = {};
         Object.entries(p.monthlyData).forEach(([date, qty]) => {
           if (!date) return;
-          // Match: starts with month abbreviation followed by hyphen
           const hyphenIdx = date.indexOf('-');
           if (hyphenIdx === -1) return;
-          const dateMon = date.slice(0, hyphenIdx);
-          if (dateMon !== mName) return;
+          if (date.slice(0, hyphenIdx) !== mName) return;
           const yrRaw = date.slice(hyphenIdx + 1);
           const year = yrRaw.length <= 2 ? '20' + yrRaw.padStart(2,'0') : yrRaw;
           yearMap[year] = (yearMap[year]||0) + qty;
         });
-        return Object.entries(yearMap)
-          .map(([year, qty]) => ({ year, qty }))
-          .sort((a,b) => a.year.localeCompare(b.year));
+        return Object.entries(yearMap).map(([year, qty]) => ({ year, qty })).sort((a,b) => a.year.localeCompare(b.year));
       });
       const annualAvg = monthlyAvgs.reduce((a,b)=>a+b,0)/12 || 1;
-      // Only trust the seasonal index once we have at least 2 distinct calendar
-      // months with real data — otherwise a single year of data makes every
-      // month look "seasonal" by definition (no contrast to average against).
+      // Only trust the seasonal index with 2+ years and 6+ distinct months.
       const monthsWithData = monthlyAvgs.filter(v=>v>0).length;
       const yearsOfData = new Set(monthlyByYear.flat().map(y=>y.year)).size;
       const seasonalityReliable = yearsOfData >= 2 && monthsWithData >= 6;
       const seasonalityIdx = monthlyAvgs.map(v => +(v/annualAvg).toFixed(2));
-      // ── Forecast next month ──────────────────────────────────────
-      // Base: weighted recent trend (last 3 months vs previous 3), as before.
+      // ── Forecast next month ──
       const recent3 = allMonths.slice(-3);
       const recent3Avg = recent3.reduce((s,m)=>s+(p.monthlyData[m]||0),0) / Math.max(recent3.length,1);
-      // Trend factor — damped a bit more than before since seasonality below
-      // now explains part of month-to-month swings that used to be read as "trend".
       const trendFactor = Math.max(0.75, Math.min(1.4, 1 + (trend||0)/250));
-      // Seasonal factor — ratio of the *upcoming* calendar month's typical sales
-      // to the annual average, clamped to avoid wild swings from sparse data.
       let seasonalFactor = 1;
-      if (seasonalityReliable) {
-        const lastMonthStr = allMonths[allMonths.length-1] || '';
-        const lastMonAbbr = lastMonthStr.slice(0, lastMonthStr.indexOf('-')!==-1 ? lastMonthStr.indexOf('-') : lastMonthStr.length);
-        const lastMonIdx = MONTH_ABBR.indexOf(lastMonAbbr);
-        const nextMonIdx = lastMonIdx !== -1 ? (lastMonIdx+1)%12 : -1;
-        if (nextMonIdx !== -1 && seasonalityIdx[nextMonIdx] > 0) {
-          seasonalFactor = Math.max(0.5, Math.min(2.0, seasonalityIdx[nextMonIdx]));
-        }
+      if (seasonalityReliable && nextMonIdx !== -1 && seasonalityIdx[nextMonIdx] > 0) {
+        seasonalFactor = Math.max(0.5, Math.min(2.0, seasonalityIdx[nextMonIdx]));
       }
       const forecastNext = Math.round(recent3Avg * trendFactor * seasonalFactor);
-      // ── XYZ classification: Coefficient of Variation ──────────────
-      const allSaleVals = Object.values(p.monthlyData).filter(v=>v>0);
-      const meanForCV = avgMonthly || 1;
-      const variance = allSaleVals.length > 1
-        ? allSaleVals.reduce((s,v)=>s+Math.pow(v-meanForCV,2),0) / allSaleVals.length
+      // ── Demand variability — zero-filled, same months & same values as the average ──
+      // Previously computed only over months WITH sales, across all history,
+      // against a zero-filled windowed mean — three different bases mixed
+      // together, which distorted both safety stock and X/Y/Z.
+      const stdDev = cappedVals.length > 1
+        ? Math.sqrt(cappedVals.reduce((s,v)=>s+Math.pow(v-avgMonthly,2),0) / cappedVals.length)
         : 0;
-      const stdDev = Math.sqrt(variance);
-      const cv = meanForCV > 0 ? stdDev / meanForCV : 0;
+      const cv = avgMonthly > 0 ? stdDev / avgMonthly : 0;
       const xyz = cv <= 0.5 ? 'X' : cv <= 1.0 ? 'Y' : 'Z';
       const abcXyz = (p.abc||'C') + xyz;
 
@@ -2301,58 +2440,53 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
       const effectiveLeadTime = (supplier && leadTimeMap[supplier]!=null) ? leadTimeMap[supplier] : leadTime;
       const leadTimeOverridden = supplier && leadTimeMap[supplier]!=null;
 
-      // ── Safety Stock: 95% service level (Z=1.65) ────────────────
-      const safetyStock = Math.ceil(1.65 * stdDev * Math.sqrt(Math.max(effectiveLeadTime, 0.5)));
-
-      // ── Lifecycle: compare last 3 vs previous 3 months ──────────
-      const lcRecent = allMonths.slice(-3).reduce((s,m)=>s+(p.monthlyData[m]||0),0)/3;
-      const lcPrev   = allMonths.slice(-6,-3).reduce((s,m)=>s+(p.monthlyData[m]||0),0)/3;
-      const lcTrend  = lcPrev>0 ? (lcRecent-lcPrev)/lcPrev*100 : 0;
+      // ── Lifecycle: compare last 3 vs previous 3 months ──
+      const lcTrend  = prev3>0 ? (last3-prev3)/prev3*100 : 0;
       const lifecycle = lcTrend > 20 ? 'growing' : lcTrend > -20 ? 'stable' : lcTrend > -50 ? 'declining' : 'dying';
 
-      // ── Incoming orders (already on the way) ────────────────────
+      // ── Incoming orders (already on the way) ──
       const incomingQty = incomingMap[key] ?? incomingMap[p.sku] ?? incomingMap[p.name] ?? 0;
+      const overdue = overdueByProduct[key] ?? overdueByProduct[p.sku] ?? overdueByProduct[p.name] ?? null;
       const effectiveStock = (currentStock??0) + incomingQty;
-      const effectiveCoverDays = avgDaily > 0 ? Math.round(effectiveStock / avgDaily) : null;
-      // ── Suggested order: includes safety stock, then rounded up to MOQ ──
-      const moq = moqMap[key] ?? moqMap[p.sku] ?? moqMap[p.name] ?? null;
-      const targetStock  = minStock ?? (monthsToStock * avgMonthly);
-      const baseOrder = (monthsToStock+effectiveLeadTime)*avgMonthly + safetyStock - effectiveStock;
-      const suggestedOrderRaw = Math.max(0, Math.ceil(baseOrder));
-      const suggestedOrder = (moq && moq>0 && suggestedOrderRaw>0)
-        ? Math.ceil(suggestedOrderRaw / moq) * moq
-        : suggestedOrderRaw;
-      const orderCost = (suggestedOrder>0&&unitCost)?suggestedOrder*unitCost:null; // ₪ — for all totals/sorting/aggregates
-      const orderCostOriginal = (suggestedOrder>0&&unitCostOriginal)?suggestedOrder*unitCostOriginal:null; // native currency — for per-row/per-currency display
-      const risk = currentStock!==null
-        ? (currentStock <= 0 ? 'critical'  // negative or zero stock
-          : coverageMonths < effectiveLeadTime ? 'critical'
-          : (minStock ? currentStock < minStock : coverageMonths < monthsToStock) ? 'low' : 'ok')
-        : 'unknown';
+      const effectiveCoverDays = (currentStock!==null && avgDaily > 0) ? Math.round(effectiveStock / avgDaily) : null;
+      const effectiveCoverMonths = (currentStock!==null && avgMonthly > 0) ? effectiveStock / avgMonthly : null;
 
-      // ── Combined risk score (0-100) — a single number that folds together
-      // the five factors that matter for procurement risk, so scanning 1000
-      // rows for "what needs attention" doesn't require reading five columns
-      // at once. Weights: coverage 40% (the core stockout signal), demand
-      // volatility 20% (how much the forecast itself can be trusted), XYZ
-      // 15% (statistical unpredictability), lead time 15% (how much runway
-      // a supply hiccup costs you), supplier concentration 10% (single point
-      // of failure). This is a prioritization aid, not a forecast — a high
-      // score means "look at this first", not "this WILL run out".
+      // ── Suggested order (shared with the what-if scenario) ──
+      const moq = moqMap[key] ?? moqMap[p.sku] ?? moqMap[p.name] ?? null;
+      const plan = calcOrderPlan({ avgMonthly, stdDev, abc:p.abc, leadTime:effectiveLeadTime, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq });
+      const { suggestedOrder, suggestedOrderRaw, suggestedOrderFlat, safetyStock, projectedDemand, serviceLevel, seasonalApplied } = plan;
+      const orderCost = (suggestedOrder>0&&unitCost)?suggestedOrder*unitCost:null;
+      const orderCostOriginal = (suggestedOrder>0&&unitCostOriginal)?suggestedOrder*unitCostOriginal:null;
+
+      // ── Risk — judged on stock + what's already on the way ──
+      // A product at 0 with 500 units arriving used to show "critical — order
+      // now" while the order column said "enough". Risk now reflects whether
+      // ACTION is needed; the physical shortage is kept as a separate flag.
+      const riskOf = (stock, covM) => stock<=0 ? 'critical'
+        : covM < effectiveLeadTime ? 'critical'
+        : (minStock ? stock < minStock : covM < monthsToStock) ? 'low' : 'ok';
+      const physicalRisk = currentStock!==null ? riskOf(currentStock, coverageMonths ?? (currentStock>0?Infinity:0)) : 'unknown';
+      const risk = currentStock!==null ? riskOf(effectiveStock, effectiveCoverMonths ?? (effectiveStock>0?Infinity:0)) : 'unknown';
+      const shortNowCoveredByPO = incomingQty>0 && (physicalRisk==='critical'||physicalRisk==='low') && physicalRisk!==risk;
+
+      // ── Combined risk score (0-100) — a prioritization aid, not a forecast ──
+      // Weights: coverage 40% · demand volatility 20% · XYZ 15% · lead time 15% · supplier concentration 10%.
       const coverageRiskScore = { critical:100, low:60, ok:12, unknown:45 }[risk];
-      const volatilityRiskScore = Math.min(100, Math.abs(trend||0)); // big swings (either direction) make the forecast less trustworthy
+      const volatilityRiskScore = Math.min(100, Math.abs(trend||0));
       const xyzRiskScore = { X:10, Y:50, Z:100 }[xyz] ?? 50;
-      const leadTimeRiskScore = Math.min(100, (effectiveLeadTime/60)*100); // 60+ days lead time treated as max risk
+      // Lead time is in MONTHS. The old formula divided by 60 as if it were
+      // days, so a 3-month supplier scored 5/100. 3+ months = max risk.
+      const leadTimeRiskScore = Math.min(100, (effectiveLeadTime/3)*100);
       const supplierRiskScore = (supplier && supplierConcentration.totalAssigned>0)
-        ? Math.min(100, (supplierConcentration.counts[supplier]||0) / supplierConcentration.totalAssigned * 100 * 3) // ×3: even a supplier holding ~33% of the catalog should read as high concentration risk, not a middling score
+        ? Math.min(100, (supplierConcentration.counts[supplier]||0) / supplierConcentration.totalAssigned * 100 * 3)
         : 0;
       const riskScore = Math.round(
         coverageRiskScore*0.40 + volatilityRiskScore*0.20 + xyzRiskScore*0.15 + leadTimeRiskScore*0.15 + supplierRiskScore*0.10
       );
 
-      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, coverageMonths, coverageDays, incomingQty, effectiveStock, effectiveCoverDays, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, risk, riskScore };
+      return { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, serviceLevel, projectedDemand, seasonalApplied, suggestedOrderFlat, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, priceChangePct, prevPrice, priceChangedAt, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, nextMonIdx, coverageMonths, coverageDays, incomingQty, overdue, effectiveStock, effectiveCoverDays, effectiveCoverMonths, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, risk, physicalRisk, shortNowCoveredByPO, riskScore };
     });
-  }, [salesData, stockMap, costMap, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates]);
+  }, [salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates]);
 
   const filtered = useMemo(() => {
     let data = products;
@@ -2431,7 +2565,29 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     const latestDate = new Date(Math.max(...allDates.map(d=>d.getTime())));
     const threshold = new Date(latestDate.getTime() - deadStockDays * 24*60*60*1000);
 
-    return products
+    // Items that are in stock but have NO sales at all in the data. `products`
+    // is built from sales only, so these never existed anywhere in the page —
+    // yet they're usually the most expensive dead stock. Pull them straight
+    // from the inventory maps.
+    const known = new Set();
+    products.forEach(p => { known.add(p.key); if (p.sku) known.add(p.sku); if (p.name) known.add(p.name); });
+    const neverSold = Object.entries(stockMap)
+      .filter(([k,q]) => q > 0 && !known.has(k) && !known.has(nameMap[k]))
+      .map(([k,q]) => {
+        const currency = currencyMap[k] ?? null;
+        const isForeign = currency && currency !== 'ILS';
+        const rate = !isForeign ? 1 : (exchangeRates?.[currency]>0 ? exchangeRates[currency] : null);
+        const unitCostOriginal = costMap[k] ?? null;
+        const unitCost = (unitCostOriginal!=null && rate!=null) ? unitCostOriginal*rate : null;
+        return {
+          key:k, sku:k, name:nameMap[k]||k, abc:'C', xyz:'', abcXyz:'C', currentStock:q, unitCost, unitCostOriginal,
+          costCurrencyBlocked: unitCostOriginal!=null && rate==null ? currency : null,
+          supplier: supplierMap[k] ?? null, lastSaleDate:null, daysSince:null, neverSold:true,
+          stockValue: q * (unitCost ?? 0),
+        };
+      });
+
+    return [...products
       .filter(p => {
         // Find last sale date for this product
         const saleDates = Object.entries(p.monthlyData)
@@ -2455,43 +2611,51 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
           : null;
         const stockValue = (p.currentStock??0) * (p.unitCost??0);
         return { ...p, lastSaleDate, daysSince, stockValue };
-      })
+      }), ...neverSold]
       .sort((a,b) => (b.stockValue||0)-(a.stockValue||0));
-  }, [products, salesData, deadStockDays]);
+  }, [products, salesData, deadStockDays, stockMap, nameMap, costMap, currencyMap, supplierMap, exchangeRates]);
 
   const deadStockValue = useMemo(() =>
     deadStockData.reduce((a,p)=>a+(p.stockValue||0),0), [deadStockData]);
 
   // ── Procurement schedule: when to order each product ──────────
+  // Uses each product's OWN lead time (per-supplier override) and counts
+  // stock already on the way — the old version used the global slider and
+  // on-hand stock only, so a 3-month supplier got a far-too-late date.
   const scheduleData = useMemo(() => {
     const today = new Date();
-    const leadDays = leadTime * 30;
     return products
       .filter(p => p.currentStock !== null && p.avgMonthly > 0 && p.suggestedOrder > 0)
       .map(p => {
-        const daysUntilOrder = (p.coverageDays||0) - leadDays;
+        const leadDays = p.effectiveLeadTime * 30;
+        const daysUntilOrder = (p.effectiveCoverDays||0) - leadDays;
         const orderByDate = new Date(today.getTime() + daysUntilOrder*24*60*60*1000);
         const urgency = daysUntilOrder <= 0 ? 'critical' : daysUntilOrder <= 7 ? 'urgent' : daysUntilOrder <= 14 ? 'soon' : daysUntilOrder <= 30 ? 'planned' : 'later';
         return { ...p, daysUntilOrder: Math.round(daysUntilOrder), orderByDate, urgency };
       })
       .sort((a,b) => a.daysUntilOrder - b.daysUntilOrder);
-  }, [products, leadTime]);
+  }, [products]);
 
   // ── What-If: recalculate with demand multiplier ─────────────
+  // Same calculation as the main table (calcOrderPlan) with the demand
+  // multiplied — so it respects per-supplier lead time, open orders, MOQ,
+  // seasonality and minimum stock, and the "change" column is a true delta.
+  // (It also used to depend on a flag that was never switched on, so the
+  // scenario table was always empty.)
   const whatIfProducts = useMemo(() => {
-    if (!whatIfActive) return [];
+    if (!whatIfActive && viewMode!=='whatif') return [];
     return products.map(p => {
       const adjAvg = p.avgMonthly * whatIfMultiplier;
-      const adjSS  = Math.ceil(1.65 * (p.stdDev||0) * Math.sqrt(Math.max(leadTime,0.5)) * Math.sqrt(whatIfMultiplier));
-      const adjOrder = Math.max(0, Math.ceil((monthsToStock+leadTime)*adjAvg + adjSS - (p.currentStock??0)));
-      const adjCovDays = (p.currentStock!==null && adjAvg>0) ? Math.round(p.currentStock/(adjAvg/30)) : null;
+      const plan = calcOrderPlan({ avgMonthly:p.avgMonthly, stdDev:p.stdDev, abc:p.abc, leadTime:p.effectiveLeadTime, monthsToStock, seasonalityIdx:p.seasonalityIdx, seasonalityReliable:p.seasonalityReliable, nextMonIdx:p.nextMonIdx, effectiveStock:p.effectiveStock, minStock:p.minStock, moq:p.moq, multiplier:whatIfMultiplier });
+      const adjOrder = plan.suggestedOrder;
+      const adjCovDays = (p.currentStock!==null && adjAvg>0) ? Math.round(p.effectiveStock/(adjAvg/30)) : null;
       return { ...p, adjAvg, adjOrder, adjCovDays, orderDelta: adjOrder - p.suggestedOrder };
     }).filter(p => p.adjOrder > 0 || p.suggestedOrder > 0);
-  }, [products, whatIfMultiplier, whatIfActive, monthsToStock, leadTime]);
+  }, [products, whatIfMultiplier, whatIfActive, viewMode, monthsToStock]);
 
   const reqSort = (key) => setSortConfig(p=>({key, direction:p.key===key&&p.direction==='desc'?'asc':'desc'}));
   const abcCounts = useMemo(()=>({ A:products.filter(p=>p.abc==='A').length, B:products.filter(p=>p.abc==='B').length, C:products.filter(p=>p.abc==='C').length }), [products]);
-  const riskCounts = useMemo(()=>({ critical:products.filter(p=>p.risk==='critical').length, low:products.filter(p=>p.risk==='low').length }), [products]);
+  const riskCounts = useMemo(()=>({ critical:products.filter(p=>p.risk==='critical').length, low:products.filter(p=>p.risk==='low').length, ok:products.filter(p=>p.risk==='ok').length, unknown:products.filter(p=>p.risk==='unknown').length, coveredByPO:products.filter(p=>p.shortNowCoveredByPO).length }), [products]);
   const totalOrderUnits = useMemo(()=>filtered.reduce((a,p)=>a+p.suggestedOrder,0),[filtered]);
   const totalOrderCost  = useMemo(()=>filtered.reduce((a,p)=>a+(p.orderCost||0),0),[filtered]);
   const blockedCurrencies = useMemo(() => [...new Set(products.filter(p=>p.costCurrencyBlocked).map(p=>p.costCurrencyBlocked))], [products]);
@@ -2502,7 +2666,7 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
     const groups = {};
     filtered.forEach(p => {
       const sup = p.supplier || 'ספק לא ידוע';
-      if (!groups[sup]) groups[sup] = { name: sup, items: [], totalUnits: 0, totalCost: 0, costByCurrency: {}, criticalCount: 0 };
+      if (!groups[sup]) groups[sup] = { name: sup, items: [], totalUnits: 0, totalCost: 0, costByCurrency: {}, criticalCount: 0, stockValue: 0, monthlyCogs: 0, missingCost: 0 };
       groups[sup].items.push(p);
       groups[sup].totalUnits += p.suggestedOrder;
       groups[sup].totalCost  += p.orderCost || 0; // ₪-converted — used for the blended headline total & supplier sort
@@ -2511,10 +2675,101 @@ const ProcurementPage = ({ salesData, isDarkMode, apiKey, costMap, setCostMap, c
         groups[sup].costByCurrency[cur] = (groups[sup].costByCurrency[cur]||0) + p.orderCostOriginal; // native currency — kept pure, never blended
       }
       if (p.risk === 'critical') groups[sup].criticalCount++;
+      // Inventory tied up with this supplier (₪) and its monthly consumption at cost
+      if (p.unitCost!=null) {
+        groups[sup].stockValue  += Math.max(0, p.currentStock??0) * p.unitCost;
+        groups[sup].monthlyCogs += (p.avgMonthly||0) * p.unitCost;
+      } else if ((p.currentStock??0) > 0) groups[sup].missingCost++;
+    });
+    Object.values(groups).forEach(g => {
+      // Days of inventory = how many days the stock lasts at the current sales pace;
+      // turns/year = how many times a year the stock is sold through.
+      g.daysOfInventory = g.monthlyCogs>0 ? Math.round(g.stockValue/(g.monthlyCogs/30)) : (g.stockValue>0 ? Infinity : null);
+      g.turnsPerYear = g.stockValue>0 ? (g.monthlyCogs*12)/g.stockValue : null;
     });
     return Object.values(groups)
       .sort((a, b) => b.totalCost - a.totalCost || b.totalUnits - a.totalUnits);
   }, [filtered]);
+  const inventoryTotals = useMemo(() => {
+    const stockValue = supplierGroups.reduce((a,g)=>a+g.stockValue,0);
+    const monthlyCogs = supplierGroups.reduce((a,g)=>a+g.monthlyCogs,0);
+    return { stockValue, monthlyCogs, daysOfInventory: monthlyCogs>0 ? Math.round(stockValue/(monthlyCogs/30)) : null, turnsPerYear: stockValue>0 ? monthlyCogs*12/stockValue : null };
+  }, [supplierGroups]);
+
+  // ── Supplier spend trend — from the "ספקים" expense file ──
+  // Monthly spend per supplier: last 3 full months vs the 3 before, plus 12-month total.
+  const supplierSpend = useMemo(() => {
+    if (!suppliersData.length) return [];
+    let months = [...new Set(suppliersData.map(d=>d.date).filter(Boolean))].sort((a,b)=>getDateVal(a)-getDateVal(b));
+    if (excludeCurrentMonth && months.length > 1) months = months.slice(0,-1);
+    const last3 = new Set(months.slice(-3)), prev3 = new Set(months.slice(-6,-3)), last12 = new Set(months.slice(-12));
+    const by = {};
+    suppliersData.forEach(r => {
+      const name = (r.supplier && r.supplier!=='כללי') ? r.supplier : (r.description || r.supplier || 'לא ידוע');
+      if (!by[name]) by[name] = { name, last3:0, prev3:0, last12:0, series:{} };
+      const v = r.total || 0;
+      if (last3.has(r.date)) by[name].last3 += v;
+      if (prev3.has(r.date)) by[name].prev3 += v;
+      if (last12.has(r.date)) { by[name].last12 += v; by[name].series[r.date] = (by[name].series[r.date]||0) + v; }
+    });
+    return Object.values(by)
+      .map(x => ({ ...x, changePct: x.prev3>0 ? (x.last3-x.prev3)/x.prev3*100 : null, sparkline: months.slice(-12).map(m=>({m, v:x.series[m]||0})) }))
+      .filter(x => x.last12 > 0)
+      .sort((a,b) => b.last12 - a.last12);
+  }, [suppliersData, excludeCurrentMonth]);
+
+  // ── Purchase price changes (catalog price history) and PO price deviations ──
+  // monthlyImpactILS = extra (or saved) ₪ per month at the current sales pace.
+  const priceChanges = useMemo(() => products
+    .filter(p => p.priceChangePct!=null && Math.abs(p.priceChangePct) >= 0.5)
+    .map(p => {
+      const fx = (p.unitCost!=null && p.unitCostOriginal>0) ? p.unitCost/p.unitCostOriginal : null;
+      const monthlyImpactILS = (fx!=null && p.prevPrice!=null) ? (p.avgMonthly||0) * (p.unitCostOriginal - p.prevPrice) * fx : null;
+      return { ...p, monthlyImpactILS };
+    })
+    .sort((a,b) => Math.abs(b.monthlyImpactILS??0) - Math.abs(a.monthlyImpactILS??0) || Math.abs(b.priceChangePct) - Math.abs(a.priceChangePct)), [products]);
+  const poPriceDeviations = useMemo(() => ordersEnriched
+    .filter(o => o.poPriceDiffPct!=null && Math.abs(o.poPriceDiffPct) >= 3)
+    .sort((a,b) => Math.abs(b.poPriceDiffPct) - Math.abs(a.poPriceDiffPct)), [ordersEnriched]);
+
+  // ── Supplier order draft (supplier-facing — no internal ABC/coverage data) ──
+  const exportSupplierDraft = (grp) => {
+    const items = grp.items.filter(p=>p.suggestedOrder>0);
+    if (!items.length) return;
+    const dateStr = new Date().toLocaleDateString('he-IL');
+    let body = `<h2 style="font-family:Calibri;font-size:16px">הזמנת רכש — ${escHtml(grp.name)}</h2><p style="font-family:Calibri;font-size:12px">תאריך: ${dateStr}</p>`;
+    body += `<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Calibri;font-size:12px;direction:rtl"><thead><tr style="background:#1e293b;color:#fff"><th>#</th><th>מק"ט</th><th>תאור</th><th>כמות</th><th>מחיר יחידה</th><th>סה"כ</th><th>מטבע</th></tr></thead><tbody>`;
+    const totals = {};
+    items.forEach((p,i) => {
+      const cur = p.currency || 'ILS';
+      const line = p.unitCostOriginal ? p.suggestedOrder*p.unitCostOriginal : null;
+      if (line!=null) totals[cur] = (totals[cur]||0) + line;
+      body += `<tr><td style="text-align:center">${i+1}</td><td>${escHtml(p.sku||p.name)}</td><td>${escHtml(p.name)}</td><td style="text-align:center;font-weight:bold">${p.suggestedOrder}</td><td style="text-align:center">${p.unitCostOriginal!=null?p.unitCostOriginal.toFixed(2):''}</td><td style="text-align:center">${line!=null?line.toFixed(2):''}</td><td style="text-align:center">${cur}</td></tr>`;
+    });
+    Object.entries(totals).forEach(([cur,amt]) => {
+      body += `<tr style="font-weight:bold;background:#f1f5f9"><td colspan="5" style="text-align:left">סה"כ (${cur})</td><td style="text-align:center">${amt.toFixed(2)}</td><td style="text-align:center">${cur}</td></tr>`;
+    });
+    body += `</tbody></table>`;
+    const safeName = grp.name.replace(/[\\/:*?"<>|]/g,'_');
+    downloadXls('הזמנה', body, `הזמנה_${safeName}_${dateStr.replace(/[./]/g,'-')}.xls`);
+  };
+  // After sending a draft: record its lines as open orders, so the next
+  // calculation already counts them as "on the way" and nothing is ordered twice.
+  const registerSupplierDraftAsOrders = (grp) => {
+    const items = grp.items.filter(p=>p.suggestedOrder>0);
+    if (!items.length) return;
+    if (!window.confirm(`לרשום ${items.length} שורות מ"${grp.name}" כהזמנות פתוחות? הן ייכנסו לחישוב כ"בדרך".`)) return;
+    const todayIso = new Date().toISOString().slice(0,10);
+    const lt = grp.items[0]?.effectiveLeadTime ?? leadTime;
+    const exp = new Date(); exp.setDate(exp.getDate() + Math.round(lt*30));
+    const added = items.map((p,i) => ({
+      id: Date.now().toString(36)+i+Math.random().toString(36).slice(2,6),
+      productKey: p.key, productName: p.name, supplier: grp.name==='ספק לא ידוע' ? '' : grp.name,
+      orderedQty: p.suggestedOrder, orderDate: todayIso, expectedDate: exp.toISOString().slice(0,10),
+      status: 'ordered', poNumber: '', notes: 'נרשם מטיוטת הזמנה', value: p.orderCostOriginal||0,
+    }));
+    saveOrders([...openOrders, ...added]);
+  };
 
   // ─── Manager PDF report ──────────────────────────────────────
   // jsPDF's built-in fonts have no Hebrew glyphs, so the report is built as a
@@ -2797,7 +3052,7 @@ const SeasonalityButton = (p) => (
     <tr>
       {PROC_COL_KEYS.map(key => {
         const extraCls = key==='order' ? `font-bold ${isDarkMode?'text-blue-400 hover:text-blue-300':'text-blue-700 hover:text-blue-600'}` : '';
-        const sortKeyMap = { name:'name', supplier:'supplier', abc:'abc', riskScore:'riskScore', avg:'avgMonthly', trend:'trend', stock:null, coverage:'coverageDays', order:'suggestedOrder' };
+        const sortKeyMap = { name:'name', supplier:'supplier', abc:'abc', riskScore:'riskScore', avg:'avgMonthly', trend:'trend', stock:'currentStock', coverage:'effectiveCoverDays', order:'suggestedOrder' };
         const sortKey = sortKeyMap[key];
         return (
           <th key={key}
@@ -2931,7 +3186,15 @@ const renderProductRow = (p) => {
                         {p.lifecycle==='growing'  && <span title="צמיחה" className="text-xs">🚀</span>}
                         {p.lifecycle==='declining' && <span title="דעיכה" className="text-xs">⚠️</span>}
                         {p.lifecycle==='dying'     && <span title="גוסס" className="text-xs">🔴</span>}
-                        {p.incomingQty>0 && <span title={`בדרך: ${p.incomingQty} יח'`} className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-50 text-blue-700'}`}>📦 {p.incomingQty}</span>}
+                        {p.incomingQty>0 && (p.overdue
+                          ? <span title={`בדרך: ${p.incomingQty} יח' — מתוכן ${p.overdue.qty} באיחור (עד ${p.overdue.maxDays} ימים)`} className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isDarkMode?'bg-red-500/20 text-red-300':'bg-red-50 text-red-700'}`}>📦 {p.incomingQty} · ⏰ איחור</span>
+                          : <span title={`בדרך: ${p.incomingQty} יח'`} className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-50 text-blue-700'}`}>📦 {p.incomingQty}</span>)}
+                        {p.priceChangePct!=null && Math.abs(p.priceChangePct)>=0.5 && (
+                          <span title={`מחיר קניה השתנה מ-${p.prevPrice} ל-${p.unitCostOriginal} (${p.priceChangedAt})`}
+                            className={`text-[10px] font-bold px-1.5 py-0.5 rounded ${p.priceChangePct>0?(isDarkMode?'bg-red-500/15 text-red-300':'bg-red-50 text-red-600'):(isDarkMode?'bg-emerald-500/15 text-emerald-300':'bg-emerald-50 text-emerald-700')}`}>
+                            מחיר {p.priceChangePct>0?'↑':'↓'}{Math.abs(p.priceChangePct).toFixed(0)}%
+                          </span>
+                        )}
                       </div>
                       <div className="flex items-center gap-2 mt-0.5 flex-wrap">
                         {p.sku&&p.sku!==p.name&&<span className={`text-xs font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}</span>}
@@ -2994,9 +3257,10 @@ const renderProductRow = (p) => {
                           <TrendingUp className="w-3 h-3"/>תחזית: {p.forecastNext}
                           {p.seasonalityReliable && p.seasonalFactor!==1 && <span className="opacity-70">🍂</span>}
                         </div>}
-                        {p.safetyStock>0 && <div className={`text-xs flex items-center gap-1 ${isDarkMode?'text-purple-400':'text-purple-600'}`}
-                          title="מלאי בטחון מחושב (95% רמת שירות)">
-                          <Activity className="w-3 h-3"/>בטחון: {p.safetyStock}
+                        {(p.safetyStock>0 || p.minStock>0) && <div className={`text-xs flex items-center gap-1 ${isDarkMode?'text-purple-400':'text-purple-600'}`}
+                          title={`מלאי בטחון מחושב לרמת שירות ${p.serviceLevel}% (מוצר ${p.abc})${p.minStock>p.safetyStock?` · מינימום מ-Priority (${p.minStock}) גבוה יותר ולכן הוא שקובע`:''}`}>
+                          <Activity className="w-3 h-3"/>בטחון: {Math.max(p.safetyStock, p.minStock||0)}
+                          <span className="opacity-60 text-[10px]">{p.minStock>p.safetyStock?'(מינ׳)':`(${p.serviceLevel}%)`}</span>
                         </div>}
                       </div>
                     </td>
@@ -3038,11 +3302,22 @@ const renderProductRow = (p) => {
                       )}
                     </td>
                     <td className="px-4 py-3">
-                      <RiskBadge risk={p.risk} months={p.coverageMonths} days={p.coverageDays}/>
-                      {p.coverageDays!==null && (
+                      <RiskBadge risk={p.risk} months={p.effectiveCoverMonths} days={p.effectiveCoverDays}/>
+                      {p.incomingQty>0 && p.coverageDays!=null && (
+                        <div className={`text-[10px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`} title="הכיסוי למעלה כולל את מה שבדרך">
+                          במלאי בלבד: {p.coverageDays} יום
+                        </div>
+                      )}
+                      {p.shortNowCoveredByPO && (
+                        <div title="המלאי הפיזי נמוך עכשיו, אבל ההזמנות שבדרך מכסות את הצורך — אין צורך להזמין שוב, כן כדאי לוודא שההזמנה מגיעה בזמן"
+                          className={`text-[10px] font-bold mt-0.5 ${isDarkMode?'text-amber-400':'text-amber-600'}`}>
+                          ⚠ חסר עכשיו · מכוסה בהזמנה
+                        </div>
+                      )}
+                      {p.effectiveCoverDays!==null && (
                         <div className={`mt-1.5 h-1.5 rounded-full overflow-hidden w-16 ${isDarkMode?'bg-slate-700':'bg-slate-200'}`}>
                           <div className="h-full rounded-full transition-all duration-500" style={{
-                            width: Math.min(100,(p.coverageDays/(monthsToStock*30+1)*100)).toFixed(0)+'%',
+                            width: Math.min(100,(p.effectiveCoverDays/(monthsToStock*30+1)*100)).toFixed(0)+'%',
                             background: p.risk==='critical'?'#ef4444':p.risk==='low'?'#f59e0b':'#10b981'
                           }}/>
                         </div>
@@ -3069,6 +3344,12 @@ const renderProductRow = (p) => {
                             <span title="חסר שער חליפין בהגדרות — העלות לא חושבה" className={`text-xs px-1 ${isDarkMode?'text-amber-400':'text-amber-600'}`}>⚠ {p.costCurrencyBlocked}</span>
                           ) : null}
                           {p.incomingQty>0 && <span className={`text-[10px] px-1 ${isDarkMode?'text-blue-400':'text-blue-600'}`}>📦 כבר קוזזו {p.incomingQty} יח' שבדרך</span>}
+                          {p.seasonalApplied && (
+                            <span title={`הכמות מחושבת לפי העונתיות של החודשים הקרובים. לפי ממוצע שטוח היה יוצא ${p.suggestedOrderFlat.toLocaleString()} יח'.`}
+                              className={`text-[10px] px-1 cursor-help ${isDarkMode?'text-orange-300':'text-orange-600'}`}>
+                              🍂 עונתי · שטוח: {p.suggestedOrderFlat.toLocaleString()}
+                            </span>
+                          )}
                         </div>
                       ) : (
                         <div className="flex flex-col items-start gap-1">
@@ -3281,7 +3562,10 @@ const renderProductRow = (p) => {
               </p>
             </div>
             <div className={`text-xs px-3 py-2.5 rounded-xl border ${isDarkMode?'bg-slate-700/50 border-slate-600 text-slate-300':'bg-slate-50 border-slate-200 text-slate-600'}`}>
-              <span className="font-bold">נוסחה: </span>להזמין = (חודשי מלאי + זמן אספקה) × ממוצע חודשי + מלאי בטחון − (מלאי קיים + בדרך)
+              <span className="font-bold">נוסחה: </span>להזמין = ביקוש צפוי ל(זמן אספקה + חודשי מלאי) + מלאי בטחון − (מלאי קיים + בדרך), מעוגל ל-MOQ
+              <p className={`mt-1 text-[10px] ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+                ביקוש צפוי = ממוצע חודשי × מקדם העונתיות של כל חודש קרוב (כשיש 2+ שנות נתונים) · מלאי בטחון = הגבוה מבין החישוב הסטטיסטי (98% ל-A, 95% ל-B, 90% ל-C) לבין מינימום המלאי מ-Priority · זמן אספקה לפי ספק
+              </p>
             </div>
           </div>
         </div>
@@ -3474,11 +3758,11 @@ const renderProductRow = (p) => {
       </div>
 
       {/* View toggle */}
-      <div className="flex items-center gap-3">
-        <div className={`flex rounded-xl p-1 border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
-          {[['products', ClipboardList, 'לפי מוצר'], ['suppliers', Truck, 'לפי ספק'], ['orders', ShoppingCart, 'הזמנות פתוחות'], ['schedule', Calendar, 'לוח זמנים'], ['whatif', Activity, 'תרחיש'], ['dead', Trash2, 'פריטים מתים']].map(([mode, Icon, label]) => (
+      <div className="flex items-center gap-3 flex-wrap">
+        <div className={`flex flex-wrap rounded-xl p-1 border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+          {[['products', ClipboardList, 'לפי מוצר'], ['suppliers', Truck, 'לפי ספק'], ['orders', ShoppingCart, 'הזמנות פתוחות'], ['schedule', Calendar, 'לוח זמנים'], ['prices', DollarSign, 'מחירי רכש'], ['whatif', Activity, 'תרחיש'], ['dead', Trash2, 'פריטים מתים']].map(([mode, Icon, label]) => (
             <button key={mode} onClick={() => setViewMode(mode)}
-              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium transition-all ${viewMode===mode
+              className={`flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-medium whitespace-nowrap transition-all ${viewMode===mode
                 ? (isDarkMode?'bg-slate-700 text-white shadow-sm':'bg-slate-900 text-white shadow-sm')
                 : (isDarkMode?'text-slate-400 hover:text-slate-200':'text-slate-500 hover:text-slate-700')}`}>
               <Icon className="w-4 h-4"/>{label}
@@ -3487,6 +3771,12 @@ const renderProductRow = (p) => {
               )}
               {mode==='orders' && openOrders.length>0 && (
                 <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='orders'?'bg-blue-300/30 text-blue-100':'bg-blue-100 text-blue-700'}`}>{openOrders.length}</span>
+              )}
+              {mode==='orders' && overdueOrders.length>0 && (
+                <span title={`${overdueOrders.length} הזמנות באיחור`} className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='orders'?'bg-red-400/30 text-red-100':'bg-red-100 text-red-700'}`}>⏰ {overdueOrders.length}</span>
+              )}
+              {mode==='prices' && (priceChanges.filter(p=>p.priceChangePct>0).length + poPriceDeviations.filter(o=>o.poPriceDiffPct>0).length)>0 && (
+                <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='prices'?'bg-red-400/30 text-red-100':'bg-red-100 text-red-700'}`}>↑{priceChanges.filter(p=>p.priceChangePct>0).length + poPriceDeviations.filter(o=>o.poPriceDiffPct>0).length}</span>
               )}
               {mode==='schedule' && scheduleData.filter(p=>p.urgency==='critical'||p.urgency==='urgent').length>0 && (
                 <span className={`text-xs px-1.5 py-0.5 rounded-full ${viewMode==='schedule'?'bg-red-300/30 text-red-200':'bg-red-100 text-red-700'}`}>{scheduleData.filter(p=>p.urgency==='critical'||p.urgency==='urgent').length}</span>
@@ -3554,6 +3844,75 @@ const renderProductRow = (p) => {
       {/* Supplier view */}
       {viewMode==='suppliers' && (
         <div className="space-y-3 animate-in fade-in duration-300">
+          {/* Inventory tied up per supplier + supplier reliability */}
+          {supplierGroups.length>0 && (
+            <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+              <div className={`px-5 py-3 border-b flex flex-wrap items-center justify-between gap-3 ${isDarkMode?'border-slate-700 bg-slate-900/40':'border-slate-100 bg-slate-50'}`}>
+                <div>
+                  <h4 className={`text-sm font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Wallet className="w-4 h-4 text-emerald-500"/>מלאי ומחזור לפי ספק</h4>
+                  <p className={`text-[11px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>ימי מלאי = כמה ימים המלאי יחזיק בקצב המכירות הנוכחי · מחזורים בשנה = כמה פעמים בשנה המלאי מתחלף (גבוה = טוב)</p>
+                </div>
+                <div className="flex items-center gap-4 text-xs">
+                  <span className={isDarkMode?'text-slate-400':'text-slate-500'}>סה"כ מלאי: <b className={isDarkMode?'text-white':'text-slate-800'}>{formatShort(inventoryTotals.stockValue)}</b></span>
+                  {inventoryTotals.daysOfInventory!=null && <span className={isDarkMode?'text-slate-400':'text-slate-500'}>ימי מלאי: <b className={isDarkMode?'text-white':'text-slate-800'}>{inventoryTotals.daysOfInventory}</b></span>}
+                  {inventoryTotals.turnsPerYear!=null && <span className={isDarkMode?'text-slate-400':'text-slate-500'}>מחזורים/שנה: <b className={isDarkMode?'text-white':'text-slate-800'}>{inventoryTotals.turnsPerYear.toFixed(1)}</b></span>}
+                </div>
+              </div>
+              <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                <table className={`w-full text-xs text-right min-w-[760px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                  <thead className={`sticky top-0 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
+                    <tr>
+                      <th className="px-4 py-2">ספק</th>
+                      <th className="px-4 py-2">שווי מלאי ₪</th>
+                      <th className="px-4 py-2">ימי מלאי</th>
+                      <th className="px-4 py-2">מחזורים/שנה</th>
+                      <th className="px-4 py-2" title="ממוצע ימים מהזמנה ועד קבלה, לפי הזמנות שהתקבלו">אספקה בפועל</th>
+                      <th className="px-4 py-2" title="זמן האספקה שמשמש לחישוב ההזמנות">מוגדר</th>
+                      <th className="px-4 py-2" title="אחוז משלוחים שהגיעו עד 3 ימים אחרי התאריך הצפוי">בזמן</th>
+                      <th className="px-4 py-2">באיחור כעת</th>
+                    </tr>
+                  </thead>
+                  <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                    {[...supplierGroups].sort((a,b)=>b.stockValue-a.stockValue).map(g => {
+                      const rel = supplierReliability[g.name];
+                      const configuredDays = Math.round(((leadTimeMap[g.name]!=null)?leadTimeMap[g.name]:leadTime)*30);
+                      const slower = rel?.avgLeadDays!=null && rel.avgLeadDays > configuredDays*1.2 + 3;
+                      const doiCls = g.daysOfInventory==null ? '' : g.daysOfInventory===Infinity || g.daysOfInventory>180 ? 'text-red-500 font-bold' : g.daysOfInventory>90 ? 'text-amber-500 font-bold' : (isDarkMode?'text-emerald-400':'text-emerald-600');
+                      return (
+                        <tr key={g.name} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
+                          <td className={`px-4 py-2 font-medium ${isDarkMode?'text-slate-200':'text-slate-800'}`}>{g.name}{g.missingCost>0 && <span title={`${g.missingCost} פריטים עם מלאי ללא מחיר קניה — לא נכללו בשווי`} className="text-amber-500 mr-1">⚠</span>}</td>
+                          <td className="px-4 py-2 tabular-nums">{g.stockValue>0?formatShort(g.stockValue):'—'}</td>
+                          <td className={`px-4 py-2 tabular-nums ${doiCls}`}>{g.daysOfInventory==null?'—':g.daysOfInventory===Infinity?'אין מכירות':g.daysOfInventory}</td>
+                          <td className="px-4 py-2 tabular-nums">{g.turnsPerYear!=null?g.turnsPerYear.toFixed(1):'—'}</td>
+                          <td className={`px-4 py-2 tabular-nums ${slower?'text-red-500 font-bold':''}`}>
+                            {rel?.avgLeadDays!=null ? `${rel.avgLeadDays} יום` : '—'}
+                            {rel?.estimatedN>0 && <span title="חלק מהקבלות הוסקו מכך שההזמנה נעלמה מקובץ Priority — תאריך הקבלה משוער" className="opacity-60"> ~</span>}
+                          </td>
+                          <td className="px-4 py-2 tabular-nums">
+                            {configuredDays} יום
+                            {slower && (
+                              <button onClick={()=>saveLeadTime(g.name, Math.max(0.5, Math.round(rel.avgLeadDays/30*2)/2))}
+                                title="עדכן את זמן האספקה של הספק לפי מה שקורה בפועל"
+                                className={`mr-2 text-[10px] px-1.5 py-0.5 rounded border ${isDarkMode?'border-purple-500/40 text-purple-300 hover:bg-purple-500/20':'border-purple-200 text-purple-600 hover:bg-purple-50'}`}>
+                                עדכן ל-{Math.max(0.5, Math.round(rel.avgLeadDays/30*2)/2)} ח'
+                              </button>
+                            )}
+                          </td>
+                          <td className={`px-4 py-2 tabular-nums ${rel?.onTimePct!=null && rel.onTimePct<70?'text-red-500 font-bold':''}`}>{rel?.onTimePct!=null?`${rel.onTimePct}% (${rel.onTimeBase})`:'—'}</td>
+                          <td className={`px-4 py-2 tabular-nums ${rel?.openOverdue>0?'text-red-500 font-bold':''}`}>{rel?.openOverdue>0?`⏰ ${rel.openOverdue}`:'—'}</td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              {Object.keys(supplierReliability).every(k => !supplierReliability[k].deliveries) && (
+                <p className={`px-5 py-2 text-[11px] border-t ${isDarkMode?'border-slate-700 text-slate-500':'border-slate-100 text-slate-400'}`}>
+                  נתוני "אספקה בפועל" ו"בזמן" יתמלאו מעצמם: כשמסמנים הזמנה כהתקבלה (✓), או כשמייבאים קובץ הזמנות פתוחות חדש מ-Priority והזמנה ישנה כבר לא מופיעה בו.
+                </p>
+              )}
+            </div>
+          )}
           {supplierGroups.length === 0 ? (
             <div className={`flex flex-col items-center justify-center py-16 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
               <Truck className={`w-10 h-10 mb-3 ${isDarkMode?'text-slate-600':'text-slate-300'}`}/>
@@ -3648,6 +4007,21 @@ const renderProductRow = (p) => {
                         </tbody>
                       </table>
                     </div>
+                    {/* Supplier order draft — supplier-facing file + register as open orders */}
+                    {grp.items.some(p=>p.suggestedOrder>0) && (
+                      <div className={`flex flex-wrap items-center gap-2 px-5 py-3 border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+                        <button onClick={()=>exportSupplierDraft(grp)}
+                          title="קובץ נקי לשליחה לספק: מק״ט, תאור, כמות מעוגלת ל-MOQ, מחיר במטבע של הספק — בלי נתונים פנימיים"
+                          className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${isDarkMode?'bg-emerald-900/20 border-emerald-800 text-emerald-400 hover:bg-emerald-900/40':'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'}`}>
+                          <Download className="w-3.5 h-3.5"/> טיוטת הזמנה לספק
+                        </button>
+                        <button onClick={()=>registerSupplierDraftAsOrders(grp)}
+                          title="אחרי ששלחת את ההזמנה: רשום את השורות כהזמנות פתוחות, כדי שהמערכת תחשב אותן כ'בדרך' ולא תמליץ להזמין שוב"
+                          className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${isDarkMode?'bg-blue-900/20 border-blue-800 text-blue-300 hover:bg-blue-900/40':'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'}`}>
+                          <ShoppingCart className="w-3.5 h-3.5"/> רשום כהזמנות פתוחות
+                        </button>
+                      </div>
+                    )}
                     {/* Supplier total footer */}
                     <div className={`flex justify-between items-center px-5 py-3 flex-wrap gap-2 ${isDarkMode?'bg-slate-700/30':'bg-slate-50'}`}>
                       <span className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>סה"כ הזמנה מ{grp.name}</span>
@@ -3808,6 +4182,13 @@ const renderProductRow = (p) => {
               {/* Summary bar */}
               <div className={`px-5 py-3 border-b flex flex-wrap items-center gap-4 ${isDarkMode?'border-slate-700 bg-slate-900/40':'border-slate-100 bg-slate-50'}`}>
                 <span className={`text-xs font-medium ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{openOrders.length} הזמנות פתוחות</span>
+                {overdueOrders.length>0 && (
+                  <button onClick={()=>setShowOverdueOnly(v=>!v)}
+                    title="הזמנות שתאריך האספקה הצפוי שלהן כבר עבר — לחץ להציג רק אותן"
+                    className={`flex items-center gap-1 text-xs font-bold px-2 py-1 rounded-lg border transition-colors ${showOverdueOnly?'bg-red-600 text-white border-red-600':(isDarkMode?'bg-red-500/15 text-red-300 border-red-500/30':'bg-red-50 text-red-700 border-red-200')}`}>
+                    ⏰ {overdueOrders.length} באיחור{showOverdueOnly?' · מציג רק אותן':''}
+                  </button>
+                )}
                 {[['ordered','הוזמן','#3b82f6'],['in_transit','בדרך','#10b981'],['delayed','מאחר','#ef4444']].map(([s,l,color])=>{
                   const n = openOrders.filter(o=>o.status===s).length;
                   return n>0 ? <span key={s} className="flex items-center gap-1 text-xs font-medium" style={{color}}><span className="w-2 h-2 rounded-full" style={{background:color}}/>{l}: {n}</span> : null;
@@ -3908,7 +4289,7 @@ const renderProductRow = (p) => {
                         delayed:    isDarkMode?'bg-red-500/20 text-red-300 border-red-500/30':'bg-red-50 text-red-700 border-red-200',
                       }[order.status] || '';
                       const statusLabel = {ordered:'הוזמן',in_transit:'בדרך',delayed:'מאחר'}[order.status]||order.status;
-                      const isOverdue = order.expectedDate && new Date(order.expectedDate) < new Date();
+                      const isOverdue = order.isOverdue;
                       return (
                         <tr key={order.id} className={`transition-all ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'} ${isOverdue?(isDarkMode?'bg-red-900/10':'bg-red-50/40'):''}`}>
                           <td className="px-4 py-3.5">
@@ -3924,6 +4305,12 @@ const renderProductRow = (p) => {
                           </td>
                           <td className={`px-4 py-3.5 text-xs tabular-nums ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
                             {order.unitPriceOriginal!=null ? formatUnitCost(order.unitPriceOriginal, order.currency) : '—'}
+                            {order.poPriceDiffPct!=null && Math.abs(order.poPriceDiffPct)>=3 && (
+                              <div title={`מחיר בכרטיס הפריט: ${formatUnitCost(order.catalogCost, order.currency)}`}
+                                className={`text-[10px] font-bold ${order.poPriceDiffPct>0?'text-red-500':'text-emerald-500'}`}>
+                                {order.poPriceDiffPct>0?'↑':'↓'}{Math.abs(order.poPriceDiffPct).toFixed(0)}% מהקטלוג
+                              </div>
+                            )}
                           </td>
                           <td className={`px-4 py-3.5 text-sm tabular-nums ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>
                             {order.valueILS!=null ? (
@@ -3936,7 +4323,8 @@ const renderProductRow = (p) => {
                           </td>
                           <td className={`px-4 py-3.5 text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{order.orderDate||'—'}</td>
                           <td className={`px-4 py-3.5 text-xs ${isOverdue?'text-red-500 font-bold':(isDarkMode?'text-slate-400':'text-slate-500')}`}>
-                            {order.expectedDate||'—'}{isOverdue?' ⚠️':''}
+                            {order.expectedDate||'—'}
+                            {isOverdue && <div className="text-[10px]">⏰ באיחור {order.daysLate} ימים</div>}
                           </td>
                           <td className="px-4 py-3.5">
                             <select value={order.status} onChange={e=>updateOrder(order.id,'status',e.target.value)}
@@ -3986,7 +4374,7 @@ const renderProductRow = (p) => {
               <div className={`p-2.5 rounded-xl ${isDarkMode?'bg-blue-500/15':'bg-blue-50'}`}><Calendar className="w-5 h-5 text-blue-500"/></div>
               <div>
                 <p className={`font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>לוח זמנים לרכש</p>
-                <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>מתי להזמין כל מוצר — לפי כיסוי מלאי + זמן אספקה ({leadTime} חודש)</p>
+                <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>מתי להזמין כל מוצר — לפי כיסוי (מלאי + בדרך) פחות זמן האספקה של הספק שלו</p>
               </div>
             </div>
           </div>
@@ -4018,7 +4406,8 @@ const renderProductRow = (p) => {
                             </div>
                             <div className="flex items-center gap-4 mt-1 text-xs flex-wrap">
                               <span className={isDarkMode?'text-slate-400':'text-slate-500'}>מלאי: <strong>{p.currentStock?.toLocaleString()}</strong> יח'</span>
-                              <span className={isDarkMode?'text-slate-400':'text-slate-500'}>כיסוי: <strong>{p.coverageDays}</strong> יום</span>
+                              <span className={isDarkMode?'text-slate-400':'text-slate-500'}>כיסוי: <strong>{p.effectiveCoverDays}</strong> יום{p.incomingQty>0?' (כולל בדרך)':''}</span>
+                              <span className={isDarkMode?'text-slate-400':'text-slate-500'}>זמן אספקה: <strong>{p.effectiveLeadTime}</strong> ח'{p.leadTimeOverridden?' (לפי ספק)':''}</span>
                               <span className={isDarkMode?'text-slate-400':'text-slate-500'}>ממוצע: <strong>{p.avgMonthly.toFixed(0)}</strong>/חודש</span>
                             </div>
                           </div>
@@ -4159,6 +4548,117 @@ const renderProductRow = (p) => {
         </div>
       )}
 
+      {/* ══ PURCHASE PRICES VIEW ══ */}
+      {viewMode==='prices' && (
+        <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+          <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+            <div className="flex items-center gap-3">
+              <div className={`p-2.5 rounded-xl ${isDarkMode?'bg-emerald-500/15':'bg-emerald-50'}`}><DollarSign className="w-5 h-5 text-emerald-500"/></div>
+              <div>
+                <p className={`font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>מחירי רכש והוצאות לספקים</p>
+                <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>שינויי מחיר קניה, הזמנות שמחירן חורג מהקטלוג, ומגמת ההוצאה לכל ספק</p>
+              </div>
+            </div>
+          </div>
+
+          {/* 1) Catalog price changes */}
+          <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+            <div className={`px-5 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+              <h3 className={`font-bold text-sm ${isDarkMode?'text-white':'text-slate-800'}`}>שינויי מחיר קניה ({priceChanges.length})</h3>
+              <p className={`text-[11px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>משווה את "מחיר קניה אחרון" בכל ייבוא של כרטיס פריט לייבוא הקודם. השפעה חודשית = שינוי המחיר × כמות ממוצעת לחודש.</p>
+            </div>
+            {priceChanges.length===0 ? (
+              <p className={`px-5 py-8 text-center text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+                עדיין אין שינויי מחיר. ההיסטוריה נבנית מעכשיו: בכל פעם שתייבא כרטיס פריט עם מחירים חדשים, השינוי יופיע כאן.
+              </p>
+            ) : (
+              <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                <table className={`w-full text-sm text-right min-w-[700px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                  <thead className={`text-[11px] font-semibold sticky top-0 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
+                    <tr><th className="px-4 py-2.5">מוצר</th><th className="px-4 py-2.5">ספק</th><th className="px-4 py-2.5">מחיר קודם</th><th className="px-4 py-2.5">מחיר נוכחי</th><th className="px-4 py-2.5">שינוי</th><th className="px-4 py-2.5">השפעה חודשית ₪</th><th className="px-4 py-2.5">תאריך</th></tr>
+                  </thead>
+                  <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                    {priceChanges.map(p => (
+                      <tr key={p.key} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
+                        <td className="px-4 py-2.5"><p className={`font-medium text-sm truncate max-w-[220px] ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{p.name}</p>{p.sku&&p.sku!==p.name&&<p className={`text-[10px] font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}</p>}</td>
+                        <td className="px-4 py-2.5 text-xs">{p.supplier||'—'}</td>
+                        <td className="px-4 py-2.5 text-xs tabular-nums">{formatUnitCost(p.prevPrice, p.currency)}</td>
+                        <td className="px-4 py-2.5 text-xs tabular-nums font-bold">{formatUnitCost(p.unitCostOriginal, p.currency)}</td>
+                        <td className={`px-4 py-2.5 text-xs font-bold tabular-nums ${p.priceChangePct>0?'text-red-500':'text-emerald-500'}`}>{p.priceChangePct>0?'+':''}{p.priceChangePct.toFixed(1)}%</td>
+                        <td className={`px-4 py-2.5 text-xs tabular-nums ${p.monthlyImpactILS>0?'text-red-500':p.monthlyImpactILS<0?'text-emerald-500':''}`}>{p.monthlyImpactILS!=null && Math.round(p.monthlyImpactILS)!==0 ? `${p.monthlyImpactILS>0?'+':''}${formatCurrency(p.monthlyImpactILS)}` : '—'}</td>
+                        <td className="px-4 py-2.5 text-xs">{p.priceChangedAt ? new Date(p.priceChangedAt).toLocaleDateString('he-IL') : '—'}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* 2) Open POs priced away from the catalog */}
+          <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+            <div className={`px-5 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+              <h3 className={`font-bold text-sm ${isDarkMode?'text-white':'text-slate-800'}`}>הזמנות פתוחות במחיר שונה מהקטלוג ({poPriceDeviations.length})</h3>
+              <p className={`text-[11px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>מחיר יחידה בהזמנה (שווי יתרה ÷ כמות) לעומת "מחיר קניה אחרון" בכרטיס הפריט · מוצגות סטיות של 3% ומעלה</p>
+            </div>
+            {poPriceDeviations.length===0 ? (
+              <p className={`px-5 py-8 text-center text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין הזמנות פתוחות עם סטיית מחיר (או שחסר מחיר בהזמנות / בכרטיס הפריט)</p>
+            ) : (
+              <div className="overflow-x-auto max-h-80 overflow-y-auto">
+                <table className={`w-full text-sm text-right min-w-[640px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                  <thead className={`text-[11px] font-semibold sticky top-0 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
+                    <tr><th className="px-4 py-2.5">מוצר</th><th className="px-4 py-2.5">ספק</th><th className="px-4 py-2.5">PO</th><th className="px-4 py-2.5">מחיר בהזמנה</th><th className="px-4 py-2.5">מחיר בקטלוג</th><th className="px-4 py-2.5">סטייה</th></tr>
+                  </thead>
+                  <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                    {poPriceDeviations.map(o => (
+                      <tr key={o.id} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
+                        <td className={`px-4 py-2.5 text-sm font-medium truncate max-w-[220px] ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{o.productName}</td>
+                        <td className="px-4 py-2.5 text-xs">{o.supplier||'—'}</td>
+                        <td className="px-4 py-2.5 text-xs font-mono">{o.poNumber||'—'}</td>
+                        <td className="px-4 py-2.5 text-xs tabular-nums font-bold">{formatUnitCost(o.unitPriceOriginal, o.currency)}</td>
+                        <td className="px-4 py-2.5 text-xs tabular-nums">{formatUnitCost(o.catalogCost, o.currency)}</td>
+                        <td className={`px-4 py-2.5 text-xs font-bold tabular-nums ${o.poPriceDiffPct>0?'text-red-500':'text-emerald-500'}`}>{o.poPriceDiffPct>0?'+':''}{o.poPriceDiffPct.toFixed(1)}%</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+
+          {/* 3) Supplier spend trend */}
+          <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+            <div className={`px-5 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+              <h3 className={`font-bold text-sm ${isDarkMode?'text-white':'text-slate-800'}`}>מגמת הוצאה לספקים</h3>
+              <p className={`text-[11px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>מקובץ ההוצאות בלשונית "ספקים" · 3 החודשים האחרונים לעומת 3 שלפניהם</p>
+            </div>
+            {supplierSpend.length===0 ? (
+              <p className={`px-5 py-8 text-center text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>לא נטען קובץ הוצאות לספקים — טען אותו בלשונית "ספקים" כדי לראות את מגמת ההוצאה</p>
+            ) : (
+              <div className="overflow-x-auto max-h-96 overflow-y-auto">
+                <table className={`w-full text-sm text-right min-w-[640px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                  <thead className={`text-[11px] font-semibold sticky top-0 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
+                    <tr><th className="px-4 py-2.5">ספק</th><th className="px-4 py-2.5">12 חודשים</th><th className="px-4 py-2.5">3 חודשים אחרונים</th><th className="px-4 py-2.5">3 חודשים קודמים</th><th className="px-4 py-2.5">שינוי</th><th className="px-4 py-2.5">מגמה</th></tr>
+                  </thead>
+                  <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                    {supplierSpend.map(x => (
+                      <tr key={x.name} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
+                        <td className={`px-4 py-2.5 text-sm font-medium ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{x.name}</td>
+                        <td className="px-4 py-2.5 text-xs tabular-nums font-bold">{formatShort(x.last12)}</td>
+                        <td className="px-4 py-2.5 text-xs tabular-nums">{formatShort(x.last3)}</td>
+                        <td className="px-4 py-2.5 text-xs tabular-nums">{formatShort(x.prev3)}</td>
+                        <td className={`px-4 py-2.5 text-xs font-bold tabular-nums ${x.changePct==null?'':x.changePct>0?'text-red-500':'text-emerald-500'}`}>{x.changePct==null?'—':`${x.changePct>0?'+':''}${x.changePct.toFixed(0)}%`}</td>
+                        <td className="px-4 py-2.5"><MiniSparkline data={x.sparkline}/></td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
+
       {/* Dead Stock View */}
       {viewMode==='dead' && (
         <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
@@ -4170,7 +4670,7 @@ const renderProductRow = (p) => {
               </div>
               <div>
                 <p className={`font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>פריטים מתים / איטיים</p>
-                <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>פריטים עם מלאי שלא נמכרו בתקופה שנבחרה</p>
+                <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>פריטים עם מלאי שלא נמכרו בתקופה שנבחרה — כולל פריטים שיש במלאי ולא נמכרו אף פעם</p>
               </div>
             </div>
             <div className="flex items-center gap-3 mr-auto flex-wrap">
@@ -4218,7 +4718,7 @@ const renderProductRow = (p) => {
                       html += `<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Calibri;font-size:11px;direction:rtl">`;
                       html += `<thead><tr style="background:#1e293b;color:#fff"><th>מוצר</th><th>מק"ט</th><th>ABC</th><th>ימים ללא מכירה</th><th>מלאי נוכחי</th><th>עלות יחידה ₪</th><th style="background:#dc2626">ערך מלאי תקוע ₪</th><th>ספק</th></tr></thead><tbody>`;
                       deadStockData.forEach(p => {
-                        html += `<tr style="background:#fff7f7"><td>${p.name}</td><td>${p.sku||''}</td><td style="text-align:center;font-weight:bold">${p.abc}</td><td style="text-align:center;color:#dc2626;font-weight:bold">${p.daysSince??'לא ידוע'}</td><td style="text-align:center">${p.currentStock??'לא ידוע'}</td><td style="text-align:center">${p.unitCost?'₪'+p.unitCost:''}</td><td style="text-align:center;font-weight:bold;color:#dc2626">${p.stockValue>0?'₪'+Math.round(p.stockValue).toLocaleString():''}</td><td>${p.supplier||''}</td></tr>`;
+                        html += `<tr style="background:#fff7f7"><td>${p.name}</td><td>${p.sku||''}</td><td style="text-align:center;font-weight:bold">${p.abc}</td><td style="text-align:center;color:#dc2626;font-weight:bold">${p.neverSold?'לא נמכר כלל':(p.daysSince??'לא ידוע')}</td><td style="text-align:center">${p.currentStock??'לא ידוע'}</td><td style="text-align:center">${p.unitCost?'₪'+p.unitCost:''}</td><td style="text-align:center;font-weight:bold;color:#dc2626">${p.stockValue>0?'₪'+Math.round(p.stockValue).toLocaleString():''}</td><td>${p.supplier||''}</td></tr>`;
                       });
                       html += `<tr style="background:#fee2e2;font-weight:bold"><td colspan="6">סה"כ ערך מלאי תקוע</td><td style="text-align:center;color:#dc2626">₪${Math.round(deadStockValue).toLocaleString()}</td><td></td></tr>`;
                       html += `</tbody></table></body></html>`;
@@ -4257,10 +4757,10 @@ const renderProductRow = (p) => {
                         <td className="px-4 py-3.5"><ABCBadge cls={p.abc} xyz={p.xyz} abcXyz={p.abcXyz}/></td>
                         <td className="px-4 py-3.5">
                           <span className={`font-bold tabular-nums px-2.5 py-1 rounded-lg text-sm
-                            ${(p.daysSince||0)>180?(isDarkMode?'bg-red-500/20 text-red-300':'bg-red-100 text-red-700')
+                            ${p.neverSold||(p.daysSince||0)>180?(isDarkMode?'bg-red-500/20 text-red-300':'bg-red-100 text-red-700')
                               :(p.daysSince||0)>90?(isDarkMode?'bg-amber-500/20 text-amber-300':'bg-amber-100 text-amber-700')
                               :(isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-100 text-slate-600')}`}>
-                            {p.daysSince??'—'} יום
+                            {p.neverSold ? 'לא נמכר כלל' : `${p.daysSince??'—'} יום`}
                           </span>
                         </td>
                         <td className="px-4 py-3.5">
@@ -4480,8 +4980,8 @@ const renderProductRow = (p) => {
           <span><span className="font-bold text-amber-500">A</span> = 80%</span>
           <span><span className="font-bold text-blue-500">B</span> = 15%</span>
           <span><span className="font-bold text-slate-400">C</span> = 5%</span>
-          <span className="flex items-center gap-1"><TriangleAlert className="w-3 h-3 text-red-500"/> קריטי: מלאי &lt; זמן אספקה</span>
-          <span className="flex items-center gap-1"><AlertTriangle className="w-3 h-3 text-amber-500"/> נמוך: מלאי &lt; יעד</span>
+          <span className="flex items-center gap-1"><TriangleAlert className="w-3 h-3 text-red-500"/> קריטי: (מלאי + בדרך) &lt; זמן אספקה</span>
+          <span className="flex items-center gap-1"><AlertTriangle className="w-3 h-3 text-amber-500"/> נמוך: (מלאי + בדרך) &lt; יעד</span>
           <span className="mr-auto italic">לחץ על מלאי לעריכה · נשמר אוטומטית</span>
         </div>
       </div>
@@ -6134,7 +6634,7 @@ const App = () => {
 
           {/* Procurement Planning */}
           {activeTab==='procurement' && (
-            <ProcurementPage salesData={salesData} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} />
+            <ProcurementPage salesData={salesData} suppliersData={suppliersData} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} />
           )}
 
           {/* Summary */}
