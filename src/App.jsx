@@ -1,5 +1,9 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
+import * as XLSXLib from 'xlsx';
+// Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
+// Without this, uploads silently fail whenever the CDN is slow or blocked.
+if (typeof window !== 'undefined' && !window.XLSX) window.XLSX = XLSXLib;
 import {
   Search, Upload, TrendingUp, Package, Calendar, DollarSign, Filter,
   ArrowDown, X, Tag, Box, ChevronDown, Activity, Layers, Sparkles, Bot,
@@ -1720,8 +1724,181 @@ const downloadXls = (sheetName, bodyHtml, fileName) => {
 };
 const escHtml = (s) => String(s??'').replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 
+// ─── PURCHASING FILES: sales lines, supplier invoice lines, forwarder report ───
+// Each Priority report / forwarder file has its own header row (the forwarder
+// file has a 5-line title block above it), so every parser first finds the row
+// that holds the expected column names instead of assuming row 1.
+const readSheetAsRows = (file) => new Promise((resolve, reject) => {
+  if (!window.XLSX) { reject(new Error('ספריית Excel עדיין נטענת — נסה שוב בעוד רגע.')); return; }
+  const r = new FileReader();
+  r.onload = (ev) => {
+    try {
+      const wb = window.XLSX.read(new Uint8Array(ev.target.result), { type:'array', cellDates:true });
+      resolve(window.XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header:1, defval:'', raw:true }));
+    } catch { reject(new Error('לא הצלחתי לקרוא את הקובץ — ודא שזה קובץ Excel תקין.')); }
+  };
+  r.onerror = () => reject(new Error('קריאת הקובץ נכשלה.'));
+  r.readAsArrayBuffer(file);
+});
+const normHeader = (h) => String(h??'').replace(/[‎‏]/g,'').replace(/\s+/g,' ').trim();
+const findHeaderRow = (rows, required) => {
+  for (let i = 0; i < Math.min(rows.length, 40); i++) {
+    const hs = rows[i].map(normHeader);
+    if (required.every(req => hs.some(h => h === req))) return i;
+  }
+  return -1;
+};
+const colIndex = (headers, ...names) => { for (const n of names) { const i = headers.indexOf(n); if (i !== -1) return i; } return -1; };
+// Any date shape Excel / Priority hands us → 'yyyy-mm-dd' (or '' when absent)
+const toIsoDate = (v) => {
+  if (v == null || v === '') return '';
+  let d = null;
+  if (v instanceof Date) d = v;
+  else if (typeof v === 'number') { if (v > 20000 && v < 80000) d = new Date(Math.round((v - 25569) * 86400 * 1000)); }
+  else {
+    const s = String(v).trim();
+    let m = s.match(/^(\d{1,2})[/.](\d{1,2})[/.](\d{2,4})/);
+    if (m) { const y = +m[3] < 100 ? 2000 + +m[3] : +m[3]; d = new Date(y, +m[2]-1, +m[1]); }
+    else if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) d = new Date(+m[1], +m[2]-1, +m[3]);
+  }
+  if (!d || isNaN(d.getTime())) return '';
+  // Dates from Excel arrive as UTC midnight; nudge by 12h so the local date never slips a day.
+  const dd = new Date(d.getTime() + 12*3600*1000);
+  return `${dd.getUTCFullYear()}-${String(dd.getUTCMonth()+1).padStart(2,'0')}-${String(dd.getUTCDate()).padStart(2,'0')}`;
+};
+const isoToDisplay = (iso) => iso ? `${iso.slice(8,10)}.${iso.slice(5,7)}.${iso.slice(2,4)}` : '';
+const isoToMonthKey = (iso) => iso ? `${HebrewMonthsMap[+iso.slice(5,7)-1]}-${iso.slice(2,4)}` : '';
+const daysBetween = (a, b) => (parseFlexDate(b) - parseFlexDate(a)) / DAY_MS;
+const num = (v) => { const n = typeof v === 'number' ? v : parseFloat(String(v??'').replace(/[^\d.-]/g,'')); return isNaN(n) ? 0 : n; };
+const normCurrency = (c) => {
+  const s = String(c||'').toLowerCase().replace(/\s+/g,'');
+  if (!s || ['ש"ח','שח','₪','ils','nis'].includes(s)) return 'ILS';
+  if (['$','usd','us$','דולר'].includes(s)) return 'USD';
+  if (['eur','€','אירו','יורו'].includes(s)) return 'EUR';
+  return String(c).trim();
+};
+// Text / summary / discount lines Priority puts inside invoices — not products.
+const isJunkSku = (sku, desc) => !sku || sku === '000' || sku === '1' || sku === 'H000' || /^-{3,}/.test(String(desc||''));
+
+// What a file is, from its headers — used to warn when a file is dropped into the wrong slot.
+const PROC_FILE_SIGNATURES = [
+  { type:'shipments',     test: hs => hs.includes('Containers List') || (hs.includes('Supplier Name') && hs.includes('Arrival Date')) },
+  { type:'salesLines',    test: hs => hs.includes('שם לקוח') && hs.includes('מק"ט') && hs.includes('כמות') && hs.includes('חשבונית') },
+  { type:'purchaseLines', test: hs => hs.includes('שם ספק') && hs.includes('מק"ט') && hs.includes('כמות') && hs.includes('חשבונית') },
+  { type:'openOrders',    test: hs => hs.some(h => h.startsWith('יתרה לאספקה')) },
+  { type:'inventory',     test: hs => hs.includes('יתרה') || hs.some(h => h.startsWith('יתרה במלאי')) },
+  { type:'masterCard',    test: hs => hs.some(h => h.startsWith('מחיר קניה')) },
+];
+const detectProcFileType = (rows) => {
+  for (let i = 0; i < Math.min(rows.length, 40); i++) {
+    const hs = rows[i].map(normHeader);
+    const hit = PROC_FILE_SIGNATURES.find(s => s.test(hs));
+    if (hit) return hit.type;
+  }
+  return null;
+};
+
+// Sales invoice lines → [{d, inv, cid, c, k, n, q, v}]  (q is net: returns are negative)
+const parseSalesLines = (rows) => {
+  const hi = findHeaderRow(rows, ['תאריך','מק"ט','כמות','שם לקוח']);
+  if (hi === -1) return null;
+  const H = rows[hi].map(normHeader);
+  const c = {
+    d: colIndex(H,'תאריך'), inv: colIndex(H,'חשבונית'), cid: colIndex(H,'מס. לקוח'), cn: colIndex(H,'שם לקוח'),
+    k: colIndex(H,'מק"ט'), n: colIndex(H,'תאור מוצר','תיאור מוצר'), q: colIndex(H,'כמות'),
+    v: colIndex(H,'סה"כ אחרי הנחה','סה"כ מחיר'), ord: colIndex(H,'הזמנה'),
+  };
+  const out = [];
+  for (let i = hi + 1; i < rows.length; i++) {
+    const r = rows[i];
+    const k = String(r[c.k]??'').trim(), n = String(r[c.n]??'').trim();
+    if (isJunkSku(k, n)) continue;
+    const q = num(r[c.q]); if (!q) continue;
+    const d = toIsoDate(r[c.d]); if (!d) continue;
+    out.push({ d, inv:String(r[c.inv]??''), cid:String(r[c.cid]??''), c:String(r[c.cn]??'').trim(), k, n, q, v: c.v!==-1 ? num(r[c.v]) : 0, o: c.ord!==-1 ? String(r[c.ord]??'') : '' });
+  }
+  out.sort((a,b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0); // newest first
+  return out;
+};
+
+// Supplier invoice lines → [{d, s, k, n, q, p, cur, tot, rate, po, pod}]
+const parsePurchaseLines = (rows) => {
+  const hi = findHeaderRow(rows, ['תאריך','שם ספק','מק"ט','כמות']);
+  if (hi === -1) return null;
+  const H = rows[hi].map(normHeader);
+  const c = {
+    d: colIndex(H,'תאריך'), inv: colIndex(H,'חשבונית'), s: colIndex(H,'שם ספק'), k: colIndex(H,'מק"ט'),
+    n: colIndex(H,'תאור מוצר','תיאור מוצר'), q: colIndex(H,'כמות'), p: colIndex(H,'מחיר ליחידה'),
+    cur: colIndex(H,'מטבע שורה','מטבע חשבונית'), tot: colIndex(H,'סה"כ אחרי הנחה','סה"כ מחיר'),
+    rate: colIndex(H,'שער חליפין'), po: colIndex(H,'הזמנת רכש'), pod: colIndex(H,'תאריך ההזמנה','תאריך הזמנה'), dc: colIndex(H,'חיוב/זכוי'),
+  };
+  const out = [];
+  for (let i = hi + 1; i < rows.length; i++) {
+    const r = rows[i];
+    const s = String(r[c.s]??'').trim(); if (!s) continue;
+    const d = toIsoDate(r[c.d]); if (!d) continue;
+    const k = String(r[c.k]??'').trim(), n = String(r[c.n]??'').trim();
+    const sign = c.dc!==-1 && String(r[c.dc]).trim()==='C' ? -1 : 1;
+    const cur = normCurrency(r[c.cur]);
+    const rate = c.rate!==-1 ? (num(r[c.rate]) || 1) : 1;
+    out.push({ d, inv:String(r[c.inv]??''), s, k, n, junk: isJunkSku(k, n), q: num(r[c.q]) * sign, p: num(r[c.p]), cur,
+      tot: num(r[c.tot]) * sign, rate: cur==='ILS' ? 1 : rate, po: c.po!==-1 ? String(r[c.po]??'').trim() : '', pod: c.pod!==-1 ? toIsoDate(r[c.pod]) : '' });
+  }
+  out.sort((a,b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0);
+  return out;
+};
+
+// Forwarder daily report → [{id, job, file, ref, sup, from, to, pickup, dep, arr, mode, qty, pkg, cont, event, transport}]
+const parseShipments = (rows) => {
+  const hi = findHeaderRow(rows, ['Supplier Name','Arrival Date']);
+  if (hi === -1) return null;
+  const H = rows[hi].map(normHeader);
+  const g = (r, ...n) => { const i = colIndex(H, ...n); return i === -1 ? '' : r[i]; };
+  const out = [];
+  for (let i = hi + 1; i < rows.length; i++) {
+    const r = rows[i];
+    const sup = String(g(r,'Supplier Name')||'').trim(); if (!sup) continue;
+    const job = String(g(r,'Job Order No')||'').trim();
+    const file = String(g(r,'File Number')||'').trim();
+    out.push({
+      id: job || file || `${sup}-${i}`, job, file: /^0*$/.test(file) ? '' : file, ref: String(g(r,'Customer Reference')||'').trim(), sup,
+      from: String(g(r,'Load Port')||'').trim(), to: String(g(r,'Discharge Port')||'').trim(),
+      pickup: toIsoDate(g(r,'Pick Up Date')), dep: toIsoDate(g(r,'Departure Date')), arr: toIsoDate(g(r,'Arrival Date')),
+      mode: String(g(r,'FCL/LCL')||'').trim(), qty: num(g(r,'QTY')), pkg: String(g(r,'Freight Package Desc')||'').trim(),
+      cont: String(g(r,'Containers List')||'').trim(), event: String(g(r,'Last Event Desc')||'').trim(), transport: String(g(r,'Transport Type')||'').trim(),
+    });
+  }
+  return out;
+};
+// Where a shipment is, in plain words — from its dates (the event text is free-form).
+const shipmentStage = (s, todayIso) => {
+  if (!s.dep) return { idx:0, label:'בהכנה' };
+  if (s.dep > todayIso) return { idx:0, label:'ממתין להפלגה' };
+  if (!s.arr || s.arr > todayIso) return { idx:1, label:'בדרך' };
+  return { idx:2, label:'הגיע לנמל' };
+};
+// Forwarder supplier names are English ("JIE LONG SHUTTER MOTORS LTD"), Priority
+// names are often Hebrew + English ("בנינקה - BENINCA"). Match on distinctive
+// Latin words, also allowing split words to join ("JIE LONG" → "JIELONG").
+const SHIP_NAME_STOP = new Set(['LTD','LIMITED','CO','COMPANY','CORP','CORPORATION','INC','GMBH','SPA','SRL','SA','INTERNATIONAL','TRADE','TRADING','INDUSTRY','INDUSTRIAL','TECHNOLOGY','TECH','INTELLIGENT','ELECTRIC','ELECTRONIC','ELECTRONICS','MACHINE','MOTORS','MOTOR','SHUTTER','HARDWARE','GROUP','AND','THE','CITY','CHINA','GUANGDONG','NINGBO','ZHEJIANG','SHANGHAI','SHENZHEN','XIAMEN','JIANGSU','FUJIAN','UND','AUTOMATISMI','AUTOMATION','SYSTEMS','SYSTEM']);
+const matchShipSupplier = (fwdName, candidates) => {
+  const words = String(fwdName).toUpperCase().replace(/[^A-Z0-9 ]/g,' ').split(/\s+/).filter(Boolean);
+  const keys = new Set();
+  words.forEach((w,i) => { if (w.length >= 4 && !SHIP_NAME_STOP.has(w)) keys.add(w); if (i < words.length-1) { const j = w + words[i+1]; if (j.length >= 6) keys.add(j); } });
+  if (!keys.size) return null;
+  let best = null, bestScore = 0;
+  candidates.forEach(cand => {
+    const flat = String(cand).toUpperCase().replace(/[^A-Z0-9]/g,'');
+    if (!flat) return;
+    let score = 0; keys.forEach(k => { if (flat.includes(k)) score += k.length; });
+    if (score > bestScore) { bestScore = score; best = cand; }
+  });
+  return bestScore >= 5 ? best : null;
+};
+
+
 // ─── PROCUREMENT PAGE ──────────────────────────────────
-const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth }) => {
+const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
   // SKU → product name, captured from the inventory file. Needed so items
   // that are in stock but never appear in sales can still be shown by name
@@ -1738,6 +1915,132 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
     setReceiptLog(trimmed);
     try { localStorage.setItem('procurementReceiptLog', JSON.stringify(trimmed)); } catch { /* best-effort */ }
   };
+
+  // ── Purchasing files (sales lines, supplier invoice lines, forwarder report) ──
+  // Big datasets live in IndexedDB; a small summary of each file lives in localStorage.
+  const [salesLines, setSalesLines] = useState([]);
+  const [purchaseLines, setPurchaseLines] = useState([]);
+  const [shipments, setShipments] = useState([]);
+  const [filesMeta, setFilesMeta] = useState(() => { try { return JSON.parse(localStorage.getItem('procFilesMeta')||'{}'); } catch { return {}; } });
+  const [fileBusy, setFileBusy] = useState(null);   // slot key being loaded
+  const [fileMsg, setFileMsg] = useState(null);     // {slot, kind:'ok'|'error', text}
+  const [shipSupOverride, setShipSupOverride] = useState(() => { try { return JSON.parse(localStorage.getItem('procShipSupplierMap')||'{}'); } catch { return {}; } });
+  // Order quantities the user typed (SKU → qty), kept until the PO shows up in Priority's open-orders file.
+  const [draftQty, setDraftQty] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementDraftQty')||'{}'); } catch { return {}; } });
+  const saveDraft = (next) => { setDraftQty(next); try { localStorage.setItem('procurementDraftQty', JSON.stringify(next)); } catch { /* best-effort */ } };
+  const [vendor, setVendor] = useState(null);       // supplier page open (name) or null = supplier list
+  const [vendorSearch, setVendorSearch] = useState('');
+  const [copiedVendor, setCopiedVendor] = useState(null);
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const [a, b, c] = await Promise.all([idbGet('procSalesLines'), idbGet('procPurchaseLines'), idbGet('procShipments')]);
+        if (cancelled) return;
+        if (Array.isArray(a)) setSalesLines(a);
+        if (Array.isArray(b)) setPurchaseLines(b);
+        if (Array.isArray(c)) setShipments(c);
+      } catch { /* IndexedDB unavailable — the slots simply show "not loaded" */ }
+    })();
+    return () => { cancelled = true; };
+  }, []);
+  const saveFileMeta = (slot, meta) => {
+    setFilesMeta(prev => {
+      const next = { ...prev, [slot]: { ...meta, at: Date.now() } };
+      try { localStorage.setItem('procFilesMeta', JSON.stringify(next)); } catch { /* best-effort */ }
+      return next;
+    });
+  };
+  const SLOT_TITLES = { salesLines:'שורות חשבוניות מכירה', purchaseLines:'שורות חשבוניות ספק', shipments:'דוח משלוחים מהמשלח', openOrders:'הזמנות רכש פתוחות', inventory:'יתרות מלאי', masterCard:'כרטיס פריט' };
+  const handleProcFile = async (e, slot) => {
+    const file = e.target.files?.[0]; e.target.value = ''; if (!file) return;
+    setFileBusy(slot); setFileMsg(null);
+    try {
+      const rows = await readSheetAsRows(file);
+      const detected = detectProcFileType(rows);
+      if (detected && detected !== slot) {
+        setFileMsg({ slot, kind:'error', text:`זה נראה כמו קובץ "${SLOT_TITLES[detected]||detected}", לא "${SLOT_TITLES[slot]}". העלה אותו במשבצת המתאימה.` });
+        return;
+      }
+      if (slot === 'salesLines') {
+        const parsed = parseSalesLines(rows);
+        if (!parsed || !parsed.length) throw new Error('לא נמצאו עמודות תאריך / שם לקוח / מק"ט / כמות בקובץ.');
+        await idbSet('procSalesLines', parsed);
+        setSalesLines(parsed);
+        saveFileMeta(slot, { name:file.name, rows:parsed.length, from:parsed[parsed.length-1].d, to:parsed[0].d });
+        setFileMsg({ slot, kind:'ok', text:`נטענו ${parsed.length.toLocaleString()} שורות מכירה (${isoToDisplay(parsed[parsed.length-1].d)}–${isoToDisplay(parsed[0].d)})` });
+      } else if (slot === 'purchaseLines') {
+        const parsed = parsePurchaseLines(rows);
+        if (!parsed || !parsed.length) throw new Error('לא נמצאו עמודות תאריך / שם ספק / מק"ט / כמות בקובץ.');
+        await idbSet('procPurchaseLines', parsed);
+        setPurchaseLines(parsed);
+        saveFileMeta(slot, { name:file.name, rows:parsed.length, from:parsed[parsed.length-1].d, to:parsed[0].d });
+        setFileMsg({ slot, kind:'ok', text:`נטענו ${parsed.length.toLocaleString()} שורות קנייה מ-${new Set(parsed.map(x=>x.s)).size} ספקים` });
+      } else if (slot === 'shipments') {
+        const parsed = parseShipments(rows);
+        if (!parsed) throw new Error('לא נמצאו העמודות Supplier Name / Arrival Date בקובץ.');
+        // Track arrival-date changes between the daily files.
+        const prev = Object.fromEntries(shipments.map(s => [s.id, s]));
+        const today = new Date().toISOString().slice(0,10);
+        const merged = parsed.map(s => {
+          const old = prev[s.id];
+          let change = old?.change || null;
+          if (old && old.arr && s.arr && old.arr !== s.arr) change = { from: old.arr, to: s.arr, at: today };
+          return { ...s, change, firstSeen: old?.firstSeen || today };
+        });
+        await idbSet('procShipments', merged);
+        setShipments(merged);
+        const changed = merged.filter(s => s.change && s.change.at === today).length;
+        saveFileMeta(slot, { name:file.name, rows:merged.length });
+        setFileMsg({ slot, kind:'ok', text:`נטענו ${merged.length} משלוחים${changed?` · ${changed} שינו תאריך הגעה`:''}` });
+      }
+    } catch (err) {
+      setFileMsg({ slot, kind:'error', text: err.message || 'טעינת הקובץ נכשלה.' });
+    } finally { setFileBusy(null); }
+  };
+
+  // Monthly sales the page works from: months covered by the sales-lines file
+  // come from the lines (exact, incl. zero-priced kit components and returns);
+  // older months still come from the monthly file loaded in "מכירות".
+  const salesData = useMemo(() => {
+    if (!salesLines.length) return salesDataRaw;
+    const covered = new Set(salesLines.map(l => isoToMonthKey(l.d)));
+    const agg = {}; const names = {};
+    salesLines.forEach(l => {
+      const m = isoToMonthKey(l.d); const key = l.k + '|' + m;
+      if (!agg[key]) agg[key] = { sku:l.k, date:m, quantity:0, total:0 };
+      agg[key].quantity += l.q; agg[key].total += l.v;
+      if (!names[l.k] && l.q > 0) names[l.k] = l.n;
+    });
+    const fromLines = Object.values(agg).map((r,i) => ({ id:'sl-'+i, ...r, description: names[r.sku] || r.sku, unit:"יח'", supplier:'כללי' }));
+    return [...salesDataRaw.filter(r => !covered.has(r.date)), ...fromLines];
+  }, [salesDataRaw, salesLines]);
+
+  // Per-SKU indexes for the product drawer and supplier figures
+  const linesBySku = useMemo(() => { const m = {}; salesLines.forEach(l => { (m[l.k] ||= []).push(l); }); return m; }, [salesLines]);
+  const purchBySku = useMemo(() => { const m = {}; purchaseLines.forEach(l => { if (!l.junk) (m[l.k] ||= []).push(l); }); return m; }, [purchaseLines]);
+  // Supplier per SKU from the most recent purchase (fallback when the item card has none)
+  const lastSupBySku = useMemo(() => { const m = {}; purchaseLines.forEach(l => { if (!l.junk && !m[l.k]) m[l.k] = l; }); return m; }, [purchaseLines]);
+  // Supplier-level figures from supplier invoices
+  const purchBySupplier = useMemo(() => {
+    const out = {};
+    const cutoff = new Date(Date.now() - 365*DAY_MS).toISOString().slice(0,10);
+    const leadSeen = new Set();
+    purchaseLines.forEach(l => {
+      const s = out[l.s] ||= { spend12:0, lastInv:'', lastPo:'', lastPoDate:'', leadSum:0, leadN:0, curCount:{}, lines:0 };
+      if (l.d >= cutoff) s.spend12 += l.tot * (l.rate || 1);
+      if (l.d > s.lastInv) s.lastInv = l.d;
+      if (l.pod && l.pod > s.lastPoDate) { s.lastPoDate = l.pod; s.lastPo = l.po; }
+      s.curCount[l.cur] = (s.curCount[l.cur]||0) + 1; s.lines++;
+      const lk = l.po + '|' + l.inv;
+      if (l.pod && l.po && !leadSeen.has(lk)) { leadSeen.add(lk); const days = daysBetween(l.pod, l.d); if (days >= 0 && days < 400) { s.leadSum += days; s.leadN++; } }
+    });
+    Object.values(out).forEach(s => {
+      s.avgLeadDays = s.leadN ? Math.round(s.leadSum / s.leadN) : null;
+      s.mainCur = Object.entries(s.curCount).sort((a,b)=>b[1]-a[1])[0]?.[0] || 'ILS';
+    });
+    return out;
+  }, [purchaseLines]);
   const [minStockMap, setMinStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementMinStock')||'{}'); } catch { return {}; } });
   const [supplierMap, setSupplierMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementSupplier')||'{}'); } catch { return {}; } });
   const [moqMap, setMoqMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementMOQ')||'{}'); } catch { return {}; } });
@@ -1970,7 +2273,7 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
   const [aiInsightOpen, setAiInsightOpen] = useState(false);
   const [aiInsightLoading, setAiInsightLoading] = useState(false);
   const [aiInsightText, setAiInsightText] = useState('');
-  const [viewMode, setViewMode] = useState('products'); // 'products' | 'suppliers'
+  const [viewMode, setViewMode] = useState('suppliers'); // 'products' | 'suppliers'
   const [expandedSuppliers, setExpandedSuppliers] = useState(new Set());
 
   const toggleSupplier = (name) => setExpandedSuppliers(prev => {
@@ -2006,6 +2309,12 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
           orderDate:o.orderDate||'', expectedDate:o.expectedDate||'', receivedDate:todayIso, qty:o.orderedQty||0, estimated:true,
         }))]);
       }
+      // Quantities typed on a supplier page are done once Priority has the PO.
+      const orderedKeys = new Set(parsed.map(o => o.productKey));
+      if (Object.keys(draftQty).some(k => orderedKeys.has(k))) {
+        const nd = { ...draftQty }; orderedKeys.forEach(k => delete nd[k]); saveDraft(nd);
+      }
+      saveFileMeta('openOrders', { name:file.name, rows:parsed.length });
       // Remove existing fromPriority orders and replace with new import
       const manual = openOrders.filter(o => !o.fromPriority);
       const merged = [...manual, ...parsed];
@@ -2417,15 +2726,20 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
       const trend = prev3>0?((last3-prev3)/prev3)*100:0;
       const currentStock = stockMap[key]??stockMap[p.sku]??stockMap[p.name]??null;
       const minStock     = minStockMap[key]??minStockMap[p.sku]??minStockMap[p.name]??null;
-      const supplier     = supplierMap[key]??supplierMap[p.sku]??supplierMap[p.name]??null;
-      const currency     = currencyMap[key]??currencyMap[p.sku]??currencyMap[p.name]??null;
+      // Last supplier invoice for this SKU — fills supplier / price when the item card has none.
+      const lastP = lastSupBySku[p.sku] ?? lastSupBySku[key] ?? null;
+      const supplier     = supplierMap[key]??supplierMap[p.sku]??supplierMap[p.name]??lastP?.s??null;
+      const catalogCost  = costMap[key]??costMap[p.sku]??costMap[p.name]??null;
+      const costFromPurchase = catalogCost==null && lastP && lastP.p>0;
+      const currency     = costFromPurchase ? lastP.cur : (currencyMap[key]??currencyMap[p.sku]??currencyMap[p.name]??null);
       // ── Unit cost — original currency AND ₪-converted ──
       // unitCost (₪) feeds every aggregate; unitCostOriginal stays in the
       // supplier's currency for per-row / supplier-facing displays. A foreign
       // cost with no rate in Settings is null (flagged), never silently 1:1.
-      const unitCostOriginal = costMap[key]??costMap[p.sku]??costMap[p.name]??null;
+      const unitCostOriginal = costFromPurchase ? lastP.p : catalogCost;
       const isForeignCost = currency && currency!=='ILS';
-      const fxRate = !isForeignCost ? 1 : (exchangeRates?.[currency]>0 ? exchangeRates[currency] : null);
+      // Rate: Settings first, else the rate Priority recorded on the last supplier invoice in that currency.
+      const fxRate = !isForeignCost ? 1 : (exchangeRates?.[currency]>0 ? exchangeRates[currency] : (lastP && lastP.cur===currency && lastP.rate>0 ? lastP.rate : null));
       const costUsable = unitCostOriginal!=null && fxRate!=null;
       const unitCost = costUsable ? unitCostOriginal*fxRate : null;
       const costConverted = costUsable && isForeignCost ? currency : null;
@@ -2436,6 +2750,16 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
       if (hist && hist.length >= 2) {
         const last = hist[hist.length-1], prev = hist[hist.length-2];
         if (prev.c > 0 && last.cur === prev.cur) { priceChangePct = (last.c-prev.c)/prev.c*100; prevPrice = prev.c; priceChangedAt = last.d; }
+      }
+      // No change recorded from item-card imports? Use the real invoice prices:
+      // latest supplier-invoice price vs the previous different price in the same currency.
+      if (priceChangePct == null) {
+        const buys = (purchBySku[p.sku] || purchBySku[key] || []).filter(b => b.p > 0);
+        if (buys.length >= 2) {
+          const last = buys[0];
+          const prev = buys.find(b => b.cur === last.cur && Math.abs(b.p - last.p) > 1e-6 && b.d < last.d);
+          if (prev && (unitCostOriginal == null || Math.abs(last.p - unitCostOriginal) <= unitCostOriginal*0.02)) { priceChangePct = (last.p-prev.p)/prev.p*100; prevPrice = prev.p; priceChangedAt = last.d; }
+        }
       }
       const avgDaily      = avgMonthly / 30;
       const coverageMonths = (currentStock!==null&&avgMonthly>0)?currentStock/avgMonthly:null;
@@ -2536,9 +2860,10 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
       out.status = procStatus(out);
       out.statusRank = { now:0, soon:1, watch:2, unknown:3, ok:4 }[out.status];
       out.chip = procChip(out);
+      out.costFromPurchase = costFromPurchase; out.lastPurchase = lastP;
       return out;
     });
-  }, [salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates]);
+  }, [salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku]);
 
   const filtered = useMemo(() => {
     let data = products;
@@ -2651,7 +2976,7 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
           .filter(Boolean);
         if (!saleDates.length) return p.currentStock > 0; // never sold but has stock
         const lastSale = new Date(Math.max(...saleDates.map(d=>d.getTime())));
-        return lastSale < threshold && (p.currentStock === null || p.currentStock > 0);
+        return lastSale < threshold && p.currentStock > 0; // unknown stock is not "stuck" stock
       })
       .map(p => {
         const saleDates = Object.entries(p.monthlyData)
@@ -2726,7 +3051,7 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
       urgentCount: toOrder.filter(p=>p.status==='now').length,
       lateValue: overdueOrders.reduce((s,o)=>s+(o.valueILS||0),0),
       stockValue,
-      daysOfInventory: monthlyCogs>0 ? Math.round(stockValue/(monthlyCogs/30)) : null,
+      daysOfInventory: monthlyCogs>0 && stockValue>0 ? Math.round(stockValue/(monthlyCogs/30)) : null,
     };
   }, [products, overdueOrders]);
 
@@ -2764,6 +3089,90 @@ const ProcurementPage = ({ salesData, suppliersData = [], isDarkMode, apiKey, co
     const monthlyCogs = supplierGroups.reduce((a,g)=>a+g.monthlyCogs,0);
     return { stockValue, monthlyCogs, daysOfInventory: monthlyCogs>0 ? Math.round(stockValue/(monthlyCogs/30)) : null, turnsPerYear: stockValue>0 ? monthlyCogs*12/stockValue : null };
   }, [supplierGroups]);
+
+  // ── Shipments ↔ Priority suppliers ──────────────────────────────
+  const knownSuppliers = useMemo(() => {
+    const set = new Set();
+    purchaseLines.forEach(l => set.add(l.s));
+    Object.values(supplierMap).forEach(s => s && set.add(s));
+    openOrders.forEach(o => o.supplier && set.add(o.supplier));
+    return [...set].sort((a,b)=>a.localeCompare(b,'he'));
+  }, [purchaseLines, supplierMap, openOrders]);
+  const todayIso = new Date().toISOString().slice(0,10);
+  const shipmentsEnriched = useMemo(() => shipments.map(s => {
+    const override = shipSupOverride[s.sup];
+    const matched = override === '' ? null : (override ?? matchShipSupplier(s.sup, knownSuppliers));
+    const stage = shipmentStage(s, todayIso);
+    const delayDays = s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0;
+    const daysToArrival = s.arr ? Math.round(daysBetween(todayIso, s.arr)) : null;
+    return { ...s, matched, manual: override !== undefined, stage, delayDays, daysToArrival };
+  }).sort((a,b) => (a.stage.idx===2) - (b.stage.idx===2) || (a.arr||'9999').localeCompare(b.arr||'9999')), [shipments, shipSupOverride, knownSuppliers, todayIso]);
+  const setShipSupplier = (fwdName, prioName) => {
+    const next = { ...shipSupOverride };
+    if (prioName === '__auto') delete next[fwdName]; else next[fwdName] = prioName;
+    setShipSupOverride(next);
+    try { localStorage.setItem('procShipSupplierMap', JSON.stringify(next)); } catch { /* best-effort */ }
+  };
+  const activeShipsBySupplier = useMemo(() => {
+    const m = {};
+    shipmentsEnriched.filter(s => s.matched && s.stage.idx < 2).forEach(s => { (m[s.matched] ||= []).push(s); });
+    return m;
+  }, [shipmentsEnriched]);
+  // When will what's on order for a product arrive: the supplier's next shipment
+  // from the forwarder file if there is one, otherwise the PO's expected date.
+  const productEta = useMemo(() => {
+    const m = {};
+    ordersEnriched.forEach(o => {
+      const k = o.productKey || o.productName;
+      const ship = (activeShipsBySupplier[o.supplier] || []).find(s => s.arr);
+      const cand = ship ? { iso: ship.arr, cont: ship.cont, delayed: ship.delayDays > 0, src:'ship' }
+        : (parseFlexDate(o.expectedDate) ? { iso: toIsoDate(parseFlexDate(o.expectedDate)), cont:'', delayed: o.isOverdue, src:'po' } : null);
+      if (cand && (!m[k] || cand.iso < m[k].iso)) m[k] = cand;
+    });
+    return m;
+  }, [ordersEnriched, activeShipsBySupplier]);
+  const etaFor = (p) => productEta[p.key] ?? productEta[p.sku] ?? productEta[p.name] ?? null;
+
+  // ── Supplier list ───────────────────────────────────────────────
+  const orderQtyFor = (p) => draftQty[p.key] != null ? draftQty[p.key] : (p.currentStock !== null ? p.suggestedOrder : 0);
+  const vendors = useMemo(() => {
+    const groups = {};
+    products.forEach(p => { const s = p.supplier || 'ספק לא ידוע'; (groups[s] ||= []).push(p); });
+    return Object.entries(groups).map(([name, items]) => {
+      const toOrder = items.filter(p => orderQtyFor(p) > 0);
+      const value = toOrder.reduce((a,p) => a + orderQtyFor(p) * (p.unitCost || 0), 0);
+      const worstRank = Math.min(...items.map(p => p.statusRank ?? 4));
+      const orders = ordersEnriched.filter(o => o.supplier === name);
+      const ships = activeShipsBySupplier[name] || [];
+      const nextShip = ships.find(s => s.arr) || null;
+      const pb = purchBySupplier[name] || null;
+      const rel = supplierReliability[name] || null;
+      const lead = leadTimeMap[name] != null ? leadTimeMap[name] : leadTime;
+      const lastPo = [pb?.lastPoDate, ...orders.map(o => o.orderDate ? toIsoDate(parseFlexDate(o.orderDate)) : '')].filter(Boolean).sort().pop() || '';
+      return {
+        name, items, toOrder, value, worstRank,
+        worst: ['now','soon','watch','unknown','ok'][worstRank] || 'ok',
+        draftCount: items.filter(p => draftQty[p.key] != null).length,
+        ordersCount: orders.length, ordersLate: orders.filter(o => o.isOverdue).length,
+        ships, nextShip, shipDelayed: ships.some(s => s.delayDays > 0),
+        pb, rel, lead, lastPo,
+        actualLeadDays: rel?.avgLeadDays ?? pb?.avgLeadDays ?? null,
+      };
+    }).sort((a,b) => a.worstRank - b.worstRank || b.value - a.value || (b.pb?.spend12||0) - (a.pb?.spend12||0));
+  }, [products, draftQty, ordersEnriched, activeShipsBySupplier, purchBySupplier, supplierReliability, leadTimeMap, leadTime]);
+  const vendorObj = vendor ? vendors.find(v => v.name === vendor) : null;
+  const setDraftFor = (p, val) => {
+    const next = { ...draftQty };
+    if (val === '' || val == null) delete next[p.key];
+    else next[p.key] = Math.max(0, Math.round(Number(val) || 0));
+    saveDraft(next);
+  };
+  const clearVendorDraft = (v) => { const next = { ...draftQty }; v.items.forEach(p => delete next[p.key]); saveDraft(next); };
+  const copyVendorList = async (v) => {
+    const lines = v.items.filter(p => orderQtyFor(p) > 0).map(p => `${p.sku||p.key}\t${orderQtyFor(p)}\t${p.name}`).join('\n');
+    try { await navigator.clipboard.writeText(lines); setCopiedVendor(v.name); setTimeout(() => setCopiedVendor(null), 2500); }
+    catch { setCopiedVendor('error'); }
+  };
 
   // ── Supplier spend trend — from the "ספקים" expense file ──
   // Monthly spend per supplier: last 3 full months vs the 3 before, plus 12-month total.
@@ -3261,7 +3670,7 @@ const renderProductRow = (p) => {
             {/* Key numbers */}
             <div className="grid grid-cols-3 gap-3">
               {[
-                ['להזמין', p.suggestedOrder>0 ? `${p.suggestedOrder.toLocaleString()} יח׳` : '—'],
+                ['להזמין', p.currentStock===null ? 'חסר מלאי' : p.suggestedOrder>0 ? `${p.suggestedOrder.toLocaleString()} יח׳` : '—'],
                 ['עלות', p.orderCost ? formatShort(p.orderCost) : (p.orderCostOriginal ? formatUnitCost(Math.round(p.orderCostOriginal), p.currency) : '—')],
                 ['כיסוי כולל בדרך', p.effectiveCoverDays!=null ? `${p.effectiveCoverDays} יום` : '—'],
               ].map(([l,v]) => (
@@ -3284,30 +3693,119 @@ const renderProductRow = (p) => {
               </div>
             </section>
 
-            {/* Sales chart */}
-            <section>
-              <div className="flex items-center justify-between mb-2">
-                <h3 className={`text-sm font-bold ${strong}`}>מכירות — 12 חודשים</h3>
-                <span className={`text-xs ${muted}`}>ממוצע {p.avgMonthly.toFixed(1)} · תחזית לחודש הבא {p.forecastNext} · מגמה {p.trend?`${p.trend>0?'+':''}${p.trend.toFixed(0)}%`:'—'}</span>
-              </div>
-              {(!p.trendSeries || p.trendSeries.every(d=>!d.qty)) ? (
-                <p className={`text-xs py-6 text-center ${muted}`}>אין מכירות ב-12 החודשים האחרונים</p>
-              ) : (
-                <div style={{width:'100%', height:160}}>
-                  <ResponsiveContainer width="100%" height="100%">
-                    <ComposedChart data={p.trendSeries} margin={{top:5,right:0,bottom:0,left:-20}}>
-                      <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode?'#334155':'#e2e8f0'} vertical={false}/>
-                      <XAxis dataKey="month" tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false} interval={0}/>
-                      <YAxis tick={{fontSize:10, fill:isDarkMode?'#94a3b8':'#64748b'}} axisLine={false} tickLine={false} width={34}/>
-                      <RechartsTooltip formatter={(v)=>[`${v} יח׳`,'נמכר']} contentStyle={{direction:'rtl', borderRadius:8, fontSize:12}}/>
-                      <Bar dataKey="qty" fill="#1F5FBF" radius={[3,3,0,0]}/>
-                      {p.avgMonthly>0 && <Line type="monotone" dataKey={()=>p.avgMonthly} stroke="#8A919E" strokeWidth={1.5} strokeDasharray="4 3" dot={false} activeDot={false} isAnimationActive={false}/>}
-                    </ComposedChart>
-                  </ResponsiveContainer>
-                </div>
-              )}
-              <div className="mt-2">{SeasonalityButton(p)}</div>
-            </section>
+            {/* Sales by month & year — from invoice lines when loaded, else the monthly file */}
+            {(() => {
+              const lines = linesBySku[p.sku] || linesBySku[p.key] || [];
+              const byYm = {};
+              if (lines.length) lines.forEach(l => { const ym = l.d.slice(0,7); byYm[ym] = (byYm[ym]||0) + l.q; });
+              else Object.entries(p.monthlyData||{}).forEach(([mk,q]) => { const [m,y] = mk.split('-'); const mi = HebrewMonthsReverse[m]; if (mi) byYm[`20${y}-${String(mi).padStart(2,'0')}`] = q; });
+              const years = [...new Set(Object.keys(byYm).map(k=>k.slice(0,4)))].sort().slice(-3);
+              if (!years.length) return null;
+              const max = Math.max(1, ...Object.values(byYm));
+              return (
+                <section>
+                  <h3 className={`text-sm font-bold mb-2 ${strong}`}>כמה נמכר ומתי</h3>
+                  <div className="grid gap-[3px] text-[11px] text-center" style={{gridTemplateColumns:'40px repeat(12, minmax(0,1fr)) 46px'}}>
+                    <span/>
+                    {MONTH_ABBR_LABELS_SHORT.map(m => <span key={m} className={muted}>{m}</span>)}
+                    <span className={`font-bold ${muted}`}>סה״כ</span>
+                    {years.map(y => {
+                      const vals = MONTH_ABBR_LABELS_SHORT.map((_,i) => byYm[`${y}-${String(i+1).padStart(2,'0')}`]);
+                      return (
+                        <React.Fragment key={y}>
+                          <span className={`font-bold text-right self-center ${strong}`}>{y}</span>
+                          {vals.map((v,i) => {
+                            const a = v>0 ? 0.14 + 0.78*(v/max) : 0;
+                            return <span key={i} title={v!=null?`${MONTH_ABBR_LABELS_SHORT[i]} ${y}: ${v} יח׳`:''} className="h-6 rounded flex items-center justify-center font-semibold tabular-nums"
+                              style={v>0?{background:`rgba(31,95,191,${a.toFixed(2)})`,color:a>0.5?'#fff':(isDarkMode?'#BFD3F2':'#1B3E77')}:{background:v===undefined?'transparent':(isDarkMode?'#1E293B':'#F1F3F6'),color:isDarkMode?'#475569':'#B4BAC4'}}>{v>0?Math.round(v):(v===undefined?'':'·')}</span>;
+                          })}
+                          <span className={`font-bold self-center tabular-nums ${strong}`}>{Math.round(vals.reduce((a,b)=>a+(b||0),0)).toLocaleString()}</span>
+                        </React.Fragment>
+                      );
+                    })}
+                  </div>
+                  {!lines.length && <p className={`text-xs mt-1.5 ${muted}`}>לפרטים לפי לקוח ועסקה — טען את "שורות חשבוניות מכירה".</p>}
+                </section>
+              );
+            })()}
+
+            {/* Who bought it — last 12 months, from invoice lines */}
+            {(() => {
+              const lines = linesBySku[p.sku] || linesBySku[p.key] || [];
+              if (!lines.length) return null;
+              const cutoff = new Date(Date.now() - 365*DAY_MS).toISOString().slice(0,10);
+              const byC = {};
+              lines.forEach(l => { if (l.d < cutoff) return; const c = byC[l.c] ||= { name:l.c, q:0, n:0, last:'' }; c.q += l.q; if (l.q>0) c.n++; if (l.d > c.last) c.last = l.d; });
+              const all = Object.values(byC).filter(c=>c.q>0).sort((a,b)=>b.q-a.q);
+              const total = all.reduce((a,c)=>a+c.q,0);
+              const top = all.slice(0,6);
+              const biggest = lines.filter(l=>l.d>=cutoff && l.q>0).sort((a,b)=>b.q-a.q)[0];
+              return (
+                <section>
+                  <div className="flex items-baseline justify-between mb-2">
+                    <h3 className={`text-sm font-bold ${strong}`}>מי קנה — 12 חודשים</h3>
+                    <span className={`text-xs ${muted}`}>{all.length} לקוחות · {Math.round(total).toLocaleString()} יח׳</span>
+                  </div>
+                  <div className="space-y-1.5">
+                    {top.map(c => (
+                      <div key={c.name} className="flex items-center gap-2 text-sm">
+                        <span className={`w-40 truncate ${strong}`} title={c.name}>{c.name}</span>
+                        <div className={`flex-1 h-2 rounded-full ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}><div className="h-2 rounded-full bg-blue-600" style={{width:`${Math.max(3, c.q/top[0].q*100)}%`}}/></div>
+                        <b className={`w-14 text-left tabular-nums ${strong}`}>{Math.round(c.q).toLocaleString()}</b>
+                        <span className={`w-20 text-xs ${muted}`}>{c.n} עסקאות</span>
+                      </div>
+                    ))}
+                  </div>
+                  {top.length && total>0 && top[0].q/total >= 0.4 && <p className={`text-xs mt-2 font-semibold ${isDarkMode?'text-orange-300':'text-orange-700'}`}>{Math.round(top[0].q/total*100)}% מהכמות הלכה ללקוח אחד — הביקוש תלוי בו.</p>}
+                  {biggest && <p className={`text-xs mt-1 ${muted}`}>העסקה הגדולה ביותר: {Math.round(biggest.q)} יח׳ ל{biggest.c} ב-{isoToDisplay(biggest.d)}</p>}
+                </section>
+              );
+            })()}
+
+            {/* Latest transactions */}
+            {(() => {
+              const lines = (linesBySku[p.sku] || linesBySku[p.key] || []).slice(0,8);
+              if (!lines.length) return null;
+              return (
+                <section>
+                  <h3 className={`text-sm font-bold mb-2 ${strong}`}>עסקאות אחרונות</h3>
+                  <div className={`rounded-xl border overflow-hidden text-sm ${isDarkMode?'border-slate-700':'border-slate-200'}`}>
+                    {lines.map((l,i) => (
+                      <div key={i} className={`grid gap-2 px-3 py-2 ${i?(isDarkMode?'border-t border-slate-700':'border-t border-slate-100'):''}`} style={{gridTemplateColumns:'70px minmax(0,1fr) 56px 90px'}}>
+                        <span className={muted}>{isoToDisplay(l.d)}</span>
+                        <span className={`truncate ${strong}`} title={l.c}>{l.c}</span>
+                        <b className={`tabular-nums ${l.q<0?(isDarkMode?'text-red-300':'text-red-700'):strong}`}>{l.q<0?`${l.q} (החזרה)`:l.q}</b>
+                        <span className={`text-xs font-mono ${muted}`}>{l.inv}</span>
+                      </div>
+                    ))}
+                  </div>
+                </section>
+              );
+            })()}
+
+            {/* Purchase history — from supplier invoice lines */}
+            {(() => {
+              const buys = (purchBySku[p.sku] || purchBySku[p.key] || []).slice(0,6);
+              if (!buys.length) return null;
+              return (
+                <section>
+                  <h3 className={`text-sm font-bold mb-2 ${strong}`}>קניות אחרונות</h3>
+                  <div className={`rounded-xl border overflow-hidden text-sm ${isDarkMode?'border-slate-700':'border-slate-200'}`}>
+                    <div className={`grid gap-2 px-3 py-2 text-xs font-semibold ${isDarkMode?'bg-slate-900/60 text-slate-400':'bg-slate-50 text-slate-500'}`} style={{gridTemplateColumns:'70px minmax(0,1fr) 50px 80px 76px'}}><span>חשבונית</span><span>ספק</span><span>כמות</span><span>מחיר יח׳</span><span>מהזמנה</span></div>
+                    {buys.map((b,i) => (
+                      <div key={i} className={`grid gap-2 px-3 py-2 ${isDarkMode?'border-t border-slate-700':'border-t border-slate-100'}`} style={{gridTemplateColumns:'70px minmax(0,1fr) 50px 80px 76px'}}>
+                        <span className={muted}>{isoToDisplay(b.d)}</span>
+                        <span className={`truncate ${strong}`} title={b.s}>{b.s}</span>
+                        <b className={`tabular-nums ${strong}`}>{b.q}</b>
+                        <span className={`tabular-nums ${strong}`}>{formatUnitCost(b.p, b.cur==='ILS'?null:b.cur)}</span>
+                        <span className={`text-xs ${muted}`} title={b.po}>{b.pod ? `${Math.round(daysBetween(b.pod, b.d))} יום` : '—'}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {p.costFromPurchase && <p className={`text-xs mt-1.5 ${muted}`}>אין מחיר בכרטיס הפריט — העלות מחושבת לפי החשבונית האחרונה.</p>}
+                </section>
+              );
+            })()}
 
             {/* Purchasing */}
             <section>
@@ -3345,7 +3843,7 @@ const renderProductRow = (p) => {
                     <div key={o.id} className={`flex items-center justify-between gap-3 rounded-lg px-3 py-2 text-sm ${card}`}>
                       <span>{o.orderedQty.toLocaleString()} יח׳{o.poNumber?` · ${o.poNumber}`:''}</span>
                       <span className={o.isOverdue?(isDarkMode?'text-red-300 font-semibold':'text-red-700 font-semibold'):muted}>
-                        {o.isOverdue ? `באיחור ${o.daysLate} ימים` : (o.expectedDate ? `צפוי ${o.expectedDate}` : 'ללא תאריך')}
+                        {(() => { const sh = (activeShipsBySupplier[o.supplier]||[]).find(x=>x.arr); return sh ? `${sh.cont||'משלוח'} · הגעה ${isoToDisplay(sh.arr)}${sh.delayDays>0?' (נדחה)':''}` : (o.isOverdue ? `באיחור ${o.daysLate} ימים` : (o.expectedDate ? `צפוי ${o.expectedDate}` : 'ללא תאריך')); })()}
                       </span>
                     </div>
                   ))}
@@ -3396,17 +3894,405 @@ const renderProductRow = (p) => {
 
 
 
-  if (!salesData.length) return (
-    <div className="flex flex-col items-center justify-center h-96 text-center animate-in fade-in zoom-in duration-500">
-      <div className="relative mb-4">
-        <div className={`absolute inset-0 rounded-full blur-2xl opacity-40 ${isDarkMode?'bg-blue-600':'bg-blue-300'}`}/>
-        <div className={`relative p-6 rounded-full ${isDarkMode?'bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700':'bg-gradient-to-br from-slate-50 to-white border border-slate-100'}`}><ShoppingCart className={`w-12 h-12 ${isDarkMode?'text-slate-500':'text-slate-300'}`}/></div>
+
+  // ══ FILES PANEL — every upload explains exactly which file it expects ══
+  const FILE_SLOT_DEFS = [
+    { key:'inventory', title:'יתרות מלאי', report:'דוח יתרות מלאי מ-Priority (מלאי נוכחי לפי מוצר)', gives:'כמה יש עכשיו במחסן מכל מוצר', cols:['מק"ט','תאור מוצר','יתרה'], freq:'לפני כל סבב הזמנות', staleDays:7 },
+    { key:'masterCard', title:'כרטיס פריט', report:'ייצוא כרטיסי פריטים מ-Priority', gives:'ספק, מחיר קניה, מטבע ומינימום מלאי לכל מוצר', cols:['מק"ט','שם ספק','מחיר קניה אחרון','מטבע','כמות מינימום למלאי'], freq:'פעם בחודש, או כשמחירים משתנים', staleDays:60 },
+    { key:'openOrders', title:'הזמנות רכש פתוחות', report:'דוח הזמנות רכש פתוחות מ-Priority (עם יתרה לאספקה)', gives:'מה כבר הוזמן ועוד לא הגיע — כדי לא להזמין פעמיים', cols:['הזמנה','מק"ט','יתרה לאספקה','שם ספק','ת. הזמנה','ת. אספקה'], freq:'לפני כל סבב הזמנות, ואחרי שהוצאת הזמנה', staleDays:3 },
+    { key:'salesLines', title:'שורות חשבוניות מכירה', report:'דוח שורות חשבוניות ללקוחות מ-Priority — לפחות 12 חודשים אחורה', gives:'כמה נמכר, מתי ולמי — עד רמת החשבונית', cols:['תאריך','חשבונית','שם לקוח','מק"ט','כמות','סה"כ אחרי הנחה'], freq:'פעם בשבוע (הקובץ החדש מחליף את הקודם)', staleDays:14 },
+    { key:'purchaseLines', title:'שורות חשבוניות ספק', report:'דוח שורות חשבוניות ספק מ-Priority', gives:'מה קנית, באיזה מחיר, וכמה זמן עבר מההזמנה', cols:['תאריך','שם ספק','מק"ט','כמות','מחיר ליחידה','מטבע שורה','הזמנת רכש','תאריך ההזמנה'], freq:'פעם בשבוע', staleDays:30 },
+    { key:'shipments', title:'דוח משלוחים מהמשלח', report:'האקסל היומי שמגיע מהמשלח ("דוח הזמנות ללקוחות")', gives:'מכולות בדרך, תאריכי הגעה ודחיות', cols:['Supplier Name','Containers List','Departure Date','Arrival Date','Last Event Desc'], freq:'כל יום', staleDays:2 },
+  ];
+  const slotStatus = (key) => {
+    if (key==='inventory' || key==='masterCard') {
+      const f = invSlots[key==='inventory'?'product':'masterCard'];
+      return f ? { loaded:true, name:f.name, at:f.importedAt, detail:`${f.total.toLocaleString()} פריטים` } : { loaded:false };
+    }
+    if (key==='openOrders') {
+      const n = openOrders.filter(o=>o.fromPriority).length;
+      return ordersFileName ? { loaded:true, name:ordersFileName, at:filesMeta.openOrders?.at, detail:`${n} שורות פתוחות` } : { loaded:false };
+    }
+    const m = filesMeta[key];
+    const has = key==='salesLines' ? salesLines.length : key==='purchaseLines' ? purchaseLines.length : shipments.length;
+    if (!m || !has) return { loaded:false };
+    const range = m.from ? ` · ${isoToDisplay(m.from)}–${isoToDisplay(m.to)}` : '';
+    return { loaded:true, name:m.name, at:m.at, detail:`${m.rows.toLocaleString()} שורות${range}` };
+  };
+  const filesSummary = (() => {
+    const st = FILE_SLOT_DEFS.map(d => ({ d, s: slotStatus(d.key) }));
+    const loaded = st.filter(x => x.s.loaded).length;
+    const stale = st.filter(x => x.s.loaded && x.s.at && (Date.now()-x.s.at)/DAY_MS > x.d.staleDays).map(x => x.d.title);
+    return { loaded, total: FILE_SLOT_DEFS.length, stale };
+  })(); // recomputed every render — cheap, and depends on many pieces of state
+  const guardedUpload = async (e, slot, handler) => {
+    const f = e.target.files?.[0]; if (!f) return;
+    try {
+      const rows = await readSheetAsRows(f);
+      const det = detectProcFileType(rows);
+      const ok = !det || det === slot || ((slot==='inventory'||slot==='masterCard') && (det==='inventory'||det==='masterCard'));
+      if (!ok) { setFileMsg({ slot, kind:'error', text:`זה נראה כמו קובץ "${SLOT_TITLES[det]||det}", לא "${SLOT_TITLES[slot]}". העלה אותו במשבצת המתאימה.` }); e.target.value=''; return; }
+    } catch { /* let the original handler report read errors */ }
+    setFileMsg(null);
+    handler(e);
+  };
+  const renderFilesPanel = () => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    return (
+      <section aria-label="קבצים" className="space-y-3">
+        <div className="flex flex-wrap items-baseline gap-2">
+          <h3 className={`text-base font-bold ${strong}`}>קבצים</h3>
+          <span className={`text-sm ${muted}`}>כל משבצת מקבלת קובץ אחד מסוים. אם תעלה קובץ למשבצת הלא נכונה, תופיע הודעה לאיזו משבצת הוא שייך.</span>
+        </div>
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
+          {FILE_SLOT_DEFS.map((d, i) => {
+            const st = slotStatus(d.key);
+            const ageDays = st.at ? Math.floor((Date.now()-st.at)/DAY_MS) : null;
+            const stale = st.loaded && ageDays!=null && ageDays > d.staleDays;
+            const busy = fileBusy===d.key || (d.key==='openOrders'&&ordersLoading) || ((d.key==='inventory'||d.key==='masterCard')&&invLoading);
+            const onPick = (e) => {
+              if (d.key==='inventory') return guardedUpload(e, d.key, ev=>handleInvUpload(ev,'product'));
+              if (d.key==='masterCard') return guardedUpload(e, d.key, ev=>handleInvUpload(ev,'masterCard'));
+              if (d.key==='openOrders') return guardedUpload(e, d.key, handlePriorityOrdersUpload);
+              return handleProcFile(e, d.key);
+            };
+            const msg = fileMsg?.slot===d.key ? fileMsg : (d.key==='openOrders'&&ordersUploadError ? {kind:'error',text:ordersUploadError} : ((d.key==='inventory'||d.key==='masterCard')&&invUploadError&&!fileMsg ? {kind:'error',text:invUploadError} : null));
+            return (
+              <div key={d.key} className={`rounded-xl border p-4 flex flex-col gap-2.5 ${isDarkMode?'bg-slate-900/40 border-slate-700':'bg-slate-50/60 border-slate-200'}`}>
+                <div className="flex items-start gap-2">
+                  <span className={`shrink-0 w-6 h-6 rounded-full text-xs font-bold flex items-center justify-center ${isDarkMode?'bg-slate-700 text-slate-200':'bg-white border border-slate-300 text-slate-700'}`}>{i+1}</span>
+                  <div className="flex-1 min-w-0">
+                    <p className={`font-bold text-sm ${strong}`}>{d.title}</p>
+                    <p className={`text-xs mt-0.5 ${muted}`}>{d.gives}</p>
+                  </div>
+                  <span className={`shrink-0 text-[11px] font-semibold px-2 py-0.5 rounded ${!st.loaded ? procChipCls('muted',isDarkMode) : stale ? procChipCls('watch',isDarkMode) : (isDarkMode?'bg-emerald-500/15 text-emerald-300':'bg-emerald-50 text-emerald-700')}`}>
+                    {!st.loaded ? 'לא נטען' : stale ? `ישן · ${ageDays} ימים` : 'עדכני'}
+                  </span>
+                </div>
+                <dl className="text-xs space-y-1.5">
+                  <div><dt className={`inline font-semibold ${strong}`}>איזה קובץ: </dt><dd className={`inline ${muted}`}>{d.report}</dd></div>
+                  <div>
+                    <dt className={`font-semibold mb-1 ${strong}`}>עמודות שצריכות להיות בקובץ:</dt>
+                    <dd className="flex flex-wrap gap-1">{d.cols.map(c => <span key={c} className={`px-1.5 py-0.5 rounded ${isDarkMode?'bg-slate-700 text-slate-200':'bg-white border border-slate-200 text-slate-700'}`}>{c}</span>)}</dd>
+                  </div>
+                  <div><dt className={`inline font-semibold ${strong}`}>מתי לעדכן: </dt><dd className={`inline ${muted}`}>{d.freq}</dd></div>
+                </dl>
+                {st.loaded && (
+                  <p className={`text-xs truncate ${muted}`} title={st.name}>
+                    <FileSpreadsheet className="w-3.5 h-3.5 inline -mt-0.5 ml-1"/>{st.name} · {st.detail}{st.at?` · נטען ${new Date(st.at).toLocaleDateString('he-IL')}`:''}
+                  </p>
+                )}
+                {msg && <p className={`text-xs font-semibold px-2 py-1.5 rounded ${msg.kind==='ok'?(isDarkMode?'bg-emerald-500/15 text-emerald-300':'bg-emerald-50 text-emerald-800'):(isDarkMode?'bg-red-500/15 text-red-300':'bg-red-50 text-red-700')}`}>{msg.text}</p>}
+                <label className={`mt-auto inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold cursor-pointer transition-colors ${busy?'opacity-60 cursor-wait':''} ${st.loaded?(isDarkMode?'border border-slate-600 text-slate-200 hover:bg-slate-700':'border border-slate-300 text-slate-700 bg-white hover:bg-slate-50'):'bg-blue-600 hover:bg-blue-700 text-white'}`}>
+                  {busy ? <Loader2 className="w-4 h-4 animate-spin"/> : <Upload className="w-4 h-4"/>}
+                  {busy ? 'טוען…' : st.loaded ? `החלף קובץ ${d.title}` : `העלה קובץ ${d.title}`}
+                  <input type="file" accept=".xlsx,.xls,.csv" className="sr-only" disabled={busy} onChange={onPick}/>
+                </label>
+              </div>
+            );
+          })}
+        </div>
+        <div className={`flex flex-wrap items-center gap-x-4 gap-y-1 text-xs ${muted}`}>
+          <span>היסטוריה לפני תקופת שורות החשבוניות נלקחת מקובץ "מכירות חודשיות לפי מוצר" שבלשונית מכירות{salesDataRaw.length?' (נטען)':' (לא נטען)'}.</span>
+          {(invSlots.product || invSlots.masterCard) && <button type="button" onClick={clearInventory} className={`font-semibold ${isDarkMode?'text-red-300':'text-red-700'} hover:underline`}>נקה את נתוני המלאי וכרטיס הפריט</button>}
+        </div>
+      </section>
+    );
+  };
+
+  // ══ 12-month sales strip (one cell per month, darker = more units) ══
+  // A plain render function (not a component) — components defined inside
+  // other components remount on every render.
+  const renderSalesStrip = (series, compact) => {
+    const max = Math.max(1, ...series.map(d => d.qty||0));
+    const size = compact ? 22 : 26;
+    return (
+      <div className="flex gap-0.5" aria-label={`מכירות 12 חודשים: ${series.map(d=>`${d.month} ${d.qty||0}`).join(', ')}`}>
+        {series.map(d => {
+          const v = d.qty||0;
+          const a = v>0 ? 0.14 + 0.78*(v/max) : 0;
+          const style = v>0
+            ? { width:size, height:size, background:`rgba(31,95,191,${a.toFixed(2)})`, color: a>0.5 ? '#FFFFFF' : (isDarkMode?'#BFD3F2':'#1B3E77') }
+            : { width:size, height:size, background: isDarkMode?'#1E293B':'#F1F3F6', color: isDarkMode?'#475569':'#B4BAC4' };
+          return <span key={d.month} title={`${d.month}: ${v.toLocaleString()} יח׳`} style={style} className="rounded flex items-center justify-center text-[10px] font-semibold tabular-nums">{v ? (v>=1000?Math.round(v/100)/10+'k':Math.round(v)) : '·'}</span>;
+        })}
       </div>
-      <h3 className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>אין נתוני מכירות</h3>
-      <p className={`mt-2 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>טען קבצי מכירות בלשונית "מכירות" כדי לתכנן את הרכש</p>
-      <p className={`mt-2 text-xs px-3 py-1.5 rounded-lg ${isDarkMode?'bg-slate-800 text-slate-400 border border-slate-700':'bg-slate-100 text-slate-500 border border-slate-200'}`}>
-        שם הקובץ הנדרש: <span className="font-bold">מכירות חודשיות לפי מוצר</span>
-      </p>
+    );
+  };
+
+  // ══ SUPPLIERS: list → supplier page ══
+  const renderVendors = () => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const cardCls = `rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`;
+    const headCls = `text-xs font-semibold ${isDarkMode?'bg-slate-900/60 text-slate-400':'bg-slate-50 text-slate-500'}`;
+    if (!vendorObj) {
+      const list = vendors.filter(v => !vendorSearch || smartMatch(v.name, vendorSearch) || v.items.some(p => smartMatch(p.name, vendorSearch) || smartMatch(p.sku, vendorSearch)));
+      const grid = { gridTemplateColumns:'minmax(0,1.6fr) 140px 140px 170px 120px 120px 130px 20px' };
+      return (
+        <div className={cardCls}>
+          <div className="flex flex-wrap items-center gap-3 px-5 py-4">
+            <h3 className={`text-base font-bold ${strong}`}>ספקים</h3>
+            <span className={`text-sm ${muted}`}>{list.length} ספקים · מה שדורש פעולה למעלה · לחיצה על ספק פותחת את כל המוצרים שלו</span>
+            <div className="flex-1"/>
+            <input type="search" aria-label="חיפוש ספק או מוצר" placeholder="חיפוש ספק או מוצר" value={vendorSearch} onChange={e=>setVendorSearch(e.target.value)}
+              className={`px-3 py-2 border rounded-xl text-sm w-64 focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'bg-slate-900 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
+          </div>
+          <div className="overflow-x-auto">
+            <div className="min-w-[1000px]">
+              <div className={`grid gap-4 px-5 py-2.5 ${headCls}`} style={grid}>
+                <div>ספק</div><div>להזמין</div><div>מצב</div><div>בדרך</div><div>הזמנה אחרונה</div><div>קניות 12 ח׳</div><div>זמן אספקה</div><div/>
+              </div>
+              {list.map(v => {
+                const st = v.worst;
+                return (
+                  <button key={v.name} type="button" onClick={()=>{ setVendor(v.name); setDrawerKey(null); }}
+                    className={`w-full text-right grid gap-4 items-center px-5 py-3.5 border-t transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${isDarkMode?'border-slate-700 hover:bg-slate-700/40':'border-slate-100 hover:bg-slate-50'}`} style={grid}>
+                    <div className="min-w-0">
+                      <p className={`font-bold text-sm truncate ${strong}`}>{v.name}</p>
+                      <p className={`text-xs ${muted}`}>{v.items.length} מוצרים{v.draftCount?` · ${v.draftCount} כמויות שקבעת`:''}</p>
+                    </div>
+                    <div>
+                      {v.toOrder.length ? <>
+                        <p className={`text-sm font-bold ${strong}`}>{v.toOrder.length} מוצרים</p>
+                        <p className={`text-xs ${muted}`}>{v.value>0?formatShort(v.value):''}</p>
+                      </> : <span className={muted}>—</span>}
+                    </div>
+                    <div><span className={`inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold whitespace-nowrap ${procStatusCls(st, isDarkMode)}`}><span className="w-2 h-2 rounded-full" style={{background:procDotColor[st]}}/>{PROC_STATUS_LABEL[st]}</span></div>
+                    <div className="min-w-0">
+                      {v.ordersCount || v.ships.length ? <>
+                        <p className={`text-sm font-semibold ${strong}`}>{v.ordersCount?`${v.ordersCount} שורות הזמנה`:''}{v.ordersCount&&v.ships.length?' · ':''}{v.ships.length?`${v.ships.length} משלוח${v.ships.length>1?'ים':''}`:''}</p>
+                        <p className={`text-xs ${v.shipDelayed||v.ordersLate?(isDarkMode?'text-red-300':'text-red-700'):muted}`}>
+                          {v.nextShip ? `${v.shipDelayed?'נדחה · ':''}מגיע ${isoToDisplay(v.nextShip.arr)}` : v.ordersLate ? `${v.ordersLate} באיחור` : ''}
+                        </p>
+                      </> : <span className={muted}>—</span>}
+                    </div>
+                    <div className={`text-sm ${strong}`}>{v.lastPo ? isoToDisplay(v.lastPo) : '—'}</div>
+                    <div className={`text-sm ${strong}`}>{v.pb?.spend12 ? formatShort(v.pb.spend12) : '—'}</div>
+                    <div>
+                      <p className={`text-sm ${strong}`}>מוגדר {v.lead} ח׳</p>
+                      <p className={`text-xs ${v.actualLeadDays!=null && v.actualLeadDays > v.lead*30*1.2+3 ?(isDarkMode?'text-orange-300':'text-orange-700'):muted}`}>{v.actualLeadDays!=null?`בפועל ~${v.actualLeadDays} יום`:'אין נתון בפועל'}</p>
+                    </div>
+                    <ChevronLeft className={`w-4 h-4 ${muted}`}/>
+                  </button>
+                );
+              })}
+              {!list.length && <p className={`px-5 py-10 text-center text-sm ${muted}`}>לא נמצאו ספקים</p>}
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    // ── Supplier page ──
+    const v = vendorObj;
+    const rows = [...v.items].sort((a,b) => (a.statusRank??4)-(b.statusRank??4) || (b.avgMonthly||0)-(a.avgMonthly||0));
+    const months = rows[0]?.trendSeries?.map(d=>d.month) || [];
+    const toOrder = rows.filter(p => orderQtyFor(p) > 0);
+    const totalByCur = {};
+    toOrder.forEach(p => { if (p.unitCostOriginal) { const c = p.currency||'ILS'; totalByCur[c] = (totalByCur[c]||0) + orderQtyFor(p)*p.unitCostOriginal; } });
+    const grid = { gridTemplateColumns:`minmax(220px,1.4fr) ${months.length*24}px 70px 76px 170px 80px 110px` };
+    return (
+      <div className="space-y-4">
+        <div className="flex flex-wrap items-end gap-4">
+          <div className="space-y-1">
+            <button type="button" onClick={()=>setVendor(null)} className={`inline-flex items-center gap-1 text-sm font-semibold ${isDarkMode?'text-blue-300':'text-blue-700'} hover:underline`}>
+              <ChevronRight className="w-4 h-4"/> כל הספקים
+            </button>
+            <h3 className={`text-2xl font-bold ${strong}`}>{v.name}</h3>
+            <p className={`text-sm ${muted}`}>{v.items.length} מוצרים · זמן אספקה מוגדר {v.lead} ח׳{v.pb?.mainCur && v.pb.mainCur!=='ILS' ? ` · מטבע ${v.pb.mainCur}` : ''}</p>
+          </div>
+          <div className="flex-1"/>
+          <div className={`flex flex-wrap gap-5 rounded-xl border px-4 py-2.5 text-sm ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+            {[
+              ['קניות 12 ח׳', v.pb?.spend12 ? formatShort(v.pb.spend12) : '—'],
+              ['הזמנה אחרונה', v.lastPo ? isoToDisplay(v.lastPo) : '—'],
+              ['חשבונית אחרונה', v.pb?.lastInv ? isoToDisplay(v.pb.lastInv) : '—'],
+              ['מהזמנה עד חשבונית', v.pb?.avgLeadDays!=null ? `~${v.pb.avgLeadDays} יום` : '—'],
+              ['הגיעו בזמן', v.rel?.onTimePct!=null ? `${v.rel.onTimePct}%` : '—'],
+            ].map(([l,val]) => <div key={l} className="flex flex-col"><span className={`text-xs ${muted}`}>{l}</span><b className={strong}>{val}</b></div>)}
+          </div>
+        </div>
+
+        {(v.ships.length>0 || v.ordersCount>0) && (
+          <div className={`rounded-2xl border px-5 py-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+            <b className={strong}>בדרך מהספק:</b>
+            {v.ships.map(s => (
+              <span key={s.id} className="flex items-center gap-2">
+                <Truck className={`w-4 h-4 ${muted}`}/>
+                <span className={strong}>{s.cont || (s.mode==='LCL'?'משלוח LCL':'משלוח')}</span>
+                <span className={muted}>{s.stage.label}{s.arr?` · הגעה ${isoToDisplay(s.arr)}`:''}</span>
+                {s.delayDays>0 && <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${procChipCls('watch',isDarkMode)}`}>נדחה ב-{s.delayDays} ימים</span>}
+              </span>
+            ))}
+            {v.ordersCount>0 && <button type="button" onClick={()=>setViewMode('orders')} className={`font-semibold ${isDarkMode?'text-blue-300':'text-blue-700'} hover:underline`}>{v.ordersCount} שורות בהזמנות פתוחות{v.ordersLate?` · ${v.ordersLate} באיחור`:''}</button>}
+          </div>
+        )}
+
+        <div className="grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_300px] gap-4 items-start">
+          <div className={cardCls}>
+            <div className="overflow-x-auto">
+              <div style={{minWidth: 220 + months.length*24 + 600}}>
+                <div className={`grid gap-3 items-center px-4 py-2.5 ${headCls}`} style={grid}>
+                  <div>מוצר</div>
+                  <div className="flex gap-0.5">{months.map(m => <span key={m} className="text-[10px] text-center" style={{width:22}}>{m.split('-')[0]}</span>)}</div>
+                  <div>ממוצע</div><div>מלאי</div><div>בדרך · הגעה</div><div>מומלץ</div><div>להזמין</div>
+                </div>
+                {rows.map(p => {
+                  const eta = etaFor(p);
+                  const q = orderQtyFor(p);
+                  const edited = draftQty[p.key] != null;
+                  return (
+                    <div key={p.key} className={`grid gap-3 items-center px-4 py-2.5 border-t ${isDarkMode?'border-slate-700':'border-slate-100'} ${drawerKey===p.key?(isDarkMode?'bg-slate-700/50':'bg-blue-50/60'):''}`} style={grid}>
+                      <button type="button" onClick={()=>setDrawerKey(p.key)} className="text-right min-w-0 group focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded">
+                        <p className={`text-sm font-semibold truncate group-hover:underline ${strong}`} title={p.name}>{p.name}</p>
+                        <p className="flex items-center gap-1.5 min-w-0">
+                          <span className={`text-xs font-mono ${muted}`}>{p.sku}</span>
+                          {p.chip && <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded truncate ${procChipCls(p.chip.k, isDarkMode)}`}>{p.chip.t}</span>}
+                        </p>
+                      </button>
+                      {renderSalesStrip(p.trendSeries||[], true)}
+                      <div className={`text-sm font-semibold tabular-nums ${strong}`}>{p.avgMonthly>0?p.avgMonthly.toFixed(p.avgMonthly<10?1:0):'—'}</div>
+                      <div className={`text-sm font-semibold tabular-nums ${p.currentStock!=null&&p.currentStock<=0?(isDarkMode?'text-red-300':'text-red-700'):strong}`}>{p.currentStock!=null?p.currentStock.toLocaleString():'—'}</div>
+                      <div className="min-w-0">
+                        <p className={`text-sm font-semibold ${strong}`}>{p.incomingQty>0?`${p.incomingQty.toLocaleString()} יח׳`:'—'}</p>
+                        {p.incomingQty>0 && eta && <p className={`text-xs truncate ${eta.delayed?(isDarkMode?'text-red-300':'text-red-700'):muted}`} title={eta.src==='ship'?'לפי דוח המשלח':'לפי תאריך האספקה בהזמנה'}>{eta.cont?`${eta.cont} · `:''}{isoToDisplay(eta.iso)}{eta.delayed?' · באיחור':''}</p>}
+                      </div>
+                      <div className={`text-sm tabular-nums ${muted}`}>{p.currentStock!=null && p.suggestedOrder>0 ? p.suggestedOrder.toLocaleString() : '—'}</div>
+                      <div className="flex items-center gap-1">
+                        <label htmlFor={`dq-${p.key}`} className="sr-only">כמות להזמנה — {p.name}</label>
+                        <input id={`dq-${p.key}`} type="number" min="0" inputMode="numeric" value={q||''} placeholder="0"
+                          onChange={e=>setDraftFor(p, e.target.value)}
+                          className={`w-20 px-2 py-1.5 rounded-lg border-2 text-center text-sm font-bold tabular-nums focus:outline-none focus:border-blue-500 ${edited?(isDarkMode?'border-blue-500 bg-blue-500/10 text-white':'border-blue-500 bg-blue-50 text-slate-900'):(isDarkMode?'border-slate-600 bg-slate-900 text-white':'border-slate-300 bg-white text-slate-900')}`}/>
+                        {edited && <button type="button" onClick={()=>setDraftFor(p,'')} title="חזור לכמות המומלצת" aria-label="חזור לכמות המומלצת" className={`p-1 rounded ${muted} hover:text-blue-500`}><RefreshCw className="w-3.5 h-3.5"/></button>}
+                      </div>
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+            <p className={`px-4 py-2.5 border-t text-xs ${isDarkMode?'border-slate-700 text-slate-400':'border-slate-100 text-slate-500'}`}>
+              משבצת = יחידות שנמכרו בחודש (כהה יותר = יותר) · "מומלץ" מחושב אוטומטית · "להזמין" = הכמות שאתה קובע (כחול = שינית). לחיצה על שם מוצר פותחת את כל הפרטים.
+            </p>
+          </div>
+
+          <aside aria-label="רשימה להזמנה ב-Priority" className={`rounded-2xl border p-4 space-y-3 2xl:sticky 2xl:top-4 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+            <h4 className={`font-bold ${strong}`}>רשימה להזמנה ב-Priority</h4>
+            <p className={`text-xs leading-relaxed ${muted}`}>הכמויות מהטבלה. תקליד אותן בהזמנת הרכש ב-Priority — כשתטען שוב את קובץ ההזמנות הפתוחות, השורות יעברו אוטומטית ל"בדרך" והרשימה תתנקה.</p>
+            <div className={`rounded-lg border divide-y text-sm max-h-80 overflow-y-auto ${isDarkMode?'border-slate-700 divide-slate-700':'border-slate-200 divide-slate-100'}`}>
+              {toOrder.length ? toOrder.map(p => (
+                <div key={p.key} className="flex items-center gap-2 px-3 py-2">
+                  <span className={`font-mono text-xs shrink-0 ${muted}`}>{p.sku}</span>
+                  <span className={`flex-1 truncate text-xs ${strong}`}>{p.name}</span>
+                  <b className={`tabular-nums ${strong}`}>{orderQtyFor(p).toLocaleString()}</b>
+                </div>
+              )) : <p className={`px-3 py-3 text-xs ${muted}`}>אין כמויות להזמנה מהספק הזה</p>}
+            </div>
+            {Object.keys(totalByCur).length>0 && (
+              <div className="flex justify-between text-sm"><span className={muted}>סה״כ משוער</span><b className={strong}>{Object.entries(totalByCur).map(([c,a])=>formatUnitCost(Math.round(a), c==='ILS'?null:c)).join(' + ')}</b></div>
+            )}
+            <button type="button" disabled={!toOrder.length} onClick={()=>copyVendorList(v)}
+              className="w-full py-2.5 rounded-xl bg-slate-900 text-white text-sm font-bold disabled:opacity-40 hover:bg-slate-800">
+              {copiedVendor===v.name ? 'הועתק ✓' : copiedVendor==='error' ? 'ההעתקה נחסמה בדפדפן' : 'העתק רשימה (מק״ט · כמות · שם)'}
+            </button>
+            {v.draftCount>0 && <button type="button" onClick={()=>clearVendorDraft(v)} className={`w-full text-xs font-semibold ${isDarkMode?'text-slate-300':'text-slate-600'} hover:underline`}>אפס לכמויות המומלצות</button>}
+          </aside>
+        </div>
+      </div>
+    );
+  };
+
+  // ══ SHIPMENTS (forwarder report) ══
+  const renderShipments = () => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const meta = filesMeta.shipments;
+    const STAGES = ['בהכנה / ממתין', 'בדרך', 'בנמל'];
+    return (
+      <div className="space-y-4">
+        <div className={`rounded-2xl border px-5 py-4 flex flex-wrap items-center gap-4 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+          <Truck className="w-5 h-5 text-blue-500"/>
+          <div className="flex-1 min-w-[240px]">
+            <p className={`font-bold ${strong}`}>{meta ? `קובץ המשלח נטען ${new Date(meta.at).toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}` : 'עוד לא נטען קובץ מהמשלח'}</p>
+            <p className={`text-sm ${muted}`}>מעלים כל יום את האקסל שמגיע מהמשלח ("דוח הזמנות ללקוחות"). שינוי בתאריך ההגעה מסומן. הקובץ לא מפרט מוצרים — לכן מוצג מה שפתוח בהזמנות מאותו ספק.</p>
+          </div>
+          <label className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold cursor-pointer ${meta?(isDarkMode?'border border-slate-600 text-slate-200 hover:bg-slate-700':'border border-slate-300 text-slate-700 bg-white hover:bg-slate-50'):'bg-blue-600 text-white hover:bg-blue-700'}`}>
+            {fileBusy==='shipments'?<Loader2 className="w-4 h-4 animate-spin"/>:<Upload className="w-4 h-4"/>} {meta?'החלף בקובץ של היום':'העלה את קובץ המשלח'}
+            <input type="file" accept=".xlsx,.xls" className="sr-only" onChange={e=>handleProcFile(e,'shipments')}/>
+          </label>
+          {fileMsg?.slot==='shipments' && <p className={`w-full text-xs font-semibold ${fileMsg.kind==='ok'?(isDarkMode?'text-emerald-300':'text-emerald-700'):(isDarkMode?'text-red-300':'text-red-700')}`}>{fileMsg.text}</p>}
+        </div>
+        {shipmentsEnriched.map(s => {
+          const orders = s.matched ? ordersEnriched.filter(o => o.supplier === s.matched) : [];
+          return (
+            <section key={s.id} className={`rounded-2xl border p-5 space-y-4 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'} ${s.stage.idx===2?'opacity-75':''}`}>
+              <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
+                <span className={`font-mono text-lg font-bold ${strong}`}>{s.cont || 'ללא מספר מכולה'}</span>
+                <span className={`text-sm ${muted}`}>{s.sup}</span>
+                <span className={`text-sm ${muted}`}>{[s.mode, s.qty?`${s.qty} ${s.pkg||''}`.trim():'', s.from&&s.to?`מ-${s.from} ל-${s.to}`:''].filter(Boolean).join(' · ')}</span>
+                {s.delayDays>0 && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${procChipCls('watch',isDarkMode)}`}>נדחה ב-{s.delayDays} ימים (היה {isoToDisplay(s.change.from)})</span>}
+                {s.delayDays<0 && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${isDarkMode?'bg-emerald-500/15 text-emerald-300':'bg-emerald-50 text-emerald-700'}`}>הוקדם ב-{-s.delayDays} ימים</span>}
+                <div className="flex-1"/>
+                <div className="text-left">
+                  <p className={`text-xs ${muted}`}>הגעה משוערת</p>
+                  <p className={`text-lg font-bold ${strong}`}>{s.arr ? isoToDisplay(s.arr) : 'לא ידוע'}{s.daysToArrival!=null && s.daysToArrival>=0 && s.stage.idx<2 ? <span className={`text-xs font-normal mr-1 ${muted}`}>(עוד {s.daysToArrival} ימים)</span> : null}</p>
+                </div>
+              </div>
+              <div className="flex items-center" aria-label={`שלב: ${s.stage.label}`}>
+                {STAGES.map((l,i) => (
+                  <React.Fragment key={l}>
+                    {i>0 && <div className={`flex-1 h-0.5 ${i<=s.stage.idx?'bg-blue-600':(isDarkMode?'bg-slate-700':'bg-slate-200')}`}/>}
+                    <div className="flex flex-col items-center gap-1 px-2">
+                      <span className={`w-3.5 h-3.5 rounded-full ${i<s.stage.idx?'bg-blue-600':i===s.stage.idx?'bg-blue-600 ring-4 ring-blue-500/25':(isDarkMode?'bg-slate-600':'bg-slate-300')}`}/>
+                      <span className={`text-xs whitespace-nowrap ${i===s.stage.idx?`font-bold ${strong}`:muted}`}>{i===s.stage.idx?s.stage.label:l}</span>
+                    </div>
+                  </React.Fragment>
+                ))}
+              </div>
+              <div className={`grid grid-cols-2 md:grid-cols-4 gap-3 text-sm`}>
+                <div><p className={`text-xs ${muted}`}>הפלגה</p><p className={strong}>{s.dep?isoToDisplay(s.dep):'—'}</p></div>
+                <div><p className={`text-xs ${muted}`}>אירוע אחרון אצל המשלח</p><p className={strong}>{s.event||'—'}</p></div>
+                <div><p className={`text-xs ${muted}`}>אסמכתא</p><p className={strong}>{s.ref||'—'}{s.file?` · תיק ${s.file}`:''}</p></div>
+                <div>
+                  <label htmlFor={`shipsup-${s.id}`} className={`text-xs ${muted}`}>ספק ב-Priority</label>
+                  <select id={`shipsup-${s.id}`} value={s.manual ? (shipSupOverride[s.sup]||'') : '__auto'} onChange={e=>setShipSupplier(s.sup, e.target.value)}
+                    style={isDarkMode?{background:'#0f172a',color:'#f1f5f9'}:{}}
+                    className={`block w-full mt-0.5 px-2 py-1.5 rounded-lg border text-sm ${isDarkMode?'border-slate-600':'border-slate-300 bg-white'}`}>
+                    <option value="__auto">{matchShipSupplier(s.sup, knownSuppliers) ? `אוטומטי: ${matchShipSupplier(s.sup, knownSuppliers)}` : 'אוטומטי: לא זוהה'}</option>
+                    <option value="">לא משויך</option>
+                    {knownSuppliers.map(n => <option key={n} value={n}>{n}</option>)}
+                  </select>
+                </div>
+              </div>
+              <div>
+                <p className={`text-xs font-semibold mb-1.5 ${muted}`}>{s.matched ? `פתוח בהזמנות מ"${s.matched}" (${orders.length} שורות)` : 'שייך ספק כדי לראות מה כנראה במשלוח'}</p>
+                {orders.length>0 && (
+                  <div className="flex flex-wrap gap-1.5">
+                    {orders.slice(0,24).map(o => (
+                      <span key={o.id} className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs ${isDarkMode?'bg-slate-900/60 text-slate-200':'bg-slate-50 text-slate-700'}`}>
+                        <span className={`font-mono ${muted}`}>{o.productKey!==o.productName?o.productKey:''}</span>{o.productName}<b>{o.orderedQty.toLocaleString()}</b>{o.poNumber && <span className={muted}>{o.poNumber}</span>}
+                      </span>
+                    ))}
+                    {orders.length>24 && <span className={`text-xs ${muted}`}>ועוד {orders.length-24}</span>}
+                  </div>
+                )}
+              </div>
+            </section>
+          );
+        })}
+        {!shipmentsEnriched.length && meta && <p className={`text-center py-10 text-sm ${muted}`}>אין משלוחים בקובץ</p>}
+      </div>
+    );
+  };
+
+  if (!salesData.length) return (
+    <div className="space-y-5 animate-in fade-in duration-500">
+      <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+        <h3 className={`text-lg font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>כדי להתחיל, טען את הקבצים</h3>
+        <p className={`text-sm mt-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>הכי חשוב: שורות חשבוניות מכירה (מה נמכר), יתרות מלאי וכרטיס פריט. השאר מוסיפים פרטים.</p>
+      </div>
+      {renderFilesPanel()}
     </div>
   );
 
@@ -3501,7 +4387,7 @@ const renderProductRow = (p) => {
         <div className={`flex flex-wrap items-center gap-x-4 gap-y-2 px-4 py-3 text-sm ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
           <button type="button" onClick={()=>setSettingsOpen(v=>!v)} aria-expanded={settingsOpen}
             className={`flex items-center gap-2 px-3 py-1.5 rounded-lg border font-semibold ${isDarkMode?'border-slate-600 text-slate-200 hover:bg-slate-700':'border-slate-300 text-slate-700 hover:bg-slate-50'}`}>
-            <SlidersHorizontal className="w-4 h-4"/> הגדרות תכנון וקבצים
+            <SlidersHorizontal className="w-4 h-4"/> קבצים והגדרות תכנון
             <ChevronDown className={`w-4 h-4 transition-transform ${settingsOpen?'rotate-180':''}`}/>
           </button>
           <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>מלאי יעד</b> {monthsToStock} ח׳</span>
@@ -3510,11 +4396,11 @@ const renderProductRow = (p) => {
           <span className="opacity-40">|</span>
           <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>בסיס ממוצע</b> {avgWindowMonths===0?'כל הנתונים':`${avgWindowMonths} ח׳`}</span>
           <span className="opacity-40">|</span>
-          <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>קבצים</b> {(() => {
-            const ts = [invSlots.product?.importedAt, invSlots.masterCard?.importedAt].filter(Boolean);
-            return ts.length ? `עודכנו ${new Date(Math.max(...ts)).toLocaleDateString('he-IL')}` : 'לא נטענו';
-          })()}</span>
+          <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>קבצים</b> {filesSummary.loaded}/{filesSummary.total} טעונים</span>
           <div className="flex-1"/>
+          {filesSummary.stale.length>0 && (
+            <button type="button" onClick={()=>setSettingsOpen(true)} title={filesSummary.stale.join(', ')} className={`text-xs font-semibold px-2 py-1 rounded ${procChipCls('watch', isDarkMode)}`}>{filesSummary.stale.length===1?`"${filesSummary.stale[0]}" לא עודכן`:`${filesSummary.stale.length} קבצים לא עודכנו`}</button>
+          )}
           {!invSlots.product && !invSlots.masterCard && stockedCount===0 && (
             <button type="button" onClick={()=>setSettingsOpen(true)} className={`text-xs font-semibold px-2 py-1 rounded ${procChipCls('watch', isDarkMode)}`}>לא נטען קובץ מלאי</button>
           )}
@@ -3527,70 +4413,9 @@ const renderProductRow = (p) => {
         </div>
         {settingsOpen && (
           <div className={`border-t p-4 space-y-4 ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
-      {/* Top row: upload + config */}
+      {renderFilesPanel()}
+      {/* Planning parameters */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        {/* Inventory upload — two independent, optional slots */}
-        <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-          <h3 className={`font-bold text-sm mb-3 flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Package className="w-4 h-4 text-orange-500"/> מלאי נוכחי</h3>
-          {invUploadError && (
-            <div className={`flex items-start gap-2 px-3 py-2.5 rounded-xl text-xs font-medium mb-3 ${isDarkMode?'bg-red-500/10 text-red-300 border border-red-500/20':'bg-red-50 text-red-700 border border-red-200'}`}>
-              <TriangleAlert className="w-4 h-4 shrink-0 mt-0.5"/>
-              <span>{invUploadError}</span>
-            </div>
-          )}
-          <div className="space-y-3">
-            {[
-              { key:'product', label:'מלאי נוכחי לפי מוצר', sub:'יתרות, מק"ט, כמות' },
-              { key:'masterCard', label:'כרטיס פריט', sub:'ספק, עלות, מטבע, MOQ, זמן אספקה' },
-            ].map(slot => {
-              const f = invSlots[slot.key];
-              return (
-                <div key={slot.key}>
-                  <p className={`text-xs font-medium mb-1.5 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{slot.label} <span className={isDarkMode?'text-slate-600':'text-slate-300'}>· {slot.sub}</span></p>
-                  {f ? (
-                    <div className="flex items-center gap-2">
-                      <div className={`flex-1 flex items-center gap-2 px-3 py-2.5 rounded-xl ${isDarkMode?'bg-slate-700/50':'bg-slate-50'}`}>
-                        <FileSpreadsheet className="w-4 h-4 text-emerald-500 shrink-0"/>
-                        <div className="flex-1 min-w-0">
-                          <p className={`text-sm font-medium truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{f.name}</p>
-                          <p className={`text-[11px] ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
-                            {f.total} פריטים
-                            {f.withQty>0 && ` · ${f.withQty} כמות`}
-                            {f.withCost>0 && ` · ${f.withCost} עלות`}
-                            {f.withSupplier>0 && ` · ${f.withSupplier} ספק`}
-                          </p>
-                        </div>
-                      </div>
-                      <label className={`p-2.5 rounded-lg cursor-pointer transition-colors ${isDarkMode?'text-slate-400 hover:bg-slate-700':'text-slate-500 hover:bg-slate-100'}`} title="החלף קובץ">
-                        {invLoading?<Loader2 className="w-4 h-4 animate-spin"/>:<RefreshCw className="w-4 h-4"/>}
-                        <input type="file" accept=".csv,.xlsx,.xls" onChange={e=>handleInvUpload(e, slot.key)} className="hidden" disabled={invLoading}/>
-                      </label>
-                      <button onClick={()=>clearInvSlot(slot.key)} title="הסר תווית קובץ זה (לא מוחק את הנתונים שכבר מוזגו)" className={`p-2.5 rounded-lg ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-500 hover:bg-red-50'}`}><Trash2 className="w-4 h-4"/></button>
-                    </div>
-                  ) : (
-                    <label className={`flex items-center gap-3 px-3 py-3 rounded-xl border-2 border-dashed cursor-pointer transition-all group ${isDarkMode?'border-slate-600 hover:border-orange-500/50 hover:bg-orange-500/5':'border-slate-200 hover:border-orange-400 hover:bg-orange-50'}`}>
-                      {invLoading ? <Loader2 className="w-5 h-5 animate-spin text-orange-500 shrink-0"/> : (
-                        <div className={`p-2 rounded-lg shrink-0 ${isDarkMode?'bg-slate-700 group-hover:bg-orange-500/20':'bg-slate-100 group-hover:bg-orange-100'}`}><Upload className={`w-4 h-4 ${isDarkMode?'text-slate-400 group-hover:text-orange-400':'text-slate-400 group-hover:text-orange-600'}`}/></div>
-                      )}
-                      <span className={`text-xs font-medium ${isDarkMode?'text-slate-400 group-hover:text-orange-300':'text-slate-500 group-hover:text-orange-700'}`}>חסר — לחץ להעלאה</span>
-                      <input type="file" accept=".csv,.xlsx,.xls" onChange={e=>handleInvUpload(e, slot.key)} className="hidden" disabled={invLoading}/>
-                    </label>
-                  )}
-                </div>
-              );
-            })}
-          </div>
-          {(invSlots.product || invSlots.masterCard) && (
-            <>
-              <p className={`text-xs mt-3 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>סה"כ {stockedCount} מוצרים עם מלאי מכל הקבצים שיובאו</p>
-              <button onClick={clearInventory} className={`w-full mt-2 text-xs flex items-center justify-center gap-1.5 py-2 rounded-lg ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-500 hover:bg-red-50'}`}>
-                <Trash2 className="w-3.5 h-3.5"/> נקה את כל נתוני המלאי שיובאו
-              </button>
-            </>
-          )}
-          {!invSlots.product && !invSlots.masterCard && <p className={`text-xs mt-3 text-center ${isDarkMode?'text-slate-600':'text-slate-400'}`}>אפשר גם להזין ידנית — לחץ על שדה בטבלה</p>}
-        </div>
-
         {/* Planning config */}
         <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
           <h3 className={`font-bold text-sm mb-4 flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><SlidersHorizontal className="w-4 h-4 text-blue-500"/> פרמטרי תכנון</h3>
@@ -3835,9 +4660,11 @@ const renderProductRow = (p) => {
             const lateCount = overdueOrders.length;
             const priceUp = priceChanges.filter(p=>p.priceChangePct>0).length + poPriceDeviations.filter(o=>o.poPriceDiffPct>0).length;
             const urgentSched = scheduleData.filter(p=>p.urgency==='critical'||p.urgency==='urgent').length;
+            const activeShipCount = shipmentsEnriched.filter(x=>x.stage.idx<2).length;
+            const shipDelayedCount = shipmentsEnriched.filter(x=>x.stage.idx<2 && x.delayDays>0).length;
             const groups = [
-              ['החלטות', [['products','לפי מוצר',null], ['suppliers','לפי ספק',null], ['schedule','לוח זמנים', urgentSched>0?{n:urgentSched,k:'now'}:null]]],
-              ['מעקב', [['orders','הזמנות פתוחות', lateCount>0?{n:`${lateCount} באיחור`,k:'now'}:(openOrders.length?{n:openOrders.length,k:'muted'}:null)], ['prices','מחירי רכש', priceUp>0?{n:`${priceUp} עליות`,k:'watch'}:null]]],
+              ['החלטות', [['suppliers','ספקים',null], ['products','כל המוצרים',null], ['schedule','לוח זמנים', urgentSched>0?{n:urgentSched,k:'now'}:null]]],
+              ['מעקב', [['shipments','משלוחים בדרך', shipDelayedCount>0?{n:`${shipDelayedCount} נדחו`,k:'watch'}:(activeShipCount?{n:activeShipCount,k:'muted'}:null)], ['orders','הזמנות פתוחות', lateCount>0?{n:`${lateCount} באיחור`,k:'now'}:(openOrders.length?{n:openOrders.length,k:'muted'}:null)], ['prices','מחירי רכש', priceUp>0?{n:`${priceUp} עליות`,k:'watch'}:null]]],
               ['ניתוח', [['whatif','תרחיש',null], ['dead','מלאי תקוע', deadStockData.length?{n:deadStockData.length,k:'muted'}:null]]],
             ];
             return groups.map(([gLabel, tabs], gi) => (
@@ -3846,7 +4673,7 @@ const renderProductRow = (p) => {
                 <span className={`text-xs px-1.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{gLabel}</span>
                 {tabs.map(([mode,label,badge]) => (
                   <button key={mode} type="button" role="tab" aria-selected={viewMode===mode}
-                    onClick={() => { setViewMode(mode); if (mode!=='products') setActionFilter('all'); }}
+                    onClick={() => { setViewMode(mode); if (mode!=='products') setActionFilter('all'); if (mode==='suppliers' && viewMode==='suppliers') setVendor(null); }}
                     className={`flex items-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold whitespace-nowrap transition-colors ${viewMode===mode
                       ? (isDarkMode?'bg-slate-200 text-slate-900':'bg-slate-900 text-white')
                       : (isDarkMode?'text-slate-300 hover:bg-slate-700':'text-slate-600 hover:bg-slate-100')}`}>
@@ -3863,256 +4690,13 @@ const renderProductRow = (p) => {
           className={`flex items-center gap-2 px-4 py-2 rounded-xl border text-sm font-semibold transition-colors ${isDarkMode?'border-slate-600 text-slate-200 hover:bg-slate-700':'border-slate-300 text-slate-700 bg-white hover:bg-slate-50'}`}>
           <Sparkles className="w-4 h-4"/> תובנות רכש AI
         </button>
-        {viewMode==='suppliers' && supplierGroups.length>0 && (
-          <div className="flex items-center gap-3">
-            <span className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
-              {supplierGroups.reduce((a,g)=>a+g.totalUnits,0).toLocaleString()} יח'
-              {Object.entries(supplierGroups.reduce((acc,g)=>{
-                Object.entries(g.costByCurrency).forEach(([cur,amt])=>{ acc[cur]=(acc[cur]||0)+amt; });
-                return acc;
-              }, {})).map(([cur,amt]) => ` · ${formatUnitCost(Math.round(amt), cur==='ILS'?null:cur)}${cur!=='ILS'?` (${cur})`:''}`).join('')}
-              {' '}סה"כ
-            </span>
-            <button
-              onClick={() => {
-                setTimeout(() => {
-                  try {
-                    const riskColor = { critical:'#fee2e2', low:'#fef9c3', ok:'#f0fdf4', unknown:'#ffffff' };
-                    let html = `<html xmlns:o="urn:schemas-microsoft-com:office:office" xmlns:x="urn:schemas-microsoft-com:office:excel" xmlns="http://www.w3.org/TR/REC-html40"><head><meta charset="UTF-8"><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>הזמנות לספקים</x:Name><x:WorksheetOptions><x:DisplayRightToLeft/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml></head><body>`;
-                    supplierGroups.forEach(grp => {
-                      html += `<h3 style="font-family:Calibri;font-size:14px;font-weight:bold;margin-top:20px;color:#1e293b">הזמנה מ: ${grp.name}</h3>`;
-                      html += `<table border="1" cellpadding="6" cellspacing="0" style="border-collapse:collapse;font-family:Calibri;font-size:11px;direction:rtl;margin-bottom:8px">`;
-                      html += `<thead><tr style="background:#1e293b;color:#fff"><th>מק"ט</th><th>תאור מוצר</th><th>ABC</th><th>ממוצע/חודש</th><th>מלאי נוכחי</th><th>כיסוי</th><th style="background:#1d4ed8">להזמין (יח')</th><th>מחיר קניה</th><th>עלות הזמנה</th></tr></thead><tbody>`;
-                      grp.items.filter(p=>p.suggestedOrder>0).forEach(p => {
-                        const bg = riskColor[p.risk]||'#fff';
-                        const sym = currencySymbol(p.currency);
-                        html += `<tr style="background:${bg}"><td>${p.sku||p.name}</td><td>${p.name}</td><td style="text-align:center;font-weight:bold">${p.abc}</td><td style="text-align:center">${p.avgMonthly.toFixed(1)}</td><td style="text-align:center">${p.currentStock??'—'}</td><td style="text-align:center">${p.coverageDays!=null?p.coverageDays+' יום':'—'}</td><td style="text-align:center;font-weight:bold;font-size:13px;background:${p.risk==='critical'?'#fecaca':p.risk==='low'?'#fef3c7':'#dbeafe'};color:${p.risk==='critical'?'#dc2626':p.risk==='low'?'#d97706':'#1d4ed8'}">${p.suggestedOrder.toLocaleString()}</td><td style="text-align:center">${p.unitCostOriginal?sym+p.unitCostOriginal:''}</td><td style="text-align:center">${p.orderCostOriginal?sym+Math.round(p.orderCostOriginal).toLocaleString():''}</td></tr>`;
-                      });
-                      const subtotalText = Object.entries(grp.costByCurrency).map(([cur,amt]) => `${currencySymbol(cur==='ILS'?null:cur)}${Math.round(amt).toLocaleString()}${cur!=='ILS'?` ${cur}`:''}`).join(' + ');
-                      html += `<tr style="background:#f8fafc;font-weight:bold"><td colspan="6" style="text-align:right">סה"כ מ${grp.name}</td><td style="text-align:center;color:#1d4ed8">${grp.totalUnits.toLocaleString()}</td><td></td><td style="text-align:center;color:#16a34a">${subtotalText}</td></tr>`;
-                      html += `</tbody></table><br/>`;
-                    });
-                    html += `</body></html>`;
-                    const blob = new Blob(['\ufeff'+html], {type:'application/vnd.ms-excel;charset=utf-8'});
-                    const url  = URL.createObjectURL(blob);
-                    const a    = document.createElement('a');
-                    a.style.display='none';
-                    a.href=url;
-                    a.setAttribute('download', 'הזמנות_ספקים_'+new Date().toLocaleDateString('he-IL').replace(/\//g,'-')+'.xls');
-                    document.body.appendChild(a);
-                    a.click();
-                    setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 200);
-                  } catch(e) { console.error(e); }
-                }, 30);
-              }}
-              className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${isDarkMode?'bg-emerald-900/20 border-emerald-800 text-emerald-400 hover:bg-emerald-900/40':'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'}`}
-            >
-              <Download className="w-3.5 h-3.5"/> ייצוא הזמנות
-            </button>
-          </div>
-        )}
       </div>
 
-      {/* Supplier view */}
-      {viewMode==='suppliers' && (
-        <div className="space-y-3 animate-in fade-in duration-300">
-          {/* Inventory tied up per supplier + supplier reliability */}
-          {supplierGroups.length>0 && (
-            <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-              <div className={`px-5 py-3 border-b flex flex-wrap items-center justify-between gap-3 ${isDarkMode?'border-slate-700 bg-slate-900/40':'border-slate-100 bg-slate-50'}`}>
-                <div>
-                  <h4 className={`text-sm font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Wallet className="w-4 h-4 text-emerald-500"/>מלאי ומחזור לפי ספק</h4>
-                  <p className={`text-[11px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>ימי מלאי = כמה ימים המלאי יחזיק בקצב המכירות הנוכחי · מחזורים בשנה = כמה פעמים בשנה המלאי מתחלף (גבוה = טוב)</p>
-                </div>
-                <div className="flex items-center gap-4 text-xs">
-                  <span className={isDarkMode?'text-slate-400':'text-slate-500'}>סה"כ מלאי: <b className={isDarkMode?'text-white':'text-slate-800'}>{formatShort(inventoryTotals.stockValue)}</b></span>
-                  {inventoryTotals.daysOfInventory!=null && <span className={isDarkMode?'text-slate-400':'text-slate-500'}>ימי מלאי: <b className={isDarkMode?'text-white':'text-slate-800'}>{inventoryTotals.daysOfInventory}</b></span>}
-                  {inventoryTotals.turnsPerYear!=null && <span className={isDarkMode?'text-slate-400':'text-slate-500'}>מחזורים/שנה: <b className={isDarkMode?'text-white':'text-slate-800'}>{inventoryTotals.turnsPerYear.toFixed(1)}</b></span>}
-                </div>
-              </div>
-              <div className="overflow-x-auto max-h-80 overflow-y-auto">
-                <table className={`w-full text-xs text-right min-w-[760px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
-                  <thead className={`sticky top-0 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
-                    <tr>
-                      <th className="px-4 py-2">ספק</th>
-                      <th className="px-4 py-2">שווי מלאי ₪</th>
-                      <th className="px-4 py-2">ימי מלאי</th>
-                      <th className="px-4 py-2">מחזורים/שנה</th>
-                      <th className="px-4 py-2" title="ממוצע ימים מהזמנה ועד קבלה, לפי הזמנות שהתקבלו">אספקה בפועל</th>
-                      <th className="px-4 py-2" title="זמן האספקה שמשמש לחישוב ההזמנות">מוגדר</th>
-                      <th className="px-4 py-2" title="אחוז משלוחים שהגיעו עד 3 ימים אחרי התאריך הצפוי">בזמן</th>
-                      <th className="px-4 py-2">באיחור כעת</th>
-                    </tr>
-                  </thead>
-                  <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-                    {[...supplierGroups].sort((a,b)=>b.stockValue-a.stockValue).map(g => {
-                      const rel = supplierReliability[g.name];
-                      const configuredDays = Math.round(((leadTimeMap[g.name]!=null)?leadTimeMap[g.name]:leadTime)*30);
-                      const slower = rel?.avgLeadDays!=null && rel.avgLeadDays > configuredDays*1.2 + 3;
-                      const doiCls = g.daysOfInventory==null ? '' : g.daysOfInventory===Infinity || g.daysOfInventory>180 ? 'text-red-500 font-bold' : g.daysOfInventory>90 ? 'text-orange-500 font-bold' : (isDarkMode?'text-emerald-400':'text-emerald-600');
-                      return (
-                        <tr key={g.name} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
-                          <td className={`px-4 py-2 font-medium ${isDarkMode?'text-slate-200':'text-slate-800'}`}>{g.name}{g.missingCost>0 && <span title={`${g.missingCost} פריטים עם מלאי ללא מחיר קניה — לא נכללו בשווי`} className="text-orange-500 mr-1">⚠</span>}</td>
-                          <td className="px-4 py-2 tabular-nums">{g.stockValue>0?formatShort(g.stockValue):'—'}</td>
-                          <td className={`px-4 py-2 tabular-nums ${doiCls}`}>{g.daysOfInventory==null?'—':g.daysOfInventory===Infinity?'אין מכירות':g.daysOfInventory}</td>
-                          <td className="px-4 py-2 tabular-nums">{g.turnsPerYear!=null?g.turnsPerYear.toFixed(1):'—'}</td>
-                          <td className={`px-4 py-2 tabular-nums ${slower?'text-red-500 font-bold':''}`}>
-                            {rel?.avgLeadDays!=null ? `${rel.avgLeadDays} יום` : '—'}
-                            {rel?.estimatedN>0 && <span title="חלק מהקבלות הוסקו מכך שההזמנה נעלמה מקובץ Priority — תאריך הקבלה משוער" className="opacity-60"> ~</span>}
-                          </td>
-                          <td className="px-4 py-2 tabular-nums">
-                            {configuredDays} יום
-                            {slower && (
-                              <button onClick={()=>saveLeadTime(g.name, Math.max(0.5, Math.round(rel.avgLeadDays/30*2)/2))}
-                                title="עדכן את זמן האספקה של הספק לפי מה שקורה בפועל"
-                                className={`mr-2 text-[10px] px-1.5 py-0.5 rounded border ${isDarkMode?'border-blue-500/40 text-blue-300 hover:bg-blue-500/20':'border-blue-200 text-blue-600 hover:bg-blue-50'}`}>
-                                עדכן ל-{Math.max(0.5, Math.round(rel.avgLeadDays/30*2)/2)} ח'
-                              </button>
-                            )}
-                          </td>
-                          <td className={`px-4 py-2 tabular-nums ${rel?.onTimePct!=null && rel.onTimePct<70?'text-red-500 font-bold':''}`}>{rel?.onTimePct!=null?`${rel.onTimePct}% (${rel.onTimeBase})`:'—'}</td>
-                          <td className={`px-4 py-2 tabular-nums ${rel?.openOverdue>0?'text-red-500 font-bold':''}`}>{rel?.openOverdue>0?`${rel.openOverdue}`:'—'}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-              {Object.keys(supplierReliability).every(k => !supplierReliability[k].deliveries) && (
-                <p className={`px-5 py-2 text-[11px] border-t ${isDarkMode?'border-slate-700 text-slate-500':'border-slate-100 text-slate-400'}`}>
-                  נתוני "אספקה בפועל" ו"בזמן" יתמלאו מעצמם: כשמסמנים הזמנה כהתקבלה (✓), או כשמייבאים קובץ הזמנות פתוחות חדש מ-Priority והזמנה ישנה כבר לא מופיעה בו.
-                </p>
-              )}
-            </div>
-          )}
-          {supplierGroups.length === 0 ? (
-            <div className={`flex flex-col items-center justify-center py-16 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-              <Truck className={`w-10 h-10 mb-3 ${isDarkMode?'text-slate-600':'text-slate-300'}`}/>
-              <p className={`text-sm ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין מוצרים להצגה</p>
-            </div>
-          ) : supplierGroups.map(grp => {
-            const isOpen = expandedSuppliers.has(grp.name);
-            return (
-              <div key={grp.name} className={`rounded-2xl border overflow-hidden transition-all ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-                {/* Supplier header */}
-                <div onClick={()=>toggleSupplier(grp.name)} className="w-full text-right cursor-pointer">
-                  <div className={`px-5 py-4 flex items-center gap-4 transition-colors ${isDarkMode?'hover:bg-slate-700/50':'hover:bg-slate-50'}`}>
-                    {/* Avatar */}
-                    <div className={`w-10 h-10 rounded-xl flex items-center justify-center text-sm font-bold shrink-0 ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-50 text-blue-700'}`}>
-                      {grp.name.slice(0,2)}
-                    </div>
-                    {/* Name + badges */}
-                    <div className="flex-1 min-w-0">
-                      <div className="flex items-center gap-2 flex-wrap">
-                        <span className={`font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>{grp.name}</span>
-                        {grp.criticalCount>0 && <span className="text-xs px-2 py-0.5 rounded-full bg-red-100 text-red-700 font-medium">{grp.criticalCount} קריטי</span>}
-                      </div>
-                      <div className="flex items-center gap-4 mt-1 flex-wrap">
-                        <span className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{grp.items.filter(p=>p.suggestedOrder>0).length} פריטים להזמנה</span>
-                        {Object.entries(grp.costByCurrency).map(([cur, amt]) => (
-                          <span key={cur} className={`text-xs font-medium ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>
-                            {formatUnitCost(Math.round(amt), cur==='ILS'?null:cur)} עלות כוללת{cur!=='ILS'?` (${cur})`:''}
-                          </span>
-                        ))}
-                        {/* Per-supplier lead time override */}
-                        {editingLeadTime===grp.name ? (
-                          <input type="number" autoFocus min={0} step={0.5} defaultValue={leadTimeMap[grp.name]??''}
-                            onClick={e=>e.stopPropagation()}
-                            onBlur={e=>{saveLeadTime(grp.name,e.target.value);setEditingLeadTime(null);}}
-                            onKeyDown={e=>{if(e.key==='Enter'){saveLeadTime(grp.name,e.target.value);setEditingLeadTime(null);}if(e.key==='Escape')setEditingLeadTime(null);}}
-                            style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#3b82f6'}:{}}
-                            className="w-16 px-1.5 py-0.5 border-2 border-blue-500 rounded text-[11px] text-right focus:outline-none" placeholder="חודש"
-                          />
-                        ) : (
-                          <button onClick={e=>{e.stopPropagation();setEditingLeadTime(grp.name);}} title="זמן אספקה (לידטיים) לספק הזה — לחץ לעריכה, אחרת נלקח הזמן הגלובלי"
-                            className={`text-[11px] font-medium px-1.5 py-0.5 rounded border transition-colors ${leadTimeMap[grp.name]!=null
-                              ?(isDarkMode?'border-blue-500/40 bg-blue-500/10 text-blue-300 hover:bg-blue-500/20':'border-blue-200 bg-blue-50 text-blue-600 hover:bg-blue-100')
-                              :(isDarkMode?'border-dashed border-slate-700 text-slate-600 hover:text-blue-400':'border-dashed border-slate-300 text-slate-400 hover:text-blue-500')}`}>
-                            {leadTimeMap[grp.name]!=null ? `זמן אספקה: ${leadTimeMap[grp.name]} חודש` : `+זמן אספקה (גלובלי: ${leadTime})`}
-                          </button>
-                        )}
-                        {/* Per-supplier currency override — bypasses unreliable per-row detection from the import file */}
-                        {(() => {
-                          const supCurrencies = [...new Set(grp.items.map(p=>p.currency||'ILS'))];
-                          const uniform = supCurrencies.length===1 ? supCurrencies[0] : '';
-                          return (
-                            <select
-                              value={uniform}
-                              onClick={e=>e.stopPropagation()}
-                              onChange={e=>{e.stopPropagation(); saveSupplierCurrency(grp.name, e.target.value, grp.items);}}
-                              title="קבע את המטבע של הספק הזה לכל המוצרים שלו — עוקף את מה שזוהה (או לא זוהה) מקובץ הייבוא"
-                              style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#334155'}:{}}
-                              className={`text-[11px] font-medium px-1.5 py-0.5 rounded border cursor-pointer ${uniform===''?(isDarkMode?'border-orange-500/40 bg-orange-500/10 text-orange-300':'border-orange-300 bg-orange-50 text-orange-700'):(isDarkMode?'border-slate-700 text-slate-300':'border-slate-200 text-slate-600')}`}>
-                              {uniform==='' && <option value="" disabled>מטבע מעורב — בחר</option>}
-                              <option value="ILS">₪ ILS</option>
-                              <option value="EUR">€ EUR</option>
-                              <option value="USD">$ USD</option>
-                            </select>
-                          );
-                        })()}
-                      </div>
-                      {Object.keys(grp.costByCurrency).length>1 && (
-                        <p className={`text-[10px] mt-0.5 ${isDarkMode?'text-orange-500/70':'text-orange-600'}`}>⚠ הספק הזה מיובא במספר מטבעות — סימן לזיהוי מטבע לא אחיד מהקובץ. השתמש בבורר המטבע למעלה כדי לתקן לכל המוצרים של הספק בבת אחת</p>
-                      )}
-                    </div>
-                    {/* Total units badge */}
-                    <div className={`flex items-center gap-2 px-4 py-2 rounded-xl font-bold text-sm shrink-0 ${isDarkMode?'bg-blue-500/15 text-blue-300':'bg-blue-50 text-blue-700'}`}>
-                      <ShoppingCart className="w-4 h-4"/>
-                      {grp.totalUnits.toLocaleString()} יח'
-                    </div>
-                    {/* Expand arrow */}
-                    <ChevronDown className={`w-5 h-5 shrink-0 transition-transform duration-200 ${isDarkMode?'text-slate-500':'text-slate-400'} ${isOpen?'rotate-180':''}`}/>
-                  </div>
-                </div>
+      {/* Suppliers: list → supplier page */}
+      {viewMode==='suppliers' && renderVendors()}
 
-                {/* Expanded items — same table as "לפי מוצר" tab, scoped to this supplier */}
-                {isOpen && (
-                  <div className={`border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
-                    <div className="overflow-x-auto -mx-1 px-1 pt-2">
-                      <table data-proctable className={`text-sm text-right ${isDarkMode?'text-slate-300':'text-slate-600'}`} style={{tableLayout:'fixed', width: PROC_COL_KEYS.reduce((s,k)=>s+(colWidths[k]||PROC_COL_DEFAULTS[k]),0)}}>
-                        <colgroup>{PROC_COL_KEYS.map(k=><col key={k} data-colkey={k} style={{width: colWidths[k]||PROC_COL_DEFAULTS[k]}}/>)}</colgroup>
-                        <thead className={`text-xs uppercase tracking-wide ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
-                          {renderProcTableHeader(grp.items)}
-                        </thead>
-                        <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-                          {grp.items.map(renderProductRow)}
-                        </tbody>
-                      </table>
-                    </div>
-                    {/* Supplier order draft — supplier-facing file + register as open orders */}
-                    {grp.items.some(p=>p.suggestedOrder>0) && (
-                      <div className={`flex flex-wrap items-center gap-2 px-5 py-3 border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
-                        <button onClick={()=>exportSupplierDraft(grp)}
-                          title="קובץ נקי לשליחה לספק: מק״ט, תאור, כמות מעוגלת ל-MOQ, מחיר במטבע של הספק — בלי נתונים פנימיים"
-                          className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${isDarkMode?'bg-emerald-900/20 border-emerald-800 text-emerald-400 hover:bg-emerald-900/40':'bg-emerald-50 text-emerald-700 border-emerald-200 hover:bg-emerald-100'}`}>
-                          <Download className="w-3.5 h-3.5"/> טיוטת הזמנה לספק
-                        </button>
-                        <button onClick={()=>registerSupplierDraftAsOrders(grp)}
-                          title="אחרי ששלחת את ההזמנה: רשום את השורות כהזמנות פתוחות, כדי שהמערכת תחשב אותן כ'בדרך' ולא תמליץ להזמין שוב"
-                          className={`flex items-center gap-2 px-3 py-1.5 rounded-xl text-xs font-medium border transition-colors ${isDarkMode?'bg-blue-900/20 border-blue-800 text-blue-300 hover:bg-blue-900/40':'bg-blue-50 text-blue-700 border-blue-200 hover:bg-blue-100'}`}>
-                          <ShoppingCart className="w-3.5 h-3.5"/> רשום כהזמנות פתוחות
-                        </button>
-                      </div>
-                    )}
-                    {/* Supplier total footer */}
-                    <div className={`flex justify-between items-center px-5 py-3 flex-wrap gap-2 ${isDarkMode?'bg-slate-700/30':'bg-slate-50'}`}>
-                      <span className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>סה"כ הזמנה מ{grp.name}</span>
-                      <div className="flex items-center gap-4">
-                        {Object.entries(grp.costByCurrency).map(([cur,amt]) => (
-                          <span key={cur} className={`text-sm font-bold ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>
-                            {formatUnitCost(Math.round(amt), cur==='ILS'?null:cur)}{cur!=='ILS'?` ${cur}`:''}
-                          </span>
-                        ))}
-                        <span className={`font-bold text-sm ${isDarkMode?'text-white':'text-slate-800'}`}>{grp.totalUnits.toLocaleString()} יח'</span>
-                      </div>
-                    </div>
-                  </div>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      )}
+      {/* Shipments from the forwarder's daily file */}
+      {viewMode==='shipments' && renderShipments()}
 
       {/* Product table — shown only in products mode */}
       {/* ══ OPEN ORDERS VIEW ══ */}
@@ -4628,6 +5212,7 @@ const renderProductRow = (p) => {
               <div className={`p-2.5 rounded-xl ${isDarkMode?'bg-emerald-500/15':'bg-emerald-50'}`}><DollarSign className="w-5 h-5 text-emerald-500"/></div>
               <div>
                 <p className={`font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>מחירי רכש והוצאות לספקים</p>
+                {onOpenSupplierAnalytics && <button type="button" onClick={onOpenSupplierAnalytics} className={`text-xs font-semibold ${isDarkMode?'text-blue-300':'text-blue-700'} hover:underline`}>לניתוח ההוצאות המלא לפי חודשים ←</button>}
                 <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>שינויי מחיר קניה, הזמנות שמחירן חורג מהקטלוג, ומגמת ההוצאה לכל ספק</p>
               </div>
             </div>
@@ -6428,8 +7013,8 @@ const App = () => {
     { id:'overview', label:'סקירה כללית', icon:Home, color:'text-sky-400' },
     { id:'sales', label:'מכירות', icon:TrendingUp, color:'text-blue-400' },
     { id:'customers', label:'לקוחות', icon:User, color:'text-pink-400' },
-    { id:'suppliers', label:'רכש וספקים', icon:Truck, color:'text-emerald-400' },
-    { id:'procurement', label:'תכנון רכש', icon:ShoppingCart, color:'text-orange-400' },
+    // "רכש וספקים" and "תכנון רכש" are one screen now; the old spend analytics stay reachable from "מחירי רכש".
+    { id:'procurement', label:'רכש', icon:ShoppingCart, color:'text-orange-400' },
     { id:'summary', label:'רווח והפסד', icon:BarChart3, color:'text-violet-400' },
   ];
 
@@ -6685,7 +7270,7 @@ const App = () => {
 
           {/* Procurement Planning */}
           {activeTab==='procurement' && (
-            <ProcurementPage salesData={salesData} suppliersData={suppliersData} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} />
+            <ProcurementPage salesData={salesData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} />
           )}
 
           {/* Summary */}
