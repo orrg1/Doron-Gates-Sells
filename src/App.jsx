@@ -2,6 +2,7 @@ import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom';
 import * as XLSXLib from 'xlsx';
 import { queueDataset } from './cloud.js';
+import { pullAllFromPriority, describeAll } from './priority.js';
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
 if (typeof window !== 'undefined' && !window.XLSX) window.XLSX = XLSXLib;
@@ -2285,7 +2286,7 @@ const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSu
 
   // ── Import open orders from Priority Excel ──────────────────────
   const [ordersUploadError, setOrdersUploadError] = useState(null);
-  const handlePriorityOrdersUpload = async (e) => {
+  const handlePriorityOrdersUpload = async (e, opts = {}) => {
     const file = e.target.files?.[0]; if (!file) return;
     setOrdersLoading(true);
     setOrdersUploadError(null);
@@ -2325,7 +2326,7 @@ const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSu
       setImportBanner({ count: parsed.length, skipped: rows.length - parsed.length });
       setTimeout(() => setImportBanner(null), 6000);
       setOrdersLoading(false);
-      setViewMode('orders');
+      if (!opts.silent) setViewMode('orders');
     };
     if (file.name.match(/\.xlsx?$/) && window.XLSX) {
       const r = new FileReader();
@@ -3896,6 +3897,83 @@ const renderProductRow = (p) => {
 
 
 
+  // ══ PRIORITY SYNC — pulls the same data straight from Priority (read-only) ══
+  // The pulled data is turned into the same sheets the uploads expect and fed
+  // to the same handlers, so nothing downstream behaves differently.
+  const [prioSync, setPrioSync] = useState({ busy:false, log:[], errors:{}, at: (() => { try { return Number(localStorage.getItem('prioritySyncAt'))||null; } catch { return null; } })() });
+  const [prioFields, setPrioFields] = useState(null);
+  const syncFromPriority = async () => {
+    const log = [];
+    const report = (t) => { log.push(t); setPrioSync(s => ({ ...s, log:[...log] })); };
+    setPrioSync(s => ({ ...s, busy:true, log:[], errors:{} }));
+    const asEvent = (file) => ({ target:{ files:[file], value:'' } });
+    try {
+      const r = await pullAllFromPriority({ report });
+      if (r.files.items) {
+        handleInvUpload(asEvent(r.files.items), 'product');
+        // The same pull also carries the item-card data (supplier, price, currency, minimum).
+        setInvSlots(prev => {
+          const next = { ...prev, masterCard: { name:r.files.items.name, total:r.itemsInfo.count, withQty:0, withCost:0, withMinStock:0, withSupplier:0, importedAt:Date.now() } };
+          try { localStorage.setItem('procurementInvSlots', JSON.stringify(next)); } catch { /* best-effort */ }
+          return next;
+        });
+        report(`פריטים: ${r.itemsInfo.count.toLocaleString()} פריטים פעילים${r.itemsInfo.hasBalances ? '' : ' (בלי יתרות מלאי)'}`);
+      }
+      if (r.files.openOrders) { handlePriorityOrdersUpload(asEvent(r.files.openOrders), { silent:true }); report('הזמנות רכש פתוחות: עודכן'); }
+      if (r.files.salesLines) await handleProcFile(asEvent(r.files.salesLines), 'salesLines');
+      if (r.files.purchaseLines) await handleProcFile(asEvent(r.files.purchaseLines), 'purchaseLines');
+      const okCount = Object.keys(r.files).filter(k => r.files[k]).length;
+      if (okCount) { const at = Date.now(); try { localStorage.setItem('prioritySyncAt', String(at)); } catch { /* best-effort */ } setPrioSync(s => ({ ...s, at })); }
+      report(Object.keys(r.errors).length ? `הסתיים עם ${Object.keys(r.errors).length} בעיות — פרטים למעלה` : 'הסנכרון הסתיים בהצלחה');
+      setPrioSync(s => ({ ...s, busy:false, errors:r.errors }));
+    } catch (err) {
+      report(`הסנכרון נכשל: ${err.message || err}`);
+      setPrioSync(s => ({ ...s, busy:false, errors:{ all: err.message || String(err) } }));
+    }
+  };
+  const showPriorityFields = async () => {
+    setPrioFields({ loading:true });
+    try { setPrioFields({ data: await describeAll() }); } catch (e) { setPrioFields({ error: e.message || String(e) }); }
+  };
+  const renderPriorityCard = () => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const hasErr = Object.keys(prioSync.errors||{}).length > 0;
+    return (
+      <div className={`rounded-xl border p-4 space-y-3 ${isDarkMode?'bg-blue-500/5 border-blue-500/30':'bg-blue-50/60 border-blue-200'}`}>
+        <div className="flex flex-wrap items-center gap-3">
+          <div className="flex-1 min-w-[220px]">
+            <p className={`font-bold text-sm ${strong}`}>סנכרון ישיר מ-Priority</p>
+            <p className={`text-xs mt-0.5 ${muted}`}>מושך פריטים, יתרות מלאי, הזמנות רכש פתוחות, חשבוניות מכירה וחשבוניות ספק (24 חודשים) — במקום להעלות קבצים. קריאה בלבד, שום דבר לא משתנה ב-Priority. דוח המשלוחים מהמשלח עדיין נטען כקובץ.</p>
+            {prioSync.at && <p className={`text-xs mt-1 ${muted}`}>סנכרון אחרון: {new Date(prioSync.at).toLocaleString('he-IL', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</p>}
+          </div>
+          <button type="button" onClick={syncFromPriority} disabled={prioSync.busy}
+            className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 ${prioSync.busy?'opacity-60 cursor-wait':''}`}>
+            {prioSync.busy ? <Loader2 className="w-4 h-4 animate-spin"/> : <Activity className="w-4 h-4"/>}
+            {prioSync.busy ? 'מסנכרן…' : 'סנכרן עכשיו'}
+          </button>
+          <button type="button" onClick={showPriorityFields} className={`text-xs font-semibold underline ${muted}`}>בדיקת שדות</button>
+        </div>
+        {prioSync.log.length > 0 && (
+          <ul role="status" aria-live="polite" className={`text-xs space-y-0.5 ${hasErr?(isDarkMode?'text-amber-200':'text-amber-800'):muted}`}>
+            {prioSync.log.map((t,i) => <li key={i}>• {t}</li>)}
+          </ul>
+        )}
+        {prioFields && (
+          <div className="space-y-1">
+            {prioFields.loading && <p className={`text-xs ${muted}`}>טוען רשימת שדות…</p>}
+            {prioFields.error && <p className="text-xs text-red-600">{prioFields.error}</p>}
+            {prioFields.data && (<>
+              <p className={`text-xs ${muted}`}>אם משהו לא נמשך נכון — העתק את זה ושלח:</p>
+              <textarea readOnly dir="ltr" rows={6} value={JSON.stringify(prioFields.data)} onFocus={e=>e.target.select()}
+                className={`w-full text-[11px] font-mono p-2 rounded border ${isDarkMode?'bg-slate-900 border-slate-700 text-slate-300':'bg-white border-slate-300 text-slate-700'}`}/>
+            </>)}
+          </div>
+        )}
+      </div>
+    );
+  };
+
   // ══ FILES PANEL — every upload explains exactly which file it expects ══
   const FILE_SLOT_DEFS = [
     { key:'inventory', title:'יתרות מלאי', report:'דוח יתרות מלאי מ-Priority (מלאי נוכחי לפי מוצר)', gives:'כמה יש עכשיו במחסן מכל מוצר', cols:['מק"ט','תאור מוצר','יתרה'], freq:'לפני כל סבב הזמנות', staleDays:7 },
@@ -3942,6 +4020,7 @@ const renderProductRow = (p) => {
     const strong = isDarkMode?'text-slate-100':'text-slate-800';
     return (
       <section aria-label="קבצים" className="space-y-3">
+        {renderPriorityCard()}
         <div className="flex flex-wrap items-baseline gap-2">
           <h3 className={`text-base font-bold ${strong}`}>קבצים</h3>
           <span className={`text-sm ${muted}`}>כל משבצת מקבלת קובץ אחד מסוים. אם תעלה קובץ למשבצת הלא נכונה, תופיע הודעה לאיזו משבצת הוא שייך.</span>
