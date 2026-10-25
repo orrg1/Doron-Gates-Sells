@@ -405,6 +405,7 @@ const KPICard = ({ title, value, formatted, subtext, icon: Icon, color, trend, s
 const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUploadMonthly, onUploadProduct, onClearMonthly, onClearProduct, loading, uploadError, uploadSuccess, onDismissError, excludeCurrentMonth }) => {
   const [search, setSearch] = useState('');
   const [sortConfig, setSortConfig] = useState({ key:'totalRevenue', direction:'desc' });
+  const { sortRows, sortTh } = useTableSort();
   const [expandedCustomer, setExpandedCustomer] = useState(null);
   const [customerPage, setCustomerPage] = useState(1);
   const customerItemsPerPage = 50;
@@ -552,20 +553,20 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
   const filtered = useMemo(() => {
     let data = customers;
     if (search) data = data.filter(c=>smartMatch(c.name, search));
+    const STATUS_LABEL = { new:'חדש', churned:'נטש', active:'פעיל' };
+    const get = sortConfig.key==='status' ? (c => STATUS_LABEL[c.status]||'פעיל') : (c => c[sortConfig.key]);
+    const mul = sortConfig.direction==='asc' ? 1 : -1;
     return [...data].sort((a,b)=>{
-      const va=a[sortConfig.key], vb=b[sortConfig.key];
-      if (typeof va==='string') {
-        const cmp = va.localeCompare(vb,'he');
-        return sortConfig.direction==='asc'?cmp:-cmp;
-      }
-      return sortConfig.direction==='asc'?(va-vb):(vb-va);
+      const va=sortKeyOf(get(a)), vb=sortKeyOf(get(b));
+      if (va===null || vb===null) return va===vb ? 0 : va===null ? 1 : -1;
+      return compareSortKeys(va, vb) * mul;
     });
   }, [customers, search, sortConfig]);
   useEffect(() => setCustomerPage(1), [search, sortConfig, customers]);
   const customerTotalPages = Math.ceil(filtered.length / customerItemsPerPage) || 1;
   const paginatedCustomers = useMemo(() => filtered.slice((customerPage-1)*customerItemsPerPage, customerPage*customerItemsPerPage), [filtered, customerPage]);
 
-  const reqSort = (key) => setSortConfig(p=>({ key, direction:p.key===key&&p.direction==='asc'?'desc':'asc' }));
+  const reqSort = (key, first='asc') => setSortConfig(p=>({ key, direction: p.key===key ? (p.direction==='asc'?'desc':'asc') : first }));
 
   const statusBadge = (status) => {
     if (status==='new') return <span className={`text-[10px] font-bold px-2 py-0.5 rounded-full ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-100 text-blue-700'}`}>חדש</span>;
@@ -810,12 +811,12 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
               <table className={`w-full text-sm text-right ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
                 <thead className={`text-[11px] font-semibold uppercase tracking-widest sticky top-0 z-10 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
                   <tr>
-                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" onClick={()=>reqSort('name')}>לקוח</th>
-                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" onClick={()=>reqSort('abc')}>ABC</th>
-                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" onClick={()=>reqSort('totalRevenue')}>הכנסה כוללת</th>
-                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" onClick={()=>reqSort('avgMonthly')}>ממוצע חודשי</th>
-                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" onClick={()=>reqSort('trend')}>מגמה</th>
-                    <th className="px-4 py-3">סטטוס</th>
+                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" aria-sort={sortConfig.key==='name'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('name','asc')}>לקוח<SortIcon colKey="name" sortConfig={sortConfig}/></th>
+                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" aria-sort={sortConfig.key==='abc'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('abc','asc')}>ABC<SortIcon colKey="abc" sortConfig={sortConfig}/></th>
+                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" aria-sort={sortConfig.key==='totalRevenue'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('totalRevenue','desc')}>הכנסה כוללת<SortIcon colKey="totalRevenue" sortConfig={sortConfig}/></th>
+                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" aria-sort={sortConfig.key==='avgMonthly'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('avgMonthly','desc')}>ממוצע חודשי<SortIcon colKey="avgMonthly" sortConfig={sortConfig}/></th>
+                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" aria-sort={sortConfig.key==='trend'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('trend','desc')}>מגמה<SortIcon colKey="trend" sortConfig={sortConfig}/></th>
+                    <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" aria-sort={sortConfig.key==='status'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('status','asc')}>סטטוס<SortIcon colKey="status" sortConfig={sortConfig}/></th>
                     {productData.length>0 && <th className="px-4 py-3"></th>}
                   </tr>
                 </thead>
@@ -867,15 +868,15 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
                                 <table className="w-full text-xs text-right">
                                   <thead className={`${isDarkMode?'text-slate-500':'text-slate-400'}`}>
                                     <tr>
-                                      <th className="px-2 py-1.5 font-medium">מוצר</th>
-                                      <th className="px-2 py-1.5 font-medium">מק"ט</th>
-                                      <th className="px-2 py-1.5 font-medium">כמות</th>
-                                      <th className="px-2 py-1.5 font-medium">הכנסה</th>
-                                      <th className="px-2 py-1.5 font-medium">% מהלקוח</th>
+                                      {sortTh('custProducts','product','מוצר',{className:'px-2 py-1.5 font-medium'})}
+                                      {sortTh('custProducts','sku','מק"ט',{className:'px-2 py-1.5 font-medium'})}
+                                      {sortTh('custProducts','quantity','כמות',{className:'px-2 py-1.5 font-medium',firstDir:'desc'})}
+                                      {sortTh('custProducts','revenue','הכנסה',{className:'px-2 py-1.5 font-medium',firstDir:'desc'})}
+                                      {sortTh('custProducts','pct','% מהלקוח',{className:'px-2 py-1.5 font-medium',firstDir:'desc'})}
                                     </tr>
                                   </thead>
                                   <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-200'}`}>
-                                    {myProducts.map((p,i) => (
+                                    {sortRows('custProducts', myProducts, { pct: p => p.revenue }).map((p,i) => (
                                       <tr key={i}>
                                         <td className={`px-2 py-1.5 ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{p.product}</td>
                                         <td className={`px-2 py-1.5 font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.sku}</td>
@@ -1422,6 +1423,77 @@ const ChatWindow = ({ isOpen, onClose, onSend, messages, thinking, isDarkMode })
 const SortIcon = ({ colKey, sortConfig }) => {
   if (sortConfig.key !== colKey) return <ArrowDown className="w-3 h-3 opacity-20 inline ml-1"/>;
   return sortConfig.direction === 'asc' ? <ArrowDown className="w-3 h-3 inline ml-1 text-blue-500 rotate-180"/> : <ArrowDown className="w-3 h-3 inline ml-1 text-blue-500"/>;
+};
+
+
+// ─── Click-to-sort for any table ───────────────────────────────────
+// One hook per page; every table on it gets an id. Click a header: sort up,
+// click again: down, third click: back to the table's own default order.
+// Values are compared smartly — numbers as numbers, dates (dd/mm/yyyy,
+// yyyy-mm-dd, mm-yy) as dates, text in Hebrew order — and empty cells always
+// go to the bottom.
+const sortKeyOf = (v) => {
+  if (v == null || v === '' || (typeof v === 'number' && isNaN(v))) return null;
+  if (typeof v === 'number') return v;
+  if (typeof v === 'boolean') return v ? 1 : 0;
+  if (v instanceof Date) return isNaN(v) ? null : v.getTime();
+  const s = String(v).trim();
+  if (s === '—' || s === '-') return null;
+  let m = s.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (m) return Date.UTC(+m[1], +m[2]-1, +m[3]);
+  m = s.match(/^(\d{1,2})[/.](\d{1,2})[/.](\d{2,4})$/);
+  if (m) { const y = m[3].length === 2 ? 2000 + +m[3] : +m[3]; return Date.UTC(y, +m[2]-1, +m[1]); }
+  m = s.match(/^(\d{1,2})-(\d{2})$/); // "MM-YY" month keys
+  if (m) return Date.UTC(2000 + +m[2], +m[1]-1, 1);
+  return s;
+};
+const compareSortKeys = (a, b) => {
+  if (typeof a === 'number' && typeof b === 'number') return a - b;
+  if (typeof a === 'number') return -1;
+  if (typeof b === 'number') return 1;
+  return a.localeCompare(b, 'he', { numeric: true, sensitivity: 'base' });
+};
+const useTableSort = () => {
+  const [sorts, setSorts] = useState({});
+  const toggle = (id, key, firstDir) => setSorts(prev => {
+    const cur = prev[id];
+    const next = !cur || cur.key !== key ? { key, dir: firstDir } : cur.dir === firstDir ? { key, dir: firstDir === 'asc' ? 'desc' : 'asc' } : null;
+    return { ...prev, [id]: next };
+  });
+  // getters: { key: row => value } — anything not listed is read as row[key].
+  const sortRows = (id, rows, getters = {}) => {
+    const st = sorts[id];
+    if (!st || !rows) return rows;
+    const get = getters[st.key] || (r => r?.[st.key]);
+    const mul = st.dir === 'asc' ? 1 : -1;
+    return rows.map((r, i) => [r, sortKeyOf(get(r)), i]).sort((x, y) => {
+      if (x[1] === null || y[1] === null) return x[1] === y[1] ? x[2] - y[2] : x[1] === null ? 1 : -1;
+      return compareSortKeys(x[1], y[1]) * mul || x[2] - y[2];
+    }).map(x => x[0]);
+  };
+  const sortIcon = (id, key) => {
+    const st = sorts[id];
+    const on = st && st.key === key;
+    return <ArrowDown aria-hidden="true" className={`w-3 h-3 shrink-0 transition-transform ${on ? 'text-blue-500' : 'opacity-25'} ${on && st.dir === 'asc' ? 'rotate-180' : ''}`}/>;
+  };
+  const ariaSort = (id, key) => { const st = sorts[id]; return st && st.key === key ? (st.dir === 'asc' ? 'ascending' : 'descending') : 'none'; };
+  const sortButton = (id, key, label, firstDir = 'asc') => (
+    <button type="button" onClick={(e) => { e.stopPropagation(); toggle(id, key, firstDir); }}
+      title="לחץ למיון"
+      className="inline-flex items-center gap-1 text-right hover:text-blue-500 focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded">
+      <span>{label}</span>{sortIcon(id, key)}
+    </button>
+  );
+  // <th> for real tables
+  const sortTh = (id, key, label, { className = 'px-4 py-3', firstDir = 'asc', style } = {}) => (
+    <th key={key} className={className} style={style} aria-sort={ariaSort(id, key)}>{sortButton(id, key, label, firstDir)}</th>
+  );
+  // header cell for div-grid "tables"
+  const sortHead = (id, key, label, { className = '', firstDir = 'asc' } = {}) => (
+    <div key={key} className={className}>{sortButton(id, key, label, firstDir)}</div>
+  );
+  const setSort = (id, key, dir = 'asc') => setSorts(prev => ({ ...prev, [id]: key ? { key, dir } : null }));
+  return { sortRows, sortTh, sortHead, setSort, sortState: sorts };
 };
 
 
@@ -2187,7 +2259,8 @@ const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSu
     try { return JSON.parse(localStorage.getItem('openOrders')||'[]'); } catch { return []; }
   });
   const [ordersFileName, setOrdersFileName] = useState(() => localStorage.getItem('ordersFileName')||'');
-  const [ordersSortConfig, setOrdersSortConfig] = useState({ key:null, direction:'asc' });
+  const [ordersSortConfig] = useState({ key:null, direction:'asc' }); // default order; header clicks sort via useTableSort
+  const { sortRows, sortTh, sortHead, setSort, sortState } = useTableSort();
 
   // ── Currency-aware open orders ──────────────────────────────────
   // parsePriorityOrders never captured a currency (Priority's "שווי יתרה"
@@ -2380,7 +2453,6 @@ const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSu
       return ordersSortConfig.direction === 'asc' ? cmp : -cmp;
     });
   }, [ordersEnriched, ordersSortConfig, showOverdueOnly]);
-  const reqOrdersSort = (key) => setOrdersSortConfig(p => ({ key, direction: p.key===key && p.direction==='asc' ? 'desc' : 'asc' }));
 
   const saveStock = (key, val) => {
     const n = parseFloat(val);
@@ -3538,7 +3610,7 @@ const SeasonalityButton = (p) => (
             className={`px-4 py-2.5 relative whitespace-nowrap select-none ${sortKey?`cursor-pointer hover:text-blue-500`:''} ${extraCls}`}
             style={{ width: colWidths[key], maxWidth: colWidths[key] }}
             onClick={sortKey ? ()=>reqSort(sortKey) : undefined}>
-            {PROC_COL_LABELS[key]}{sortKey?' ↕':''}
+            {PROC_COL_LABELS[key]}{sortKey && <SortIcon colKey={sortKey} sortConfig={sortConfig}/>}
             {renderColResizeHandle(key, items)}
           </th>
         );
@@ -3779,8 +3851,9 @@ const renderProductRow = (p) => {
                 <section>
                   <h3 className={`text-sm font-bold mb-2 ${strong}`}>עסקאות אחרונות</h3>
                   <div className={`rounded-xl border overflow-hidden text-sm ${isDarkMode?'border-slate-700':'border-slate-200'}`}>
-                    {lines.map((l,i) => (
-                      <div key={i} className={`grid gap-2 px-3 py-2 ${i?(isDarkMode?'border-t border-slate-700':'border-t border-slate-100'):''}`} style={{gridTemplateColumns:'70px minmax(0,1fr) 56px 90px'}}>
+                    <div className={`grid gap-2 px-3 py-2 text-xs font-semibold ${isDarkMode?'bg-slate-900/60 text-slate-400':'bg-slate-50 text-slate-500'}`} style={{gridTemplateColumns:'70px minmax(0,1fr) 56px 90px'}}>{sortHead('drawerLines','d','תאריך',{firstDir:'desc'})}{sortHead('drawerLines','c','לקוח')}{sortHead('drawerLines','q','כמות',{firstDir:'desc'})}{sortHead('drawerLines','inv','חשבונית')}</div>
+                    {sortRows('drawerLines', lines).map((l,i) => (
+                      <div key={i} className={`grid gap-2 px-3 py-2 ${isDarkMode?'border-t border-slate-700':'border-t border-slate-100'}`} style={{gridTemplateColumns:'70px minmax(0,1fr) 56px 90px'}}>
                         <span className={muted}>{isoToDisplay(l.d)}</span>
                         <span className={`truncate ${strong}`} title={l.c}>{l.c}</span>
                         <b className={`tabular-nums ${l.q<0?(isDarkMode?'text-red-300':'text-red-700'):strong}`}>{l.q<0?`${l.q} (החזרה)`:l.q}</b>
@@ -3800,8 +3873,8 @@ const renderProductRow = (p) => {
                 <section>
                   <h3 className={`text-sm font-bold mb-2 ${strong}`}>קניות אחרונות</h3>
                   <div className={`rounded-xl border overflow-hidden text-sm ${isDarkMode?'border-slate-700':'border-slate-200'}`}>
-                    <div className={`grid gap-2 px-3 py-2 text-xs font-semibold ${isDarkMode?'bg-slate-900/60 text-slate-400':'bg-slate-50 text-slate-500'}`} style={{gridTemplateColumns:'70px minmax(0,1fr) 50px 80px 76px'}}><span>חשבונית</span><span>ספק</span><span>כמות</span><span>מחיר יח׳</span><span>מהזמנה</span></div>
-                    {buys.map((b,i) => (
+                    <div className={`grid gap-2 px-3 py-2 text-xs font-semibold ${isDarkMode?'bg-slate-900/60 text-slate-400':'bg-slate-50 text-slate-500'}`} style={{gridTemplateColumns:'70px minmax(0,1fr) 50px 80px 76px'}}>{sortHead('drawerBuys','d','חשבונית',{firstDir:'desc'})}{sortHead('drawerBuys','s','ספק')}{sortHead('drawerBuys','q','כמות',{firstDir:'desc'})}{sortHead('drawerBuys','p','מחיר יח׳',{firstDir:'desc'})}{sortHead('drawerBuys','lead','מהזמנה',{firstDir:'desc'})}</div>
+                    {sortRows('drawerBuys', buys, { lead: b => b.pod ? daysBetween(b.pod, b.d) : null }).map((b,i) => (
                       <div key={i} className={`grid gap-2 px-3 py-2 ${isDarkMode?'border-t border-slate-700':'border-t border-slate-100'}`} style={{gridTemplateColumns:'70px minmax(0,1fr) 50px 80px 76px'}}>
                         <span className={muted}>{isoToDisplay(b.d)}</span>
                         <span className={`truncate ${strong}`} title={b.s}>{b.s}</span>
@@ -4208,7 +4281,13 @@ const renderProductRow = (p) => {
     const cardCls = `rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`;
     const headCls = `text-xs font-semibold ${isDarkMode?'bg-slate-900/60 text-slate-400':'bg-slate-50 text-slate-500'}`;
     if (!vendorObj) {
-      const list = vendors.filter(v => !vendorSearch || smartMatch(v.name, vendorSearch) || v.items.some(p => smartMatch(p.name, vendorSearch) || smartMatch(p.sku, vendorSearch)));
+      const list = sortRows('vendors', vendors.filter(v => !vendorSearch || smartMatch(v.name, vendorSearch) || v.items.some(p => smartMatch(p.name, vendorSearch) || smartMatch(p.sku, vendorSearch))), {
+        toOrder: v => v.toOrder.length || null,
+        worst: v => ({ now:0, soon:1, watch:2, unknown:3, ok:4 }[v.worst] ?? 5),
+        incoming: v => (v.ordersCount || 0) + v.ships.length || null,
+        spend12: v => v.pb?.spend12 || null,
+        lead: v => v.actualLeadDays ?? v.lead * 30,
+      });
       const grid = { gridTemplateColumns:'minmax(0,1.6fr) 140px 140px 170px 120px 120px 130px 20px' };
       return (
         <div className={cardCls}>
@@ -4222,7 +4301,7 @@ const renderProductRow = (p) => {
           <div className="overflow-x-auto">
             <div className="min-w-[1000px]">
               <div className={`grid gap-4 px-5 py-2.5 ${headCls}`} style={grid}>
-                <div>ספק</div><div>להזמין</div><div>מצב</div><div>בדרך</div><div>הזמנה אחרונה</div><div>קניות 12 ח׳</div><div>זמן אספקה</div><div/>
+                {sortHead('vendors','name','ספק')}{sortHead('vendors','toOrder','להזמין',{firstDir:'desc'})}{sortHead('vendors','worst','מצב')}{sortHead('vendors','incoming','בדרך',{firstDir:'desc'})}{sortHead('vendors','lastPo','הזמנה אחרונה',{firstDir:'desc'})}{sortHead('vendors','spend12','קניות 12 ח׳',{firstDir:'desc'})}{sortHead('vendors','lead','זמן אספקה',{firstDir:'desc'})}<div/>
               </div>
               {list.map(v => {
                 const st = v.worst;
@@ -4315,11 +4394,11 @@ const renderProductRow = (p) => {
             <div className="overflow-x-auto">
               <div style={{minWidth: 220 + months.length*24 + 600}}>
                 <div className={`grid gap-3 items-center px-4 py-2.5 ${headCls}`} style={grid}>
-                  <div>מוצר</div>
+                  {sortHead('vendorItems','name','מוצר')}
                   <div className="flex gap-0.5">{months.map(m => <span key={m} className="text-[10px] text-center" style={{width:22}}>{m.split('-')[0]}</span>)}</div>
-                  <div>ממוצע</div><div>מלאי</div><div>בדרך · הגעה</div><div>מומלץ</div><div>להזמין</div>
+                  {sortHead('vendorItems','avgMonthly','ממוצע',{firstDir:'desc'})}{sortHead('vendorItems','currentStock','מלאי',{firstDir:'desc'})}{sortHead('vendorItems','incomingQty','בדרך · הגעה',{firstDir:'desc'})}{sortHead('vendorItems','suggestedOrder','מומלץ',{firstDir:'desc'})}{sortHead('vendorItems','qty','להזמין',{firstDir:'desc'})}
                 </div>
-                {rows.map(p => {
+                {sortRows('vendorItems', rows, { incomingQty: p => p.incomingQty || null, qty: p => orderQtyFor(p) || null, suggestedOrder: p => p.currentStock!=null && p.suggestedOrder>0 ? p.suggestedOrder : null }).map(p => {
                   const eta = etaFor(p);
                   const q = orderQtyFor(p);
                   const edited = draftQty[p.key] != null;
@@ -4401,9 +4480,25 @@ const renderProductRow = (p) => {
             {fileBusy==='shipments'?<Loader2 className="w-4 h-4 animate-spin"/>:<Upload className="w-4 h-4"/>} {meta?'החלף בקובץ של היום':'העלה את קובץ המשלח'}
             <input type="file" accept=".xlsx,.xls" className="sr-only" onChange={e=>handleProcFile(e,'shipments')}/>
           </label>
+          {shipmentsEnriched.length>1 && (
+            <label className={`flex items-center gap-2 text-sm ${muted}`}>
+              מיון
+              <select value={sortState.ships ? `${sortState.ships.key}:${sortState.ships.dir}` : ''} onChange={e=>{ const [k,d] = e.target.value.split(':'); setSort('ships', k||null, d); }}
+                style={isDarkMode?{background:'#0f172a',color:'#f1f5f9'}:{}}
+                className={`px-2 py-1.5 rounded-lg border text-sm ${isDarkMode?'border-slate-600':'border-slate-300 bg-white'}`}>
+                <option value="">כמו בקובץ</option>
+                <option value="arr:asc">הגעה — הקרוב קודם</option>
+                <option value="arr:desc">הגעה — הרחוק קודם</option>
+                <option value="delayDays:desc">הכי נדחו קודם</option>
+                <option value="sup:asc">ספק (א–ת)</option>
+                <option value="stage:desc">שלב — מתקדם קודם</option>
+                <option value="cont:asc">מספר מכולה</option>
+              </select>
+            </label>
+          )}
           {fileMsg?.slot==='shipments' && <p className={`w-full text-xs font-semibold ${fileMsg.kind==='ok'?(isDarkMode?'text-emerald-300':'text-emerald-700'):(isDarkMode?'text-red-300':'text-red-700')}`}>{fileMsg.text}</p>}
         </div>
-        {shipmentsEnriched.map(s => {
+        {sortRows('ships', shipmentsEnriched, { stage: s => s.stage.idx, delayDays: s => s.delayDays || null }).map(s => {
           const orders = s.matched ? ordersEnriched.filter(o => o.supplier === s.matched) : [];
           return (
             <section key={s.id} className={`rounded-2xl border p-5 space-y-4 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'} ${s.stage.idx===2?'opacity-75':''}`}>
@@ -5104,21 +5199,21 @@ const renderProductRow = (p) => {
                 <table className={`w-full text-sm text-right min-w-[780px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
                   <thead className={`text-[11px] font-semibold uppercase tracking-widest ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
                     <tr>
-                      <th className="px-4 py-3 min-w-[160px] cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('productName')}>מוצר ↕</th>
-                      <th className="px-4 py-3">מק"ט</th>
-                      <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('supplier')}>ספק ↕</th>
-                      <th className="px-4 py-3">PO</th>
-                      <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('orderedQty')}>יתרה לאספקה ↕</th>
-                      <th className="px-4 py-3">מחיר יח'</th>
-                      <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('valueILS')}>שווי ₪ ↕</th>
-                      <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('orderDate')}>הוזמן ↕</th>
-                      <th className="px-4 py-3 cursor-pointer select-none hover:text-blue-500" onClick={()=>reqOrdersSort('expectedDate')}>אספקה צפויה ↕</th>
-                      <th className="px-4 py-3">סטטוס</th>
+                      {sortTh('orders','productName','מוצר',{className:'px-4 py-3 min-w-[160px]'})}
+                      {sortTh('orders','productKey','מק"ט')}
+                      {sortTh('orders','supplier','ספק')}
+                      {sortTh('orders','poNumber','PO')}
+                      {sortTh('orders','orderedQty','יתרה לאספקה',{firstDir:'desc'})}
+                      {sortTh('orders','unitPriceOriginal',"מחיר יח'",{firstDir:'desc'})}
+                      {sortTh('orders','valueILS','שווי ₪',{firstDir:'desc'})}
+                      {sortTh('orders','orderDate','הוזמן')}
+                      {sortTh('orders','expectedDate','אספקה צפויה')}
+                      {sortTh('orders','status','סטטוס')}
                       <th className="px-4 py-3">פעולות</th>
                     </tr>
                   </thead>
                   <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-                    {sortedOpenOrders.map(order => {
+                    {sortRows('orders', sortedOpenOrders, { productKey: o => o.productKey!==o.productName ? o.productKey : null, status: o => ({ordered:'הוזמן',in_transit:'בדרך',delayed:'מאחר'}[o.status]||o.status) }).map(order => {
                       const statusStyle = {
                         ordered:    isDarkMode?'bg-blue-500/20 text-blue-300 border-blue-500/30':'bg-blue-50 text-blue-700 border-blue-200',
                         in_transit: isDarkMode?'bg-emerald-500/20 text-emerald-300 border-emerald-500/30':'bg-emerald-50 text-emerald-700 border-emerald-200',
@@ -5344,18 +5439,13 @@ const renderProductRow = (p) => {
               <table className={`w-full text-sm text-right min-w-[600px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
                 <thead className={`text-[11px] font-semibold uppercase tracking-widest ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
                   <tr>
-                    <th className="px-4 py-3">מוצר</th>
-                    <th className="px-4 py-3">ABC</th>
-                    <th className="px-4 py-3">ממוצע בסיס</th>
-                    <th className="px-4 py-3">ממוצע תרחיש</th>
-                    <th className="px-4 py-3">כיסוי (יום)</th>
-                    <th className="px-4 py-3">הזמנה בסיס</th>
-                    <th className={`px-4 py-3 font-bold ${isDarkMode?'text-blue-400':'text-blue-700'}`}>הזמנה תרחיש</th>
-                    <th className="px-4 py-3">שינוי</th>
+                    {sortTh('whatIf','name','מוצר',{className:'px-4 py-3'})}{sortTh('whatIf','abc','ABC',{className:'px-4 py-3'})}{sortTh('whatIf','avgMonthly','ממוצע בסיס',{className:'px-4 py-3',firstDir:'desc'})}{sortTh('whatIf','adjAvg','ממוצע תרחיש',{className:'px-4 py-3',firstDir:'desc'})}{sortTh('whatIf','adjCovDays','כיסוי (יום)',{className:'px-4 py-3'})}{sortTh('whatIf','suggestedOrder','הזמנה בסיס',{className:'px-4 py-3',firstDir:'desc'})}
+                    {sortTh('whatIf','adjOrder','הזמנה תרחיש',{className:`px-4 py-3 font-bold ${isDarkMode?'text-blue-400':'text-blue-700'}`,firstDir:'desc'})}
+                    {sortTh('whatIf','orderDelta','שינוי',{className:'px-4 py-3',firstDir:'desc'})}
                   </tr>
                 </thead>
                 <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-                  {whatIfProducts.slice(0,50).map(p=>(
+                  {sortRows('whatIf', whatIfProducts).slice(0,50).map(p=>(
                     <tr key={p.key} className={`${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'} ${p.orderDelta>0?(isDarkMode?'':'bg-orange-50/30'):''}`}>
                       <td className="px-4 py-3">
                         <p className={`font-medium text-sm truncate max-w-[180px] ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{p.name}</p>
@@ -5412,10 +5502,10 @@ const renderProductRow = (p) => {
               <div className="overflow-x-auto max-h-96 overflow-y-auto">
                 <table className={`w-full text-sm text-right min-w-[700px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
                   <thead className={`text-[11px] font-semibold sticky top-0 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
-                    <tr><th className="px-4 py-2.5">מוצר</th><th className="px-4 py-2.5">ספק</th><th className="px-4 py-2.5">מחיר קודם</th><th className="px-4 py-2.5">מחיר נוכחי</th><th className="px-4 py-2.5">שינוי</th><th className="px-4 py-2.5">השפעה חודשית ₪</th><th className="px-4 py-2.5">תאריך</th></tr>
+                    <tr>{sortTh('priceChanges','name','מוצר',{className:'px-4 py-2.5'})}{sortTh('priceChanges','supplier','ספק',{className:'px-4 py-2.5'})}{sortTh('priceChanges','prevPrice','מחיר קודם',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('priceChanges','unitCostOriginal','מחיר נוכחי',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('priceChanges','priceChangePct','שינוי',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('priceChanges','monthlyImpactILS','השפעה חודשית ₪',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('priceChanges','priceChangedAt','תאריך',{className:'px-4 py-2.5',firstDir:'desc'})}</tr>
                   </thead>
                   <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-                    {priceChanges.map(p => (
+                    {sortRows('priceChanges', priceChanges).map(p => (
                       <tr key={p.key} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
                         <td className="px-4 py-2.5"><p className={`font-medium text-sm truncate max-w-[220px] ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{p.name}</p>{p.sku&&p.sku!==p.name&&<p className={`text-[10px] font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}</p>}</td>
                         <td className="px-4 py-2.5 text-xs">{p.supplier||'—'}</td>
@@ -5444,10 +5534,10 @@ const renderProductRow = (p) => {
               <div className="overflow-x-auto max-h-80 overflow-y-auto">
                 <table className={`w-full text-sm text-right min-w-[640px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
                   <thead className={`text-[11px] font-semibold sticky top-0 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
-                    <tr><th className="px-4 py-2.5">מוצר</th><th className="px-4 py-2.5">ספק</th><th className="px-4 py-2.5">PO</th><th className="px-4 py-2.5">מחיר בהזמנה</th><th className="px-4 py-2.5">מחיר בקטלוג</th><th className="px-4 py-2.5">סטייה</th></tr>
+                    <tr>{sortTh('poDev','productName','מוצר',{className:'px-4 py-2.5'})}{sortTh('poDev','supplier','ספק',{className:'px-4 py-2.5'})}{sortTh('poDev','poNumber','PO',{className:'px-4 py-2.5'})}{sortTh('poDev','unitPriceOriginal','מחיר בהזמנה',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('poDev','catalogCost','מחיר בקטלוג',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('poDev','poPriceDiffPct','סטייה',{className:'px-4 py-2.5',firstDir:'desc'})}</tr>
                   </thead>
                   <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-                    {poPriceDeviations.map(o => (
+                    {sortRows('poDev', poPriceDeviations).map(o => (
                       <tr key={o.id} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
                         <td className={`px-4 py-2.5 text-sm font-medium truncate max-w-[220px] ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{o.productName}</td>
                         <td className="px-4 py-2.5 text-xs">{o.supplier||'—'}</td>
@@ -5475,10 +5565,10 @@ const renderProductRow = (p) => {
               <div className="overflow-x-auto max-h-96 overflow-y-auto">
                 <table className={`w-full text-sm text-right min-w-[640px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
                   <thead className={`text-[11px] font-semibold sticky top-0 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
-                    <tr><th className="px-4 py-2.5">ספק</th><th className="px-4 py-2.5">12 חודשים</th><th className="px-4 py-2.5">3 חודשים אחרונים</th><th className="px-4 py-2.5">3 חודשים קודמים</th><th className="px-4 py-2.5">שינוי</th><th className="px-4 py-2.5">מגמה</th></tr>
+                    <tr>{sortTh('supSpend','name','ספק',{className:'px-4 py-2.5'})}{sortTh('supSpend','last12','12 חודשים',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('supSpend','last3','3 חודשים אחרונים',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('supSpend','prev3','3 חודשים קודמים',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('supSpend','changePct','שינוי',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('supSpend','trend','מגמה',{className:'px-4 py-2.5',firstDir:'desc'})}</tr>
                   </thead>
                   <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-                    {supplierSpend.map(x => (
+                    {sortRows('supSpend', supplierSpend, { trend: x => x.changePct }).map(x => (
                       <tr key={x.name} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
                         <td className={`px-4 py-2.5 text-sm font-medium ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{x.name}</td>
                         <td className="px-4 py-2.5 text-xs tabular-nums font-bold">{formatShort(x.last12)}</td>
@@ -5575,17 +5665,17 @@ const renderProductRow = (p) => {
                 <table className={`w-full text-sm text-right min-w-[700px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
                   <thead className={`text-[11px] font-semibold uppercase tracking-widest sticky top-0 z-10 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
                     <tr>
-                      <th className="px-4 py-3 min-w-[180px]">מוצר</th>
-                      <th className="px-4 py-3">ABC</th>
-                      <th className="px-4 py-3 whitespace-nowrap">ימים ללא מכירה</th>
-                      <th className="px-4 py-3 whitespace-nowrap">מלאי נוכחי</th>
-                      <th className="px-4 py-3 whitespace-nowrap">מחיר קניה</th>
-                      <th className={`px-4 py-3 whitespace-nowrap font-bold ${isDarkMode?'text-red-400':'text-red-700'}`}>ערך תקוע</th>
-                      <th className="px-4 py-3">ספק</th>
+                      {sortTh('dead','name','מוצר',{className:'px-4 py-3 min-w-[180px]'})}
+                      {sortTh('dead','abc','ABC')}
+                      {sortTh('dead','daysSince','ימים ללא מכירה',{className:'px-4 py-3 whitespace-nowrap',firstDir:'desc'})}
+                      {sortTh('dead','currentStock','מלאי נוכחי',{className:'px-4 py-3 whitespace-nowrap',firstDir:'desc'})}
+                      {sortTh('dead','unitCost','מחיר קניה',{className:'px-4 py-3 whitespace-nowrap',firstDir:'desc'})}
+                      {sortTh('dead','stockValue','ערך תקוע',{className:`px-4 py-3 whitespace-nowrap font-bold ${isDarkMode?'text-red-400':'text-red-700'}`,firstDir:'desc'})}
+                      {sortTh('dead','supplier','ספק')}
                     </tr>
                   </thead>
                   <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-                    {deadStockData.map(p => (
+                    {sortRows('dead', deadStockData, { daysSince: p => p.neverSold ? 1e9 : p.daysSince }).map(p => (
                       <tr key={p.key} className={`transition-all ${isDarkMode?'hover:bg-red-900/10':'hover:bg-red-50/50'}`}>
                         <td className="px-4 py-3.5">
                           <p className={`font-medium text-sm truncate max-w-[200px] ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{p.name}</p>
@@ -6777,7 +6867,9 @@ const App = () => {
     return data.sort((a,b)=>{
       let va=a[sortConfig.key], vb=b[sortConfig.key];
       if (sortConfig.key==='date') { va=getDateVal(a.date); vb=getDateVal(b.date); }
-      return sortConfig.direction==='asc' ? (va<vb?-1:va>vb?1:0) : (va>vb?-1:va<vb?1:0);
+      else { va=sortKeyOf(va); vb=sortKeyOf(vb); if (va===null||vb===null) return va===vb?0:va===null?1:-1; }
+      const c = compareSortKeys(va, vb);
+      return sortConfig.direction==='asc' ? c : -c;
     });
   }, [activeData, searchTerm, sortConfig, dateFilter, selectedProduct, selectedSku, selectedSupplier, activeTab, drillDownMonth]);
 
@@ -7910,7 +8002,7 @@ const App = () => {
                       <thead className={`text-[11px] font-semibold uppercase tracking-widest sticky top-0 z-10 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
                         <tr>
                           {visibleColumns.date && <th className={`px-5 py-3.5 cursor-pointer select-none hover:text-blue-500 transition-colors`} onClick={()=>requestSort('date')}>תאריך<SortIcon colKey="date" sortConfig={sortConfig}/></th>}
-                          {visibleColumns.sku && activeTab==='sales' && <th className="px-5 py-3.5">מק״ט</th>}
+                          {visibleColumns.sku && activeTab==='sales' && <th className="px-5 py-3.5 cursor-pointer select-none hover:text-blue-500" onClick={()=>requestSort('sku')}>מק״ט<SortIcon colKey="sku" sortConfig={sortConfig}/></th>}
                           {visibleColumns.description && <th className={`px-5 py-3.5 cursor-pointer select-none hover:text-blue-500`} onClick={()=>requestSort(activeTab==='sales'?'description':'supplier')}>{activeTab==='sales'?'מוצר':'ספק'}<SortIcon colKey={activeTab==='sales'?'description':'supplier'} sortConfig={sortConfig}/></th>}
                           {visibleColumns.quantity && <th className={`px-5 py-3.5 cursor-pointer select-none hover:text-blue-500`} onClick={()=>requestSort('quantity')}>כמות<SortIcon colKey="quantity" sortConfig={sortConfig}/></th>}
                           {visibleColumns.total && <th className={`px-5 py-3.5 cursor-pointer select-none hover:text-blue-500`} onClick={()=>requestSort('total')}>סכום<SortIcon colKey="total" sortConfig={sortConfig}/></th>}
