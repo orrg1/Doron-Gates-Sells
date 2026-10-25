@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSXLib from 'xlsx';
+import { queueDataset } from './cloud.js';
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
 if (typeof window !== 'undefined' && !window.XLSX) window.XLSX = XLSXLib;
@@ -196,7 +197,7 @@ const idbSet = async (key, value) => {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(IDB_STORE, 'readwrite');
     tx.objectStore(IDB_STORE).put(value, key);
-    tx.oncomplete = () => resolve(true);
+    tx.oncomplete = () => { queueDataset(key, value); resolve(true); };
     tx.onerror = () => reject(tx.error);
   });
 };
@@ -205,7 +206,7 @@ const idbDelete = async (key) => {
   return new Promise((resolve, reject) => {
     const tx = db.transaction(IDB_STORE, 'readwrite');
     tx.objectStore(IDB_STORE).delete(key);
-    tx.oncomplete = () => resolve(true);
+    tx.oncomplete = () => { queueDataset(key, null); resolve(true); };
     tx.onerror = () => reject(tx.error);
   });
 };
