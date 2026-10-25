@@ -40,7 +40,6 @@ const idbTx = async (mode, fn) => {
   });
 };
 const idbPutRaw = (k, v) => idbTx('readwrite', s => s.put(v, k));
-const idbDelRaw = (k) => idbTx('readwrite', s => s.delete(k));
 const idbKeysRaw = () => idbTx('readonly', s => s.getAllKeys());
 const idbGetRaw = (k) => idbTx('readonly', s => s.get(k));
 
@@ -176,7 +175,8 @@ export async function hydrate(email, onProgress = () => {}) {
   // Server has data — it wins.
   const cloudKeys = new Set(rows.map(r => r.key));
   rows.forEach(r => { lastCloudValue.set(r.key, r.value); lsSetRaw(r.key, r.value); });
-  localKeys.forEach(k => { if (!cloudKeys.has(k)) lsRemoveRaw(k); });
+  // Data that exists only in this browser is kept and uploaded — never deleted.
+  const localOnlyKeys = localKeys.filter(k => !cloudKeys.has(k));
   const cloudSets = new Set(sets.map(s => s.key));
   let i = 0;
   for (const s of sets) {
@@ -189,8 +189,9 @@ export async function hydrate(email, onProgress = () => {}) {
     await idbPutRaw(s.key, JSON.parse(text));
     lsSetRaw('__cloudVer:' + s.key, s.updated_at); lsSetRaw('__cloudHash:' + s.key, fingerprint(text));
   }
-  for (const k of idbKeys) if (!cloudSets.has(k)) { try { await idbDelRaw(k); } catch { /* ignore */ } }
   patchStorage(); enabled = true;
+  localOnlyKeys.forEach(k => queueState(k, window.localStorage.getItem(k)));
+  for (const k of idbKeys) if (!cloudSets.has(k)) { const v = await idbGetRaw(k); if (v != null && !(Array.isArray(v) && !v.length)) queueDataset(k, v); }
   lsSetRaw('lastBackupDate', new Date().toISOString());
   setStatus({ state: 'saved', lastSaved: Date.now(), message: '' });
   return { migrated: 0 };
