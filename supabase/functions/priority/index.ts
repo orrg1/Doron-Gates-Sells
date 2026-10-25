@@ -11,6 +11,7 @@
 // Body (JSON, POST from the app):
 //   { action: 'query', form, select?, filter?, expand?, orderby?, maxRows? }
 //   { action: 'describe', form }   → field + subform names of a form
+//   { action: 'describe', forms:[] } → the same for several forms, one $metadata download
 //   { action: 'ping' }             → checks the token works
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
 
@@ -27,6 +28,18 @@ const ALLOWED_FORMS = new Set([
 ]);
 const PAGE = 500;               // rows per Priority request (MAXAPILINES default is 2000)
 const HARD_MAX = 60000;         // never pull more than this in one call
+const TIME_BUDGET_MS = 110_000; // stop paging well before the 150s platform limit; the app continues from nextSkip
+
+// $metadata describes the whole Priority system (several MB, ~30s to download).
+// Keep the last copy for an hour in this warm instance instead of re-downloading per form.
+let metaCache: { text: string; at: number } | null = null;
+async function getMetadata(): Promise<{ ok: boolean; text: string; err?: string; status?: number }> {
+  if (metaCache && Date.now() - metaCache.at < 3600_000) return { ok: true, text: metaCache.text };
+  const r = await priorityGet('$metadata');
+  if (!r.ok) return { ok: false, text: '', err: priorityError(r), status: r.status };
+  metaCache = { text: r.text, at: Date.now() };
+  return { ok: true, text: r.text };
+}
 const ODATA_OPT = /^[\w\s,.;'()\-:/$=<>!*"א-ת]*$/; // plain OData option text only
 
 const cors = {
@@ -93,13 +106,22 @@ Deno.serve(async (req) => {
     return json({ ok: r.ok, status: r.status, error: r.ok ? null : priorityError(r) }, r.ok ? 200 : 502);
   }
 
+  if (action === 'describe' && Array.isArray(body.forms)) {
+    const forms = body.forms.map(String).filter((f: string) => ALLOWED_FORMS.has(f));
+    const m = await getMetadata();
+    if (!m.ok) return json({ error: m.err, status: m.status }, 502);
+    const out: Record<string, unknown> = {};
+    for (const f of forms) out[f] = describeFromMetadata(m.text, f) || { error: `form ${f} is not open for API (not in $metadata)` };
+    return json({ forms: out });
+  }
+
   const form = String(body.form || '');
   if (!ALLOWED_FORMS.has(form)) return json({ error: `form ${form || '(none)'} is not on the allowed list` }, 400);
 
   if (action === 'describe') {
-    const r = await priorityGet('$metadata');
-    if (!r.ok) return json({ error: priorityError(r), status: r.status }, 502);
-    const d = describeFromMetadata(r.text, form);
+    const m = await getMetadata();
+    if (!m.ok) return json({ error: m.err, status: m.status }, 502);
+    const d = describeFromMetadata(m.text, form);
     if (!d) return json({ error: `form ${form} is not open for API (not in $metadata)` }, 404);
     return json({ form, ...d });
   }
@@ -114,16 +136,23 @@ Deno.serve(async (req) => {
     opts['$' + k] = v;
   }
   const maxRows = Math.min(Math.max(1, Number(body.maxRows) || HARD_MAX), HARD_MAX);
+  const startSkip = Math.max(0, Number(body.skip) || 0);
+  const started = Date.now();
 
   const rows: any[] = [];
-  for (let skip = 0; rows.length < maxRows; skip += PAGE) {
+  let skip = startSkip;
+  let nextSkip: number | null = null;
+  while (rows.length < maxRows) {
     const top = Math.min(PAGE, maxRows - rows.length);
     const qs = new URLSearchParams({ ...opts, $top: String(top), $skip: String(skip) });
     const r = await priorityGet(`${form}?${qs.toString().replace(/\+/g, '%20')}`);
     if (!r.ok) return json({ error: priorityError(r), status: r.status, form, fetched: rows.length }, 502);
     const page = Array.isArray(r.data?.value) ? r.data.value : [];
     rows.push(...page);
+    skip += page.length;
     if (page.length < top) break;
+    // Running out of time: hand back what we have and where to continue.
+    if (Date.now() - started > TIME_BUDGET_MS) { nextSkip = skip; break; }
   }
-  return json({ form, count: rows.length, value: rows });
+  return json({ form, count: rows.length, value: rows, nextSkip });
 });

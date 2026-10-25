@@ -20,12 +20,65 @@ const call = async (body) => {
 
 export const pingPriority = () => call({ action: 'ping' });
 
-const describeCache = new Map();
-const describe = async (form) => {
-  if (!describeCache.has(form)) describeCache.set(form, call({ action: 'describe', form }).catch(e => { describeCache.delete(form); throw e; }));
-  return describeCache.get(form);
+// ── Field lists ("schema") ──
+// Priority's $metadata is huge and slow (~30s). The field lists of the forms we
+// use are fetched in ONE request and kept for 7 days (saved like any other
+// setting, so every signed-in device shares them).
+const SYNC_FORMS = ['LOGPART', 'PORDERS', 'AINVOICES', 'CINVOICES', 'YINVOICES'];
+const SCHEMA_KEY = 'prioritySchema';
+const SCHEMA_TTL = 7 * 86400000;
+let schemaPromise = null;
+const loadSchema = (force = false) => {
+  if (!force && schemaPromise) return schemaPromise;
+  schemaPromise = (async () => {
+    if (!force) {
+      try { const c = JSON.parse(localStorage.getItem(SCHEMA_KEY) || 'null'); if (c && Date.now() - c.at < SCHEMA_TTL && c.forms) return c.forms; } catch { /* refetch */ }
+    }
+    const r = await call({ action: 'describe', forms: SYNC_FORMS });
+    try { localStorage.setItem(SCHEMA_KEY, JSON.stringify({ at: Date.now(), forms: r.forms })); } catch { /* best-effort */ }
+    return r.forms;
+  })().catch(e => { schemaPromise = null; throw e; });
+  return schemaPromise;
 };
-const query = (form, opts) => call({ action: 'query', form, ...opts }).then(r => r.value || []);
+const describe = async (form) => {
+  const forms = await loadSchema();
+  const d = forms?.[form];
+  if (!d) throw new Error(`form ${form} not in field list`);
+  if (d.error) throw new Error(d.error);
+  return d;
+};
+// One logical query; the server hands back nextSkip when it ran out of time, so keep asking.
+const query = async (form, opts) => {
+  const all = [];
+  let skip = 0;
+  for (let guard = 0; guard < 200; guard++) {
+    const r = await call({ action: 'query', form, ...opts, skip });
+    all.push(...(r.value || []));
+    if (r.nextSkip == null) break;
+    skip = r.nextSkip;
+  }
+  return all;
+};
+// Run async jobs with at most `limit` in flight.
+const pool = async (items, limit, fn) => {
+  const out = new Array(items.length); let i = 0;
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, async () => {
+    while (i < items.length) { const k = i++; out[k] = await fn(items[k], k); }
+  }));
+  return out;
+};
+// [since, now] split into calendar-month windows — small enough that each request stays fast.
+const monthWindows = (sinceIso) => {
+  const out = [];
+  let a = new Date(sinceIso.slice(0, 10) + 'T00:00:00Z');
+  const end = new Date(Date.now() + 86400000);
+  while (a < end) {
+    const b = new Date(Date.UTC(a.getUTCFullYear(), a.getUTCMonth() + 1, 1));
+    out.push([a.toISOString().slice(0, 10) + 'T00:00:00Z', (b < end ? b : end).toISOString().slice(0, 10) + 'T00:00:00Z']);
+    a = b;
+  }
+  return out;
+};
 
 // First candidate that really exists on the form.
 const pick = (fields, candidates) => candidates.find(c => fields.includes(c)) || null;
@@ -108,10 +161,11 @@ async function pullPurchaseOrders() {
   const sku = need(it.fields, F.part, 'מק"ט', it.name), des = pick(it.fields, F.partDes);
   const bal = need(it.fields, F.lineBalance, 'יתרה לאספקה', it.name);
   const due = pick(it.fields, F.lineDue), price = pick(it.fields, F.linePrice);
-  const rows = await query('PORDERS', {
-    select: sel(ord, date, sup), filter: `${date} ge ${isoDaysAgo(730)}`,
+  const parts = await pool(monthWindows(isoDaysAgo(730)), 3, ([a, b]) => query('PORDERS', {
+    select: sel(ord, date, sup), filter: `${date} ge ${a} and ${date} lt ${b}`, orderby: ord,
     expand: `${it.name}($select=${sel(sku, des, bal, due, price)})`,
-  });
+  }));
+  const rows = parts.flat();
   const open = [], dates = {};
   for (const r of rows) {
     dates[r[ord]] = dmy(r[date]);
@@ -126,7 +180,7 @@ async function pullPurchaseOrders() {
 
 // ── 3. sales invoice lines (tax invoices + consolidated invoices when open) ──
 const SALES_HEADERS = ['תאריך', 'חשבונית', 'מס. לקוח', 'שם לקוח', 'מק"ט', 'תאור מוצר', 'כמות', 'סה"כ אחרי הנחה', 'הזמנה'];
-async function pullSalesForm(form, since) {
+async function pullSalesForm(form, since, report = () => {}) {
   const d = await describe(form);
   const f = d.fields;
   const iv = need(f, F.ivNum, 'חשבונית', form), date = need(f, F.ivDate, 'תאריך', form);
@@ -134,10 +188,17 @@ async function pullSalesForm(form, since) {
   const it = subformOf(d, n => /ITEMS/.test(n), form);
   const sku = need(it.fields, F.part, 'מק"ט', it.name), des = pick(it.fields, F.partDes);
   const q = need(it.fields, F.quant, 'כמות', it.name), tot = pick(it.fields, F.lineTotal), ord = pick(it.fields, F.ordName);
-  const rows = await query(form, {
-    select: sel(iv, date, cn, cd), filter: `${date} ge ${since}`,
-    expand: `${it.name}($select=${sel(sku, des, q, tot, ord)})`,
+  const wins = monthWindows(since);
+  let done = 0;
+  const parts = await pool(wins, 3, async ([a, b]) => {
+    const r = await query(form, {
+      select: sel(iv, date, cn, cd), filter: `${date} ge ${a} and ${date} lt ${b}`, orderby: iv,
+      expand: `${it.name}($select=${sel(sku, des, q, tot, ord)})`,
+    });
+    done++; if (wins.length > 2) report(`${form}: ${done}/${wins.length} חודשים`);
+    return r;
   });
+  const rows = parts.flat();
   const out = [];
   for (const r of rows) for (const l of r[it.name] || [])
     out.push([dmy(r[date]), r[iv], cn ? r[cn] : '', cd ? r[cd] : '', l[sku], des ? l[des] : '', numv(l[q]), tot ? numv(l[tot]) : 0, ord ? l[ord] || '' : '']);
@@ -156,10 +217,11 @@ async function pullPurchaseLines(since, poDates) {
   const sku = need(it.fields, F.part, 'מק"ט', it.name), des = pick(it.fields, F.partDes);
   const q = need(it.fields, F.quant, 'כמות', it.name), price = pick(it.fields, F.linePrice), tot = pick(it.fields, F.lineTotal);
   const lcur = pick(it.fields, F.lineCur), ord = pick(it.fields, F.ordName);
-  const rows = await query(form, {
-    select: sel(iv, date, sup, cur, rate, deb), filter: `${date} ge ${since}`,
+  const parts = await pool(monthWindows(since), 3, ([a, b]) => query(form, {
+    select: sel(iv, date, sup, cur, rate, deb), filter: `${date} ge ${a} and ${date} lt ${b}`, orderby: iv,
     expand: `${it.name}($select=${sel(sku, des, q, price, tot, lcur, ord)})`,
-  });
+  }));
+  const rows = parts.flat();
   const out = [];
   for (const r of rows) for (const l of r[it.name] || []) {
     const po = ord ? l[ord] || '' : '';
@@ -179,54 +241,75 @@ export const rowsToFile = (rowsOrAoa, name) => {
   return new File([buf], name, { type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' });
 };
 
-// Pull everything the procurement page needs. Each part fails on its own —
-// one missing form never blocks the others. report(text) gets progress lines.
-export async function pullAllFromPriority({ months = 24, report = () => {} } = {}) {
-  describeCache.clear();
-  const since = isoDaysAgo(Math.round(months * 30.5));
+// Pull everything the procurement page needs. Independent parts run in
+// parallel; each fails on its own. Invoices are pulled only from `since`
+// (incremental) — the app merges them into what it already has.
+//   salesSince / purchaseSince: 'YYYY-MM-DD' (incremental) or null (full, `months` back)
+export async function pullAllFromPriority({ months = 24, salesSince = null, purchaseSince = null, report = () => {} } = {}) {
+  const fullSince = isoDaysAgo(Math.round(months * 30.5));
+  const sSince = salesSince ? `${salesSince}T00:00:00Z` : fullSince;
+  const pSince = purchaseSince ? `${purchaseSince}T00:00:00Z` : fullSince;
   const stamp = new Date().toLocaleDateString('he-IL').replace(/\./g, '-');
-  const out = { files: {}, errors: {}, notes: [] };
+  const out = { files: {}, errors: {}, notes: [], since: { salesLines: sSince.slice(0, 10), purchaseLines: pSince.slice(0, 10) } };
   const note = (t) => { out.notes.push(t); report(t); };
+  let schemaRefreshed = false;
   const step = async (slot, label, fn) => {
+    const t0 = Date.now();
     report(`מושך ${label}…`);
-    try { await fn(); }
+    try {
+      try { await fn(); }
+      catch (e) {
+        // A field the saved field list doesn't know about → refresh the list once and retry.
+        if (!(e instanceof MissingFieldError) || schemaRefreshed) throw e;
+        schemaRefreshed = true; report('רשימת השדות התעדכנה ב-Priority — מרענן…');
+        await loadSchema(true); await fn();
+      }
+      report(`${label}: הסתיים (${Math.round((Date.now() - t0) / 1000)} שנ׳)`);
+    }
     catch (e) { out.errors[slot] = e.message || String(e); note(`${label}: ${out.errors[slot]}`); }
   };
 
-  await step('items', 'פריטים ויתרות מלאי', async () => {
+  report('טוען רשימת שדות…');
+  try { await loadSchema(); }
+  catch (e) { out.errors.all = e.message || String(e); note(`רשימת שדות: ${out.errors.all}`); return out; }
+
+  const items = step('items', 'פריטים ויתרות מלאי', async () => {
     const r = await pullItems(note);
     if (!r.rows.length) throw new Error('לא התקבלו פריטים');
     out.files.items = rowsToFile(r.rows, `Priority פריטים ${stamp}.xlsx`);
     out.itemsInfo = { count: r.rows.length, hasBalances: r.hasBalances, hasCost: r.hasCost };
   });
-  let poDates = {};
-  await step('openOrders', 'הזמנות רכש פתוחות', async () => {
-    const r = await pullPurchaseOrders(); poDates = r.poDates;
-    out.files.openOrders = r.rows.length ? rowsToFile(r.rows, `Priority הזמנות רכש ${stamp}.xlsx`) : null;
-    if (!r.rows.length) note('הזמנות רכש: אין שורות פתוחות');
-  });
-  await step('salesLines', 'שורות חשבוניות מכירה', async () => {
+  const ordersThenPurchases = (async () => {
+    let poDates = {};
+    await step('openOrders', 'הזמנות רכש פתוחות', async () => {
+      const r = await pullPurchaseOrders(); poDates = r.poDates;
+      out.files.openOrders = r.rows.length ? rowsToFile(r.rows, `Priority הזמנות רכש ${stamp}.xlsx`) : null;
+      if (!r.rows.length) note('הזמנות רכש: אין שורות פתוחות');
+    });
+    await step('purchaseLines', 'שורות חשבוניות ספק', async () => {
+      const lines = await pullPurchaseLines(pSince, poDates);
+      out.files.purchaseLines = rowsToFile([PURCH_HEADERS, ...lines], `Priority חשבוניות ספק ${stamp}.xlsx`);
+      out.counts = { ...(out.counts || {}), purchaseLines: lines.length };
+    });
+  })();
+  const sales = step('salesLines', 'שורות חשבוניות מכירה', async () => {
     const lines = [];
-    let anyOk = false;
+    // Both forms must succeed — a partial pull would silently drop sales.
     for (const form of ['AINVOICES', 'CINVOICES']) {
-      try { lines.push(...await pullSalesForm(form, since)); anyOk = true; }
-      catch (e) { if (form === 'AINVOICES' || !/not open|לא פתוח|allowed/i.test(e.message)) note(`${form}: ${e.message}`); }
+      try { lines.push(...await pullSalesForm(form, sSince, report)); }
+      catch (e) {
+        if (form === 'CINVOICES' && /not open|לא פתוח|not in \$metadata|not in field list/i.test(e.message)) { note('CINVOICES לא פתוח ל-API — רק חשבוניות מס'); continue; }
+        throw new Error(`${form}: ${e.message}`);
+      }
     }
-    if (!anyOk) throw new Error('לא הצלחתי לקרוא חשבוניות מכירה (AINVOICES / CINVOICES)');
     out.files.salesLines = rowsToFile([SALES_HEADERS, ...lines], `Priority חשבוניות מכירה ${stamp}.xlsx`);
+    out.counts = { ...(out.counts || {}), salesLines: lines.length };
   });
-  await step('purchaseLines', 'שורות חשבוניות ספק', async () => {
-    const lines = await pullPurchaseLines(since, poDates);
-    out.files.purchaseLines = rowsToFile([PURCH_HEADERS, ...lines], `Priority חשבוניות ספק ${stamp}.xlsx`);
-  });
+  await Promise.all([items, ordersThenPurchases, sales]);
   return out;
 }
 
 // For troubleshooting: the real field lists of every form the sync uses.
 export async function describeAll() {
-  const res = {};
-  for (const form of ['LOGPART', 'PORDERS', 'AINVOICES', 'CINVOICES', 'YINVOICES']) {
-    try { res[form] = await describe(form); } catch (e) { res[form] = { error: e.message }; }
-  }
-  return res;
+  return loadSchema(true);
 }

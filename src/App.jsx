@@ -1900,7 +1900,7 @@ const matchShipSupplier = (fwdName, candidates) => {
 
 
 // ─── PROCUREMENT PAGE ──────────────────────────────────
-const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth }) => {
+const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
   // SKU → product name, captured from the inventory file. Needed so items
   // that are in stock but never appear in sales can still be shown by name
@@ -1954,7 +1954,8 @@ const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSu
     });
   };
   const SLOT_TITLES = { salesLines:'שורות חשבוניות מכירה', purchaseLines:'שורות חשבוניות ספק', shipments:'דוח משלוחים מהמשלח', openOrders:'הזמנות רכש פתוחות', inventory:'יתרות מלאי', masterCard:'כרטיס פריט' };
-  const handleProcFile = async (e, slot) => {
+  // opts.mergeFrom ('YYYY-MM-DD'): incremental Priority pull — keep stored lines before that date, replace the rest.
+  const handleProcFile = async (e, slot, opts = {}) => {
     const file = e.target.files?.[0]; e.target.value = ''; if (!file) return;
     setFileBusy(slot); setFileMsg(null);
     try {
@@ -1965,15 +1966,19 @@ const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSu
         return;
       }
       if (slot === 'salesLines') {
-        const parsed = parseSalesLines(rows);
-        if (!parsed || !parsed.length) throw new Error('לא נמצאו עמודות תאריך / שם לקוח / מק"ט / כמות בקובץ.');
+        let parsed = parseSalesLines(rows);
+        if (!parsed) throw new Error('לא נמצאו עמודות תאריך / שם לקוח / מק"ט / כמות בקובץ.');
+        if (opts.mergeFrom) parsed = [...parsed, ...salesLines.filter(l => l.d < opts.mergeFrom)].sort((a,b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0);
+        if (!parsed.length) throw new Error('לא נמצאו שורות מכירה.');
         await idbSet('procSalesLines', parsed);
         setSalesLines(parsed);
         saveFileMeta(slot, { name:file.name, rows:parsed.length, from:parsed[parsed.length-1].d, to:parsed[0].d });
         setFileMsg({ slot, kind:'ok', text:`נטענו ${parsed.length.toLocaleString()} שורות מכירה (${isoToDisplay(parsed[parsed.length-1].d)}–${isoToDisplay(parsed[0].d)})` });
       } else if (slot === 'purchaseLines') {
-        const parsed = parsePurchaseLines(rows);
-        if (!parsed || !parsed.length) throw new Error('לא נמצאו עמודות תאריך / שם ספק / מק"ט / כמות בקובץ.');
+        let parsed = parsePurchaseLines(rows);
+        if (!parsed) throw new Error('לא נמצאו עמודות תאריך / שם ספק / מק"ט / כמות בקובץ.');
+        if (opts.mergeFrom) parsed = [...parsed, ...purchaseLines.filter(l => l.d < opts.mergeFrom)].sort((a,b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0);
+        if (!parsed.length) throw new Error('לא נמצאו שורות קנייה.');
         await idbSet('procPurchaseLines', parsed);
         setPurchaseLines(parsed);
         saveFileMeta(slot, { name:file.name, rows:parsed.length, from:parsed[parsed.length-1].d, to:parsed[0].d });
@@ -2512,7 +2517,9 @@ const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSu
     return map;
   }, [openOrders]);
 
-  const handleInvUpload = async (e, slotKey) => {
+  // opts.replaceStock: the file is the COMPLETE item list (Priority sync) — stock
+  // balances are replaced, not merged, so items from older files don't linger.
+  const handleInvUpload = async (e, slotKey, opts = {}) => {
     const file = e.target.files?.[0]; if (!file) return;
     setInvLoading(true);
     const applyRows = (rows) => {
@@ -2522,7 +2529,7 @@ const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSu
         setInvLoading(false);
         return;
       }
-      const ns = {...stockMap}, nc = {...costMap}, nm = {...minStockMap}, nsup = {...supplierMap}, nmoq = {...moqMap}, ncur = {...currencyMap};
+      const ns = opts.replaceStock ? {} : {...stockMap}, nc = {...costMap}, nm = {...minStockMap}, nsup = {...supplierMap}, nmoq = {...moqMap}, ncur = {...currencyMap};
       const nnames = {...nameMap}, nhist = {...costHistory};
       const todayIso = new Date().toISOString().slice(0,10);
       parsed.forEach(item => {
@@ -3902,15 +3909,30 @@ const renderProductRow = (p) => {
   // to the same handlers, so nothing downstream behaves differently.
   const [prioSync, setPrioSync] = useState({ busy:false, log:[], errors:{}, at: (() => { try { return Number(localStorage.getItem('prioritySyncAt'))||null; } catch { return null; } })() });
   const [prioFields, setPrioFields] = useState(null);
-  const syncFromPriority = async () => {
+  // Incremental by default: invoices are re-pulled only from (last sync − 14 days),
+  // which also catches late edits/credits, and merged into what's stored.
+  // The first sync — or "סנכרון מלא" — pulls the full 24 months.
+  const SYNC_OVERLAP_DAYS = 14;
+  const syncFromPriority = async (full = false) => {
     const log = [];
+    const t0 = Date.now();
     const report = (t) => { log.push(t); setPrioSync(s => ({ ...s, log:[...log] })); };
     setPrioSync(s => ({ ...s, busy:true, log:[], errors:{} }));
     const asEvent = (file) => ({ target:{ files:[file], value:'' } });
+    let through = {};
+    try { through = JSON.parse(localStorage.getItem('prioritySyncThrough')||'{}'); } catch { /* full */ }
+    const sinceFor = (slot, has) => {
+      if (full || !has || !through[slot]) return null;
+      const d = new Date(through[slot] + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - SYNC_OVERLAP_DAYS);
+      return d.toISOString().slice(0,10);
+    };
+    const salesSince = sinceFor('salesLines', salesLines.length > 0);
+    const purchaseSince = sinceFor('purchaseLines', purchaseLines.length > 0);
+    report(salesSince || purchaseSince ? `סנכרון מהיר — חשבוניות מ-${isoToDisplay(salesSince || purchaseSince)} ואילך` : 'סנכרון מלא — 24 חודשים (פעם ראשונה לוקח כמה דקות)');
     try {
-      const r = await pullAllFromPriority({ report });
+      const r = await pullAllFromPriority({ report, salesSince, purchaseSince });
       if (r.files.items) {
-        handleInvUpload(asEvent(r.files.items), 'product');
+        handleInvUpload(asEvent(r.files.items), 'product', { replaceStock: r.itemsInfo.hasBalances });
         // The same pull also carries the item-card data (supplier, price, currency, minimum).
         setInvSlots(prev => {
           const next = { ...prev, masterCard: { name:r.files.items.name, total:r.itemsInfo.count, withQty:0, withCost:0, withMinStock:0, withSupplier:0, importedAt:Date.now() } };
@@ -3919,12 +3941,16 @@ const renderProductRow = (p) => {
         });
         report(`פריטים: ${r.itemsInfo.count.toLocaleString()} פריטים פעילים${r.itemsInfo.hasBalances ? '' : ' (בלי יתרות מלאי)'}`);
       }
-      if (r.files.openOrders) { handlePriorityOrdersUpload(asEvent(r.files.openOrders), { silent:true }); report('הזמנות רכש פתוחות: עודכן'); }
-      if (r.files.salesLines) await handleProcFile(asEvent(r.files.salesLines), 'salesLines');
-      if (r.files.purchaseLines) await handleProcFile(asEvent(r.files.purchaseLines), 'purchaseLines');
+      if (r.files.openOrders) { handlePriorityOrdersUpload(asEvent(r.files.openOrders), { silent:true }); }
+      const today = new Date().toISOString().slice(0,10);
+      const nextThrough = { ...through };
+      if (r.files.salesLines) { await handleProcFile(asEvent(r.files.salesLines), 'salesLines', { mergeFrom: salesSince }); nextThrough.salesLines = today; report(`חשבוניות מכירה: ${(r.counts?.salesLines||0).toLocaleString()} שורות ${salesSince?'חדשות/מעודכנות':''}`); }
+      if (r.files.purchaseLines) { await handleProcFile(asEvent(r.files.purchaseLines), 'purchaseLines', { mergeFrom: purchaseSince }); nextThrough.purchaseLines = today; }
+      try { localStorage.setItem('prioritySyncThrough', JSON.stringify(nextThrough)); } catch { /* best-effort */ }
       const okCount = Object.keys(r.files).filter(k => r.files[k]).length;
       if (okCount) { const at = Date.now(); try { localStorage.setItem('prioritySyncAt', String(at)); } catch { /* best-effort */ } setPrioSync(s => ({ ...s, at })); }
-      report(Object.keys(r.errors).length ? `הסתיים עם ${Object.keys(r.errors).length} בעיות — פרטים למעלה` : 'הסנכרון הסתיים בהצלחה');
+      const secs = Math.round((Date.now()-t0)/1000);
+      report(Object.keys(r.errors).length ? `הסתיים עם ${Object.keys(r.errors).length} בעיות (${secs} שנ׳) — פרטים למעלה. מה שנכשל לא עודכן; הנתונים הקודמים נשמרו.` : `הסנכרון הסתיים בהצלחה (${secs} שנ׳)`);
       setPrioSync(s => ({ ...s, busy:false, errors:r.errors }));
     } catch (err) {
       report(`הסנכרון נכשל: ${err.message || err}`);
@@ -3944,14 +3970,15 @@ const renderProductRow = (p) => {
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex-1 min-w-[220px]">
             <p className={`font-bold text-sm ${strong}`}>סנכרון ישיר מ-Priority</p>
-            <p className={`text-xs mt-0.5 ${muted}`}>מושך פריטים, יתרות מלאי, הזמנות רכש פתוחות, חשבוניות מכירה וחשבוניות ספק (24 חודשים) — במקום להעלות קבצים. קריאה בלבד, שום דבר לא משתנה ב-Priority. דוח המשלוחים מהמשלח עדיין נטען כקובץ.</p>
+            <p className={`text-xs mt-0.5 ${muted}`}>מושך פריטים, יתרות מלאי, הזמנות רכש פתוחות, חשבוניות מכירה וחשבוניות ספק — במקום להעלות קבצים. אחרי הפעם הראשונה נמשכים רק השבועיים האחרונים, אז זה מהיר. קריאה בלבד, שום דבר לא משתנה ב-Priority. דוח המשלוחים מהמשלח עדיין נטען כקובץ.</p>
             {prioSync.at && <p className={`text-xs mt-1 ${muted}`}>סנכרון אחרון: {new Date(prioSync.at).toLocaleString('he-IL', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</p>}
           </div>
-          <button type="button" onClick={syncFromPriority} disabled={prioSync.busy}
+          <button type="button" onClick={()=>syncFromPriority(false)} disabled={prioSync.busy}
             className={`inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700 ${prioSync.busy?'opacity-60 cursor-wait':''}`}>
             {prioSync.busy ? <Loader2 className="w-4 h-4 animate-spin"/> : <Activity className="w-4 h-4"/>}
             {prioSync.busy ? 'מסנכרן…' : 'סנכרן עכשיו'}
           </button>
+          <button type="button" onClick={()=>{ if (window.confirm('סנכרון מלא מושך מחדש 24 חודשי חשבוניות ולוקח כמה דקות. להמשיך?')) syncFromPriority(true); }} disabled={prioSync.busy} className={`text-xs font-semibold underline ${muted}`}>סנכרון מלא</button>
           <button type="button" onClick={showPriorityFields} className={`text-xs font-semibold underline ${muted}`}>בדיקת שדות</button>
         </div>
         {prioSync.log.length > 0 && (
@@ -4015,6 +4042,70 @@ const renderProductRow = (p) => {
     setFileMsg(null);
     handler(e);
   };
+  // Delete what one slot loaded — independently of the other slots.
+  const forgetSyncThrough = (slot) => {
+    try { const t = JSON.parse(localStorage.getItem('prioritySyncThrough')||'{}'); delete t[slot]; localStorage.setItem('prioritySyncThrough', JSON.stringify(t)); } catch { /* best-effort */ }
+  };
+  const dropFileMeta = (slot) => setFilesMeta(prev => {
+    const next = { ...prev }; delete next[slot];
+    try { localStorage.setItem('procFilesMeta', JSON.stringify(next)); } catch { /* best-effort */ }
+    return next;
+  });
+  const SLOT_DELETE_NOTE = {
+    inventory: 'יימחקו יתרות המלאי. כרטיס הפריט (ספק, מחיר, מינימום) יישאר.',
+    masterCard: 'יימחקו ספק, מחיר קנייה, מטבע, מינימום מלאי ו-MOQ לכל המוצרים. יתרות המלאי יישארו.',
+    openOrders: 'יימחקו ההזמנות הפתוחות שנטענו מקובץ/Priority. הזמנות שהוספת ידנית יישארו.',
+    salesLines: 'יימחקו כל שורות חשבוניות המכירה. ההיסטוריה תילקח שוב רק מקובץ המכירות החודשיות (אם נטען). הסנכרון הבא מ-Priority יהיה מלא.',
+    purchaseLines: 'יימחקו כל שורות חשבוניות הספק. הסנכרון הבא מ-Priority יהיה מלא.',
+    shipments: 'יימחקו כל המשלוחים, כולל מעקב שינויי תאריך ההגעה.',
+  };
+  const clearProcSlot = async (key) => {
+    if (!window.confirm(`למחוק את "${SLOT_TITLES[key]}"?\n${SLOT_DELETE_NOTE[key]||''}`)) return;
+    setFileMsg(null);
+    if (key === 'salesLines' || key === 'purchaseLines' || key === 'shipments') {
+      const idbKey = { salesLines:'procSalesLines', purchaseLines:'procPurchaseLines', shipments:'procShipments' }[key];
+      try { await idbDelete(idbKey); } catch { /* best-effort */ }
+      if (key === 'salesLines') setSalesLines([]); else if (key === 'purchaseLines') setPurchaseLines([]); else setShipments([]);
+      dropFileMeta(key); forgetSyncThrough(key);
+    } else if (key === 'openOrders') {
+      clearPriorityOrders(); dropFileMeta('openOrders');
+    } else if (key === 'inventory') {
+      setStockMap({}); localStorage.removeItem('procurementStock');
+      clearInvSlot('product'); setInvFileName(''); localStorage.removeItem('inventoryFileName');
+    } else if (key === 'masterCard') {
+      setSupplierMap({}); setMinStockMap({}); setMoqMap({}); setCurrencyMap({}); setCostMap({});
+      ['procurementSupplier','procurementMinStock','procurementMOQ','procurementCurrency','procurementCost'].forEach(k => localStorage.removeItem(k));
+      clearInvSlot('masterCard');
+    }
+    setFileMsg({ slot:key, kind:'ok', text:'נמחק.' });
+  };
+  const renderOtherSources = () => {
+    if (!otherSources.length) return null;
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    return (
+      <div className={`rounded-xl border p-4 ${isDarkMode?'bg-slate-900/40 border-slate-700':'bg-slate-50/60 border-slate-200'}`}>
+        <p className={`font-bold text-sm ${strong}`}>קבצים נוספים שטעונים באתר</p>
+        <p className={`text-xs mt-0.5 mb-2 ${muted}`}>קבצים שהועלו בלשוניות האחרות. כשיש גם שורות חשבוניות (מ-Priority או מקובץ), החודשים שהן מכסות נלקחים מהן — והקבצים האלה משמשים רק לחודשים ישנים יותר. אפשר למחוק כל קובץ בנפרד.</p>
+        <ul className={`divide-y ${isDarkMode?'divide-slate-700':'divide-slate-200'}`}>
+          {otherSources.map(src => (
+            <li key={src.id} className="flex items-center gap-3 py-2 text-xs">
+              <FileSpreadsheet className="w-4 h-4 shrink-0 text-emerald-600"/>
+              <div className="flex-1 min-w-0">
+                <p className={`font-semibold truncate ${strong}`} title={src.name}>{src.name}</p>
+                <p className={muted}>{src.label}{src.detail ? ` · ${src.detail}` : ''}</p>
+              </div>
+              <button type="button" onClick={() => { if (window.confirm(`למחוק את הקובץ "${src.name}"?\n(${src.label})`)) src.onDelete(); }}
+                aria-label={`מחק את ${src.name}`}
+                className={`shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg font-semibold ${isDarkMode?'text-red-300 hover:bg-red-500/10':'text-red-700 hover:bg-red-50'}`}>
+                <Trash2 className="w-3.5 h-3.5"/>מחק
+              </button>
+            </li>
+          ))}
+        </ul>
+      </div>
+    );
+  };
   const renderFilesPanel = () => {
     const muted = isDarkMode?'text-slate-400':'text-slate-500';
     const strong = isDarkMode?'text-slate-100':'text-slate-800';
@@ -4064,15 +4155,24 @@ const renderProductRow = (p) => {
                   </p>
                 )}
                 {msg && <p className={`text-xs font-semibold px-2 py-1.5 rounded ${msg.kind==='ok'?(isDarkMode?'bg-emerald-500/15 text-emerald-300':'bg-emerald-50 text-emerald-800'):(isDarkMode?'bg-red-500/15 text-red-300':'bg-red-50 text-red-700')}`}>{msg.text}</p>}
-                <label className={`mt-auto inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold cursor-pointer transition-colors ${busy?'opacity-60 cursor-wait':''} ${st.loaded?(isDarkMode?'border border-slate-600 text-slate-200 hover:bg-slate-700':'border border-slate-300 text-slate-700 bg-white hover:bg-slate-50'):'bg-blue-600 hover:bg-blue-700 text-white'}`}>
+                <div className="mt-auto flex gap-2">
+                <label className={`flex-1 inline-flex items-center justify-center gap-2 px-3 py-2 rounded-lg text-sm font-semibold cursor-pointer transition-colors ${busy?'opacity-60 cursor-wait':''} ${st.loaded?(isDarkMode?'border border-slate-600 text-slate-200 hover:bg-slate-700':'border border-slate-300 text-slate-700 bg-white hover:bg-slate-50'):'bg-blue-600 hover:bg-blue-700 text-white'}`}>
                   {busy ? <Loader2 className="w-4 h-4 animate-spin"/> : <Upload className="w-4 h-4"/>}
                   {busy ? 'טוען…' : st.loaded ? `החלף קובץ ${d.title}` : `העלה קובץ ${d.title}`}
                   <input type="file" accept=".xlsx,.xls,.csv" className="sr-only" disabled={busy} onChange={onPick}/>
                 </label>
+                {st.loaded && !busy && (
+                  <button type="button" onClick={() => clearProcSlot(d.key)} aria-label={`מחק ${d.title}`} title={`מחק ${d.title}`}
+                    className={`shrink-0 inline-flex items-center gap-1 px-3 py-2 rounded-lg text-sm font-semibold border ${isDarkMode?'border-slate-600 text-red-300 hover:bg-red-500/10':'border-slate-300 bg-white text-red-700 hover:bg-red-50'}`}>
+                    <Trash2 className="w-4 h-4"/>מחק
+                  </button>
+                )}
+                </div>
               </div>
             );
           })}
         </div>
+        {renderOtherSources()}
         <div className={`flex flex-wrap items-center gap-x-4 gap-y-1 text-xs ${muted}`}>
           <span>היסטוריה לפני תקופת שורות החשבוניות נלקחת מקובץ "מכירות חודשיות לפי מוצר" שבלשונית מכירות{salesDataRaw.length?' (נטען)':' (לא נטען)'}.</span>
           {(invSlots.product || invSlots.masterCard) && <button type="button" onClick={clearInventory} className={`font-semibold ${isDarkMode?'text-red-300':'text-red-700'} hover:underline`}>נקה את נתוני המלאי וכרטיס הפריט</button>}
@@ -6565,6 +6665,37 @@ const App = () => {
     });
   };
 
+  // Remove the rows of ONE uploaded file (rows carry the file name at the end of their id).
+  const removeDataFile = (kind, name) => {
+    const isSales = kind === 'sales';
+    const data = isSales ? salesData : suppliersData;
+    const names = isSales ? salesFileNames : suppliersFileNames;
+    const key = isSales ? 'dashboardSalesData' : 'dashboardSuppliersData';
+    trashSet(key, data, { fileNames: names });
+    const kept = data.filter(r => !String(r.id||'').endsWith('-' + name));
+    const keptNames = names.filter(n => n !== name);
+    if (isSales) { setSalesData(kept); setSalesFileNames(keptNames); } else { setSuppliersData(kept); setSuppliersFileNames(keptNames); }
+    showUndoToast(`הקובץ ${name} נמחק`, async () => {
+      const t = await trashGet(key);
+      if (t?.value) {
+        if (isSales) { setSalesData(t.value); setSalesFileNames(t.extra?.fileNames||[]); }
+        else { setSuppliersData(t.value); setSuppliersFileNames(t.extra?.fileNames||[]); }
+        await trashClear(key);
+      }
+      setUndoToast(null);
+    });
+  };
+  const otherSources = useMemo(() => {
+    const out = [];
+    const count = (data, n) => data.reduce((c, r) => c + (String(r.id||'').endsWith('-' + n) ? 1 : 0), 0);
+    salesFileNames.forEach(n => out.push({ id:'s:'+n, name:n, label:'מכירות חודשיות לפי מוצר (לשונית מכירות)', detail:`${count(salesData, n).toLocaleString()} שורות`, onDelete:() => removeDataFile('sales', n) }));
+    suppliersFileNames.forEach(n => out.push({ id:'p:'+n, name:n, label:'הוצאות לפי ספק (לשונית ספקים)', detail:`${count(suppliersData, n).toLocaleString()} שורות`, onDelete:() => removeDataFile('suppliers', n) }));
+    if (customerMonthlyFileName && customerMonthlyData.length) out.push({ id:'cm', name:customerMonthlyFileName, label:'מכירות ללקוח בחתך חודשי (לשונית לקוחות)', detail:`${customerMonthlyData.length.toLocaleString()} שורות`, onDelete:clearCustomerMonthly });
+    if (customerProductFileName && customerProductData.length) out.push({ id:'cp', name:customerProductFileName, label:'מכירות ללקוח לפי מוצר (לשונית לקוחות)', detail:`${customerProductData.length.toLocaleString()} שורות`, onDelete:clearCustomerProduct });
+    return out;
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [salesFileNames, suppliersFileNames, salesData, suppliersData, customerMonthlyFileName, customerMonthlyData, customerProductFileName, customerProductData]);
+
   // ─── Saved views — remembers a filter combo (tab + date range + product/supplier) ───
   const [savedViews, setSavedViews] = useState(() => { try { return JSON.parse(localStorage.getItem('savedViews')||'[]'); } catch { return []; } });
   const [showSavedViews, setShowSavedViews] = useState(false);
@@ -7350,7 +7481,7 @@ const App = () => {
 
           {/* Procurement Planning */}
           {activeTab==='procurement' && (
-            <ProcurementPage salesData={salesData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} />
+            <ProcurementPage salesData={salesData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
           )}
 
           {/* Summary */}
