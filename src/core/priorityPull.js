@@ -173,7 +173,9 @@ const poMetaOf = (r, s) => {
 };
 async function pullOpenPOs(forms, query) {
   const s = poShape(forms);
-  const filter = s.st ? `${s.st} ne 'סגורה' and ${s.st} ne 'מבוטלת'` : '';
+  // Only orders that really went out count as "on the way": sent (נשלחה) or approved (אושרה).
+  // Drafts and orders waiting for approval are not commitments yet.
+  const filter = s.st ? `(${s.st} eq 'נשלחה' or ${s.st} eq 'אושרה')` : '';
   const rows = await query('PORDERS', {
     select: sel(s.ord, s.date, s.sup, s.st), filter, orderby: s.ord,
     expand: [`${s.it.name}($select=${sel(s.sku, s.des, s.bal, s.due, s.price)})`, s.log ? `${s.log}($select=UDATE,STATDES)` : ''].filter(Boolean).join(','),

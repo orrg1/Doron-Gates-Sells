@@ -69,7 +69,8 @@ export const parsePriorityOrders = (rows) => {
   const colDate  = findCol('ת. הזמנה', 'תאריך הזמנה', 'ת.הזמנה', 'תאריך');
   const colExpDate = findCol('ת. אספקה', 'תאריך אספקה', 'ת.אספקה', 'תאריך אספקה צפוי');
   const colSup   = findCol('שם ספק', 'ספק', 'שם יצרן');
-  const colStatus = headers.indexOf('סטטוס הזמנה');   // from the Priority sync only
+  // PO status — from the sync ('סטטוס הזמנה') or an exported report ('סטטוס'). Only sent / approved orders are open.
+  const colStatus = headers.indexOf('סטטוס הזמנה') !== -1 ? headers.indexOf('סטטוס הזמנה') : headers.indexOf('סטטוס');
   const colSent   = headers.indexOf('ת. שליחה');
 
   // Convert Excel serial date → dd/mm/yyyy
@@ -90,6 +91,7 @@ export const parsePriorityOrders = (rows) => {
     const qtyRaw = colQty !== -1 ? parseFloat(vals[colQty]) : NaN;
     const qty = isNaN(qtyRaw) || qtyRaw <= 0 ? 0 : qtyRaw;
     if (qty <= 0) return; // skip rows with no remaining qty
+    if (colStatus !== -1 && vals[colStatus] && !['נשלחה', 'אושרה'].includes(vals[colStatus])) return; // draft / waiting for approval / closed
 
     const valRaw = colVal !== -1 ? parseFloat(vals[colVal]) : NaN;
 
@@ -631,7 +633,10 @@ export const applyInventory = (prev, parsed, { replaceStock = false, today = new
 export const applyOpenOrders = ({ prevOrders = [], parsed, receiptLog = [], draftQty = {}, today = new Date().toISOString().slice(0, 10) }) => {
   const idOf = (o) => `${o.poNumber || ''}|${o.productKey || o.productName || ''}`;
   const newIds = new Set(parsed.map(idOf));
-  const vanished = prevOrders.filter(o => o.fromPriority && o.poNumber && !newIds.has(idOf(o)));
+  // An order that disappears from the open list was received — unless it was never sent
+  // (a draft / waiting-for-approval order that got cancelled or is now filtered out).
+  const SENT = new Set(['נשלחה', 'אושרה']);
+  const vanished = prevOrders.filter(o => o.fromPriority && o.poNumber && !newIds.has(idOf(o)) && (!o.poStatus || SENT.has(o.poStatus)));
   const nextLog = vanished.length ? [...receiptLog, ...vanished.map(o => ({
     supplier: o.supplier || '', productKey: o.productKey || o.productName, poNumber: o.poNumber,
     orderDate: o.orderDate || '', expectedDate: o.expectedDate || '', receivedDate: today, qty: o.orderedQty || 0, estimated: true,

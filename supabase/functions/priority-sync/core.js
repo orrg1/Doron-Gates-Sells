@@ -61,7 +61,7 @@ var parsePriorityOrders = (rows) => {
   const colDate = findCol("\u05EA. \u05D4\u05D6\u05DE\u05E0\u05D4", "\u05EA\u05D0\u05E8\u05D9\u05DA \u05D4\u05D6\u05DE\u05E0\u05D4", "\u05EA.\u05D4\u05D6\u05DE\u05E0\u05D4", "\u05EA\u05D0\u05E8\u05D9\u05DA");
   const colExpDate = findCol("\u05EA. \u05D0\u05E1\u05E4\u05E7\u05D4", "\u05EA\u05D0\u05E8\u05D9\u05DA \u05D0\u05E1\u05E4\u05E7\u05D4", "\u05EA.\u05D0\u05E1\u05E4\u05E7\u05D4", "\u05EA\u05D0\u05E8\u05D9\u05DA \u05D0\u05E1\u05E4\u05E7\u05D4 \u05E6\u05E4\u05D5\u05D9");
   const colSup = findCol("\u05E9\u05DD \u05E1\u05E4\u05E7", "\u05E1\u05E4\u05E7", "\u05E9\u05DD \u05D9\u05E6\u05E8\u05DF");
-  const colStatus = headers.indexOf("\u05E1\u05D8\u05D8\u05D5\u05E1 \u05D4\u05D6\u05DE\u05E0\u05D4");
+  const colStatus = headers.indexOf("\u05E1\u05D8\u05D8\u05D5\u05E1 \u05D4\u05D6\u05DE\u05E0\u05D4") !== -1 ? headers.indexOf("\u05E1\u05D8\u05D8\u05D5\u05E1 \u05D4\u05D6\u05DE\u05E0\u05D4") : headers.indexOf("\u05E1\u05D8\u05D8\u05D5\u05E1");
   const colSent = headers.indexOf("\u05EA. \u05E9\u05DC\u05D9\u05D7\u05D4");
   const excelToDate = (serial) => {
     const n = parseFloat(serial);
@@ -78,6 +78,7 @@ var parsePriorityOrders = (rows) => {
     const qtyRaw = colQty !== -1 ? parseFloat(vals[colQty]) : NaN;
     const qty = isNaN(qtyRaw) || qtyRaw <= 0 ? 0 : qtyRaw;
     if (qty <= 0) return;
+    if (colStatus !== -1 && vals[colStatus] && !["\u05E0\u05E9\u05DC\u05D7\u05D4", "\u05D0\u05D5\u05E9\u05E8\u05D4"].includes(vals[colStatus])) return;
     const valRaw = colVal !== -1 ? parseFloat(vals[colVal]) : NaN;
     result.push({
       id: Date.now().toString(36) + Math.random().toString(36).slice(2),
@@ -449,7 +450,8 @@ var applyInventory = (prev, parsed, { replaceStock = false, today = (/* @__PURE_
 var applyOpenOrders = ({ prevOrders = [], parsed, receiptLog = [], draftQty = {}, today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10) }) => {
   const idOf = (o) => `${o.poNumber || ""}|${o.productKey || o.productName || ""}`;
   const newIds = new Set(parsed.map(idOf));
-  const vanished = prevOrders.filter((o) => o.fromPriority && o.poNumber && !newIds.has(idOf(o)));
+  const SENT = /* @__PURE__ */ new Set(["\u05E0\u05E9\u05DC\u05D7\u05D4", "\u05D0\u05D5\u05E9\u05E8\u05D4"]);
+  const vanished = prevOrders.filter((o) => o.fromPriority && o.poNumber && !newIds.has(idOf(o)) && (!o.poStatus || SENT.has(o.poStatus)));
   const nextLog = vanished.length ? [...receiptLog, ...vanished.map((o) => ({
     supplier: o.supplier || "",
     productKey: o.productKey || o.productName,
@@ -948,7 +950,7 @@ var poMetaOf = (r, s) => {
 };
 async function pullOpenPOs(forms, query) {
   const s = poShape(forms);
-  const filter = s.st ? `${s.st} ne '\u05E1\u05D2\u05D5\u05E8\u05D4' and ${s.st} ne '\u05DE\u05D1\u05D5\u05D8\u05DC\u05EA'` : "";
+  const filter = s.st ? `(${s.st} eq '\u05E0\u05E9\u05DC\u05D7\u05D4' or ${s.st} eq '\u05D0\u05D5\u05E9\u05E8\u05D4')` : "";
   const rows = await query("PORDERS", {
     select: sel(s.ord, s.date, s.sup, s.st),
     filter,
