@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import * as XLSXLib from 'xlsx';
 import { describeAll } from './priority.js';
 import { supabase, flushAll, queueDataset } from './cloud.js';
-import { supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
+import { detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
@@ -1601,6 +1601,7 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
   // Item-card extras from Priority: family, own production, average cost, list price, last sale / purchase
   const [itemsExtra, setItemsExtra] = useState({});
   const [familyFilter, setFamilyFilter] = useState('');
+  const [outlierOnly, setOutlierOnly] = useState(false);
   const setSalesLines = (arr) => { setSalesLinesAll(arr); onSalesLinesChange?.(arr); };
   const salesLines = useMemo(() => salesLinesAll.filter(l => !l.x), [salesLinesAll]);
   const [purchaseLines, setPurchaseLines] = useState([]);
@@ -1692,7 +1693,24 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
   // Monthly sales the page works from: months covered by the sales-lines file
   // come from the lines (exact, incl. zero-priced kit components and returns);
   // older months still come from the monthly file loaded in "מכירות".
-  const salesData = useMemo(() => mergeLinesIntoMonthly(salesDataRaw, salesLines), [salesDataRaw, salesLines]);
+  // ── Unusually large deals: detected per product; YOU decide per deal whether the
+  // forecast treats it as "large but normal" (cap) or keeps it as is. Undecided = kept.
+  const [outlierDecisions, setOutlierDecisions] = useState(() => { try { return JSON.parse(localStorage.getItem('procOutlierDecisions')||'{}'); } catch { return {}; } });
+  const decideOutlier = (id, val) => {
+    setOutlierDecisions(prev => {
+      const next = { ...prev }; if (val == null) delete next[id]; else next[id] = val;
+      try { localStorage.setItem('procOutlierDecisions', JSON.stringify(next)); } catch { /* best-effort */ }
+      return next;
+    });
+  };
+  const outliers = useMemo(() => detectOutliers(salesLines, { sinceIso: new Date(Date.now() - 365*DAY_MS).toISOString().slice(0,10) }), [salesLines]);
+  const salesLinesForPlan = useMemo(() => {
+    const caps = {};
+    Object.values(outliers).forEach(o => o.lines.forEach(l => { if (outlierDecisions[l.id] === 'cap') caps[l.id] = l.cap; }));
+    if (!Object.keys(caps).length) return salesLines;
+    return salesLines.map(l => { const c = caps[saleLineId(l)]; return c != null ? { ...l, q: c } : l; });
+  }, [salesLines, outliers, outlierDecisions]);
+  const salesData = useMemo(() => mergeLinesIntoMonthly(salesDataRaw, salesLinesForPlan), [salesDataRaw, salesLinesForPlan]);
 
   // Per-SKU indexes for the product drawer and supplier figures
   const linesBySku = useMemo(() => { const m = {}; salesLines.forEach(l => { (m[l.k] ||= []).push(l); }); return m; }, [salesLines]);
@@ -2548,9 +2566,13 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
       out.costFromPurchase = costFromPurchase; out.costFromAvg = costFromAvg; out.lastPurchase = lastP;
       out.family = ex?.fam || ''; out.ownMade = ex?.type === 'P'; out.avgCostPriority = ex?.avgCost ?? null; out.listPrice = ex?.listPrice ?? null;
       out.lastSalePriority = ex?.lastSale || ''; out.lastBuyPriority = ex?.lastBuy || '';
+      const ol = outliers[p.sku] || outliers[key];
+      out.outliers = ol || null;
+      out.outlierPending = ol ? ol.lines.filter(l => !outlierDecisions[l.id]).length : 0;
+      out.outlierCapped = ol ? ol.lines.filter(l => outlierDecisions[l.id] === 'cap').length : 0;
       return out;
     });
-  }, [salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, leadStats, leadAddTransit, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku, itemsExtra]);
+  }, [outliers, outlierDecisions, salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, leadStats, leadAddTransit, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku, itemsExtra]);
 
   const filtered = useMemo(() => {
     let data = products;
@@ -2559,6 +2581,7 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
     if (riskFilter!=='all') data=data.filter(p=>p.risk===riskFilter);
     if (actionFilter==='order') data=data.filter(p=>p.suggestedOrder>0);
     if (actionFilter==='late') data=data.filter(p=>p.overdue);
+    if (outlierOnly) data=data.filter(p=>p.outlierPending>0);
     if (searchTerm) data=data.filter(p=>smartMatch(p.name, searchTerm)||smartMatch(p.sku, searchTerm));
     return [...data].sort((a,b)=>{
       const va=a[sortConfig.key], vb=b[sortConfig.key];
@@ -2576,7 +2599,8 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
       const cmp = sortConfig.direction==='asc'?(va<vb?-1:va>vb?1:0):(va>vb?-1:va<vb?1:0);
       return cmp || (b.orderCost||0)-(a.orderCost||0) || (b.totalRev||0)-(a.totalRev||0);
     });
-  }, [products, abcFilter, familyFilter, riskFilter, actionFilter, searchTerm, sortConfig]);
+  }, [products, abcFilter, familyFilter, outlierOnly, riskFilter, actionFilter, searchTerm, sortConfig]);
+  const outlierPendingCount = useMemo(() => products.filter(p => p.outlierPending > 0).length, [products]);
   const familyOptions = useMemo(() => {
     const m = {}; products.forEach(p => { if (Object.keys(itemsExtra).length) { const f = p.family || 'ללא משפחה'; m[f] = (m[f]||0) + 1; } });
     return Object.entries(m).sort((a,b) => b[1]-a[1]);
@@ -3242,6 +3266,8 @@ const renderProductRow = (p) => {
                       <div className="flex items-center gap-2 min-w-0">
                         <p className={`font-semibold text-sm truncate ${isDarkMode?'text-slate-100':'text-slate-800'}`} title={p.name}>{p.name}</p>
                         <span title={`סיווג ${p.abcXyz}`} className={`shrink-0 text-[11px] font-bold px-1.5 py-0.5 rounded ${isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-100 text-slate-600'}`}>{p.abc}</span>
+                        {p.outlierPending>0 && <span title="יש עסקה חריגה שמחכה להחלטה — פתח את המוצר" className={`shrink-0 text-[11px] font-semibold px-1.5 py-0.5 rounded ${procChipCls('watch',isDarkMode)}`}>עסקה חריגה</span>}
+                        {p.outlierCapped>0 && !p.outlierPending && <span title="עסקה חריגה נכללת בממוצע בגודל רגיל" className={`shrink-0 text-[11px] font-semibold px-1.5 py-0.5 rounded ${procChipCls('muted',isDarkMode)}`}>ממוצע מתוקן</span>}
                       </div>
                       <div className="flex items-center gap-2 mt-1 min-w-0">
                         {p.sku&&p.sku!==p.name&&<span className={`text-xs font-mono shrink-0 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.sku}</span>}
@@ -3491,6 +3517,38 @@ const renderProductRow = (p) => {
                 </section>
               );
             })()}
+
+            {/* Unusually large deals — the person decides how the forecast treats each one */}
+            {p.outliers && (
+              <section>
+                <h3 className={`text-sm font-bold mb-1 ${strong}`}>עסקאות חריגות</h3>
+                <p className={`text-xs mb-2 ${muted}`}>שורות גדולות פי כמה מהרגיל (רגיל: עד ~{p.outliers.threshold} יח׳ בשורה), שלבדן הן לפחות חצי מהמכירות של אותו חודש. "גודל רגיל" = בממוצע ובתחזית השורה נספרת כ-{p.outliers.threshold} יח׳.</p>
+                <div className="space-y-2">
+                  {p.outliers.lines.map(l => {
+                    const dec = outlierDecisions[l.id];
+                    const btn = (val, label) => (
+                      <button type="button" onClick={()=>decideOutlier(l.id, dec===val ? null : val)} aria-pressed={dec===val}
+                        className={`px-2.5 py-1 rounded-lg text-xs font-semibold border ${dec===val ? 'bg-blue-600 border-blue-600 text-white' : (isDarkMode?'border-slate-600 text-slate-200':'border-slate-300 text-slate-700 bg-white')}`}>{label}</button>
+                    );
+                    return (
+                      <div key={l.id} className={`rounded-lg px-3 py-2 text-sm ${card}`}>
+                        <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+                          <b className={strong}>{l.q.toLocaleString()} יח׳</b>
+                          <span className={`truncate ${strong}`} title={l.c}>{l.c}</span>
+                          <span className={muted}>{isoToDisplay(l.d)} · {l.inv}</span>
+                          <span className={`text-xs ${muted}`}>({Math.round(l.q / l.monthQty * 100)}% מהחודש)</span>
+                          {!dec && <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded ${procChipCls('watch',isDarkMode)}`}>מחכה להחלטה</span>}
+                        </div>
+                        <div className="flex flex-wrap gap-2 mt-2">
+                          {btn('keep', 'זה ביקוש רגיל — להשאיר')}
+                          {btn('cap', `חד-פעמי — לספור כ-${l.cap} יח׳`)}
+                        </div>
+                      </div>
+                    );
+                  })}
+                </div>
+              </section>
+            )}
 
             {/* Purchasing */}
             <section>
@@ -5427,6 +5485,12 @@ const renderProductRow = (p) => {
                 <button type="button" key={k} onClick={()=>setAbcFilter(k)} aria-pressed={abcFilter===k} className={`px-2.5 py-1 rounded-md transition-all font-semibold ${abcFilter===k?(isDarkMode?'bg-slate-600 text-white shadow':'bg-white shadow text-slate-800'):(isDarkMode?'text-slate-400':'text-slate-500')}`}>{l}</button>
               ))}
             </div>
+            {outlierPendingCount>0 && (
+              <button type="button" onClick={()=>setOutlierOnly(v=>!v)} aria-pressed={outlierOnly}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border ${outlierOnly ? 'bg-blue-600 border-blue-600 text-white' : (isDarkMode?'border-slate-600 text-slate-200':'bg-slate-100 border-slate-200 text-slate-700')}`}>
+                עסקאות חריגות לבדיקה ({outlierPendingCount})
+              </button>
+            )}
             {familyOptions.length>1 && (
               <select aria-label="סינון לפי משפחת מוצר" value={familyFilter} onChange={e=>setFamilyFilter(e.target.value)}
                 style={isDarkMode?{background:'#334155',color:'#f1f5f9'}:{}}

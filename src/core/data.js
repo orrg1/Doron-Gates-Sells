@@ -680,23 +680,27 @@ export const supplierLeadTimes = ({ purchaseLines = [], poMeta = {}, transitBySu
 // Nothing is changed automatically: the person decides per deal whether to cap it
 // to "large but normal" (cap) when averaging.
 export const saleLineId = (l) => `${l.inv}|${l.k}|${l.q}|${l.d}`;
-export const detectOutliers = (lines, { sinceIso = null, factor = 3, minQty = 3 } = {}) => {
+export const detectOutliers = (lines, { sinceIso = null, factor = 4, minQty = 5, minImpact = 0.2 } = {}) => {
   const bySku = {};
   lines.forEach(l => { if (!l.x && l.q > 0 && l.k) (bySku[l.k] ||= []).push(l); });
   const out = {};
   for (const [k, arr] of Object.entries(bySku)) {
-    if (arr.length < 6) continue;
+    if (arr.length < 10) continue;               // too little history to call anything unusual
     const qs = arr.map(l => l.q).sort((a, b) => a - b);
     const med = quantile(qs, 0.5);
     const mad = quantile(qs.map(q => Math.abs(q - med)).sort((a, b) => a - b), 0.5);
     const T = Math.max(factor * med, med + 5 * mad, minQty);
     const monthQty = {};
     arr.forEach(l => { const m = l.d.slice(0, 7); monthQty[m] = (monthQty[m] || 0) + l.q; });
+    const recent = sinceIso ? arr.filter(l => l.d >= sinceIso) : arr;
+    const recentTotal = recent.reduce((a, l) => a + l.q, 0);
     const big = arr.filter(l => l.q > T);
     if (!big.length) continue;
     const bigByCust = {};
     big.forEach(l => { bigByCust[l.c] = (bigByCust[l.c] || 0) + 1; });
-    const list = big.filter(l => bigByCust[l.c] < 3 && l.q >= 0.5 * monthQty[l.d.slice(0, 7)] && (!sinceIso || l.d >= sinceIso))
+    const list = big.filter(l => bigByCust[l.c] < 3 && l.q >= 0.5 * monthQty[l.d.slice(0, 7)] && (!sinceIso || l.d >= sinceIso)
+        // only deals that really move the average: the part above "normal" is 20%+ of the period's sales
+        && recentTotal > 0 && (l.q - T) / recentTotal >= minImpact)
       .map(l => ({ id: saleLineId(l), d: l.d, c: l.c, q: l.q, inv: l.inv, cap: Math.max(1, Math.round(T)), monthQty: monthQty[l.d.slice(0, 7)] }))
       .sort((a, b) => a.d < b.d ? 1 : -1);
     if (list.length) out[k] = { threshold: Math.round(T), median: med, lines: list };
