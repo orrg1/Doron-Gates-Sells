@@ -402,8 +402,9 @@ const KPICard = ({ title, value, formatted, subtext, icon: Icon, color, trend, s
 
 // Overview Dashboard Page
 // ─── CUSTOMERS PAGE ─────────────────────────────────────
-const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUploadMonthly, onUploadProduct, onClearMonthly, onClearProduct, loading, uploadError, uploadSuccess, onDismissError, excludeCurrentMonth, priorityRange = null, fileCounts = {} }) => {
+const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUploadMonthly, onUploadProduct, onClearMonthly, onClearProduct, loading, uploadError, uploadSuccess, onDismissError, excludeCurrentMonth, priorityRange = null, fileCounts = {}, customerCards = {} }) => {
   const [search, setSearch] = useState('');
+  const [cityFilter, setCityFilter] = useState('');
   const [sortConfig, setSortConfig] = useState({ key:'totalRevenue', direction:'desc' });
   const { sortRows, sortTh } = useTableSort();
   const [expandedCustomer, setExpandedCustomer] = useState(null);
@@ -477,6 +478,14 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
         && (c.monthly[last3Cal[2]]||0) > 0;
       return { ...c, months, totalRevenue, avgMonthly, firstMonth, lastActiveMonth, trend, status, decliningStreak };
     });
+    // Customer card from Priority (city, agent, payment terms, customer since) — by number, else by name.
+    const byName = {}; Object.values(customerCards).forEach(k => { if (k?.name) byName[k.name] = k; });
+    list.forEach(c => {
+      const card = customerCards[c.customerId] || byName[c.name];
+      if (!card) return;
+      c.city = card.city || ''; c.agent = card.agent || ''; c.pay = card.pay || ''; c.since = card.created || '';
+      c.custType = card.type || ''; c.zone = card.zone || ''; c.credit = card.credit || null; c.cardStatus = card.status || '';
+    });
     const totalAll = list.reduce((s,c)=>s+c.totalRevenue,0);
     const sorted = [...list].sort((a,b)=>b.totalRevenue-a.totalRevenue);
     let cumulative = 0;
@@ -488,7 +497,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
       c.atRisk = c.status==='active' && c.decliningStreak && (c.abc==='A'||c.abc==='B');
     });
     return sorted;
-  }, [filteredMonthlyData, excludeCurrentMonth]);
+  }, [filteredMonthlyData, excludeCurrentMonth, customerCards]);
 
   // Customer segmentation by ABC (revenue concentration) — replaces the monthly
   // trend chart here, since that's already covered in the "מכירות" tab.
@@ -552,7 +561,8 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
 
   const filtered = useMemo(() => {
     let data = customers;
-    if (search) data = data.filter(c=>smartMatch(c.name, search));
+    if (search) data = data.filter(c=>smartMatch(c.name, search) || smartMatch(c.city||'', search) || smartMatch(c.agent||'', search));
+    if (cityFilter) data = data.filter(c => (c.city||'') === cityFilter);
     const STATUS_LABEL = { new:'חדש', churned:'נטש', active:'פעיל' };
     const get = sortConfig.key==='status' ? (c => STATUS_LABEL[c.status]||'פעיל') : (c => c[sortConfig.key]);
     const mul = sortConfig.direction==='asc' ? 1 : -1;
@@ -561,7 +571,12 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
       if (va===null || vb===null) return va===vb ? 0 : va===null ? 1 : -1;
       return compareSortKeys(va, vb) * mul;
     });
-  }, [customers, search, sortConfig]);
+  }, [customers, search, cityFilter, sortConfig]);
+  const cityOptions = useMemo(() => {
+    const m = {}; customers.forEach(c => { if (c.city) m[c.city] = (m[c.city]||0) + 1; });
+    return Object.entries(m).sort((a,b) => b[1]-a[1]);
+  }, [customers]);
+  const hasCards = customers.some(c => c.city || c.since || c.agent);
   useEffect(() => setCustomerPage(1), [search, sortConfig, customers]);
   const customerTotalPages = Math.ceil(filtered.length / customerItemsPerPage) || 1;
   const paginatedCustomers = useMemo(() => filtered.slice((customerPage-1)*customerItemsPerPage, customerPage*customerItemsPerPage), [filtered, customerPage]);
@@ -807,10 +822,20 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
           <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
             <div className={`px-5 py-4 border-b flex flex-wrap justify-between items-center gap-3 ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
               <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><User className="w-4 h-4 text-slate-400"/>לקוחות <span className={`text-xs font-normal px-2 py-0.5 rounded-full ${isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500'}`}>{filtered.length.toLocaleString()}</span></h3>
+              <div className="flex items-center gap-2">
+              {cityOptions.length>0 && (
+                <select aria-label="סינון לפי עיר" value={cityFilter} onChange={e=>setCityFilter(e.target.value)}
+                  style={isDarkMode?{background:'#0f172a',color:'#f1f5f9'}:{}}
+                  className={`px-3 py-2 border rounded-xl text-xs ${isDarkMode?'border-slate-700':'bg-slate-50 border-slate-200'}`}>
+                  <option value="">כל הערים</option>
+                  {cityOptions.map(([c,n]) => <option key={c} value={c}>{c} ({n})</option>)}
+                </select>
+              )}
               <div className="relative">
                 <Search className={`absolute right-3 top-2.5 w-3.5 h-3.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}/>
-                <input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder="חיפוש לקוח..."
+                <input type="text" value={search} onChange={e=>setSearch(e.target.value)} placeholder={hasCards?'חיפוש לקוח, עיר או סוכן...':'חיפוש לקוח...'}
                   className={`pr-9 pl-3 py-2 border rounded-xl text-xs w-48 focus:outline-none focus:ring-2 focus:ring-pink-500 ${isDarkMode?'bg-slate-900 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
+              </div>
               </div>
             </div>
             <div className="overflow-x-auto max-h-[460px]">
@@ -818,11 +843,13 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
                 <thead className={`text-[11px] font-semibold uppercase tracking-widest sticky top-0 z-10 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
                   <tr>
                     <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" aria-sort={sortConfig.key==='name'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('name','asc')}>לקוח<SortIcon colKey="name" sortConfig={sortConfig}/></th>
+                    {hasCards && <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" aria-sort={sortConfig.key==='city'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('city','asc')}>עיר<SortIcon colKey="city" sortConfig={sortConfig}/></th>}
                     <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" aria-sort={sortConfig.key==='abc'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('abc','asc')}>ABC<SortIcon colKey="abc" sortConfig={sortConfig}/></th>
                     <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" aria-sort={sortConfig.key==='totalRevenue'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('totalRevenue','desc')}>הכנסה כוללת<SortIcon colKey="totalRevenue" sortConfig={sortConfig}/></th>
                     <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" aria-sort={sortConfig.key==='avgMonthly'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('avgMonthly','desc')}>ממוצע חודשי<SortIcon colKey="avgMonthly" sortConfig={sortConfig}/></th>
                     <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" aria-sort={sortConfig.key==='trend'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('trend','desc')}>מגמה<SortIcon colKey="trend" sortConfig={sortConfig}/></th>
                     <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500" aria-sort={sortConfig.key==='status'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('status','asc')}>סטטוס<SortIcon colKey="status" sortConfig={sortConfig}/></th>
+                    {hasCards && <th className="px-4 py-3 cursor-pointer select-none hover:text-pink-500 whitespace-nowrap" aria-sort={sortConfig.key==='since'?(sortConfig.direction==='asc'?'ascending':'descending'):'none'} onClick={()=>reqSort('since','desc')}>לקוח מאז<SortIcon colKey="since" sortConfig={sortConfig}/></th>}
                     {productData.length>0 && <th className="px-4 py-3"></th>}
                   </tr>
                 </thead>
@@ -833,7 +860,11 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
                     return (
                       <React.Fragment key={c.name}>
                         <tr className={`transition-colors ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50/80'}`}>
-                          <td className={`px-4 py-3 font-medium ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{c.name}</td>
+                          <td className={`px-4 py-3 font-medium ${isDarkMode?'text-slate-100':'text-slate-800'}`}>
+                            {c.name}
+                            {(c.agent || c.pay) && <p className={`text-[11px] font-normal ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{[c.agent && `סוכן: ${c.agent}`, c.pay && `תשלום: ${c.pay}`].filter(Boolean).join(' · ')}</p>}
+                          </td>
+                          {hasCards && <td className="px-4 py-3 text-xs">{c.city || '—'}</td>}
                           <td className="px-4 py-3">
                             <span className={`inline-flex items-center justify-center w-6 h-6 rounded-lg text-xs font-bold ${c.abc==='A'?(isDarkMode?'bg-orange-500/20 text-orange-400':'bg-orange-100 text-orange-700'):c.abc==='B'?(isDarkMode?'bg-blue-500/20 text-blue-400':'bg-blue-100 text-blue-700'):(isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500')}`} title={`${c.revPct.toFixed(1)}% מההכנסות`}>{c.abc}</span>
                           </td>
@@ -850,6 +881,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
                               </span>
                             )}
                           </td>
+                          {hasCards && <td className="px-4 py-3 text-xs tabular-nums whitespace-nowrap">{c.since ? isoToDisplay(c.since) : '—'}</td>}
                           {productData.length>0 && (
                             <td className="px-4 py-3">
                               {myProducts?.length>0 && (
@@ -864,7 +896,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
                           const myTotal = myProducts.reduce((s,p)=>s+p.revenue,0);
                           return (
                           <tr>
-                            <td colSpan={7} className={`px-4 py-3 ${isDarkMode?'bg-slate-900/40':'bg-slate-50'}`}>
+                            <td colSpan={hasCards?9:7} className={`px-4 py-3 ${isDarkMode?'bg-slate-900/40':'bg-slate-50'}`}>
                               <div className="flex items-center justify-between mb-1">
                                 <p className={`text-xs font-bold ${isDarkMode?'text-slate-400':'text-slate-500'}`}>מוצרים שנרכשו — {c.name} ({myProducts.length} מוצרים שונים)</p>
                                 <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>סה"כ {formatCurrency(myTotal)}</p>
@@ -901,7 +933,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
                       </React.Fragment>
                     );
                   })}
-                  {filtered.length===0 && <tr><td colSpan={7} className={`px-4 py-16 text-center text-sm ${isDarkMode?'text-slate-600':'text-slate-400'}`}>לא נמצאו לקוחות</td></tr>}
+                  {filtered.length===0 && <tr><td colSpan={hasCards?9:7} className={`px-4 py-16 text-center text-sm ${isDarkMode?'text-slate-600':'text-slate-400'}`}>לא נמצאו לקוחות</td></tr>}
                 </tbody>
               </table>
             </div>
@@ -2050,7 +2082,7 @@ const matchShipSupplier = (fwdName, candidates) => {
 
 
 // ─── PROCUREMENT PAGE ──────────────────────────────────
-const ProcurementPage = ({ onSalesLinesChange, salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
+const ProcurementPage = ({ onSalesLinesChange, onCustomersChange, salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
   // SKU → product name, captured from the inventory file. Needed so items
   // that are in stock but never appear in sales can still be shown by name
@@ -2072,6 +2104,9 @@ const ProcurementPage = ({ onSalesLinesChange, salesData: salesDataRaw, supplier
   // Big datasets live in IndexedDB; a small summary of each file lives in localStorage.
   // All stored invoice lines (incl. value-only lines, x:1); procurement looks only at product lines.
   const [salesLinesAll, setSalesLinesAll] = useState([]);
+  // Item-card extras from Priority: family, own production, average cost, list price, last sale / purchase
+  const [itemsExtra, setItemsExtra] = useState({});
+  const [familyFilter, setFamilyFilter] = useState('');
   const setSalesLines = (arr) => { setSalesLinesAll(arr); onSalesLinesChange?.(arr); };
   const salesLines = useMemo(() => salesLinesAll.filter(l => !l.x), [salesLinesAll]);
   const [purchaseLines, setPurchaseLines] = useState([]);
@@ -2090,8 +2125,9 @@ const ProcurementPage = ({ onSalesLinesChange, salesData: salesDataRaw, supplier
     let cancelled = false;
     (async () => {
       try {
-        const [a, b, c] = await Promise.all([idbGet('procSalesLines'), idbGet('procPurchaseLines'), idbGet('procShipments')]);
+        const [a, b, c, x] = await Promise.all([idbGet('procSalesLines'), idbGet('procPurchaseLines'), idbGet('procShipments'), idbGet('procItemsExtra')]);
         if (cancelled) return;
+        if (x && typeof x === 'object') setItemsExtra(x);
         if (Array.isArray(a)) setSalesLinesAll(a);
         if (Array.isArray(b)) setPurchaseLines(b);
         if (Array.isArray(c)) setShipments(c);
@@ -2881,12 +2917,15 @@ const ProcurementPage = ({ onSalesLinesChange, salesData: salesDataRaw, supplier
       const supplier     = supplierMap[key]??supplierMap[p.sku]??supplierMap[p.name]??lastP?.s??null;
       const catalogCost  = costMap[key]??costMap[p.sku]??costMap[p.name]??null;
       const costFromPurchase = catalogCost==null && lastP && lastP.p>0;
-      const currency     = costFromPurchase ? lastP.cur : (currencyMap[key]??currencyMap[p.sku]??currencyMap[p.name]??null);
+      const ex = itemsExtra[p.sku] ?? itemsExtra[key] ?? null;
+      // Last resort: Priority's average cost (always in ₪) when there is no item-card price and no supplier invoice.
+      const costFromAvg = catalogCost==null && !costFromPurchase && ex?.avgCost>0;
+      const currency     = costFromPurchase ? lastP.cur : costFromAvg ? 'ILS' : (currencyMap[key]??currencyMap[p.sku]??currencyMap[p.name]??null);
       // ── Unit cost — original currency AND ₪-converted ──
       // unitCost (₪) feeds every aggregate; unitCostOriginal stays in the
       // supplier's currency for per-row / supplier-facing displays. A foreign
       // cost with no rate in Settings is null (flagged), never silently 1:1.
-      const unitCostOriginal = costFromPurchase ? lastP.p : catalogCost;
+      const unitCostOriginal = costFromPurchase ? lastP.p : costFromAvg ? ex.avgCost : catalogCost;
       const isForeignCost = currency && currency!=='ILS';
       // Rate: Settings first, else the rate Priority recorded on the last supplier invoice in that currency.
       const fxRate = !isForeignCost ? 1 : (exchangeRates?.[currency]>0 ? exchangeRates[currency] : (lastP && lastP.cur===currency && lastP.rate>0 ? lastP.rate : null));
@@ -3010,14 +3049,17 @@ const ProcurementPage = ({ onSalesLinesChange, salesData: salesDataRaw, supplier
       out.status = procStatus(out);
       out.statusRank = { now:0, soon:1, watch:2, unknown:3, ok:4 }[out.status];
       out.chip = procChip(out);
-      out.costFromPurchase = costFromPurchase; out.lastPurchase = lastP;
+      out.costFromPurchase = costFromPurchase; out.costFromAvg = costFromAvg; out.lastPurchase = lastP;
+      out.family = ex?.fam || ''; out.ownMade = ex?.type === 'P'; out.avgCostPriority = ex?.avgCost ?? null; out.listPrice = ex?.listPrice ?? null;
+      out.lastSalePriority = ex?.lastSale || ''; out.lastBuyPriority = ex?.lastBuy || '';
       return out;
     });
-  }, [salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku]);
+  }, [salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku, itemsExtra]);
 
   const filtered = useMemo(() => {
     let data = products;
     if (abcFilter!=='all') data=data.filter(p=>p.abc===abcFilter);
+    if (familyFilter) data=data.filter(p=>(p.family||'ללא משפחה')===familyFilter);
     if (riskFilter!=='all') data=data.filter(p=>p.risk===riskFilter);
     if (actionFilter==='order') data=data.filter(p=>p.suggestedOrder>0);
     if (actionFilter==='late') data=data.filter(p=>p.overdue);
@@ -3038,7 +3080,11 @@ const ProcurementPage = ({ onSalesLinesChange, salesData: salesDataRaw, supplier
       const cmp = sortConfig.direction==='asc'?(va<vb?-1:va>vb?1:0):(va>vb?-1:va<vb?1:0);
       return cmp || (b.orderCost||0)-(a.orderCost||0) || (b.totalRev||0)-(a.totalRev||0);
     });
-  }, [products, abcFilter, riskFilter, actionFilter, searchTerm, sortConfig]);
+  }, [products, abcFilter, familyFilter, riskFilter, actionFilter, searchTerm, sortConfig]);
+  const familyOptions = useMemo(() => {
+    const m = {}; products.forEach(p => { if (Object.keys(itemsExtra).length) { const f = p.family || 'ללא משפחה'; m[f] = (m[f]||0) + 1; } });
+    return Object.entries(m).sort((a,b) => b[1]-a[1]);
+  }, [products, itemsExtra]);
 
   // ─── Progressive rendering for the main table ───────────────────
   // With large catalogs (1000+ SKUs), building/diffing every row on every
@@ -3107,12 +3153,17 @@ const ProcurementPage = ({ onSalesLinesChange, salesData: salesDataRaw, supplier
         const currency = currencyMap[k] ?? null;
         const isForeign = currency && currency !== 'ILS';
         const rate = !isForeign ? 1 : (exchangeRates?.[currency]>0 ? exchangeRates[currency] : null);
-        const unitCostOriginal = costMap[k] ?? null;
-        const unitCost = (unitCostOriginal!=null && rate!=null) ? unitCostOriginal*rate : null;
+        const ex = itemsExtra[k];
+        const avgOnly = costMap[k] == null && ex?.avgCost > 0;
+        const unitCostOriginal = avgOnly ? ex.avgCost : costMap[k] ?? null;
+        const unitCost = avgOnly ? ex.avgCost : (unitCostOriginal!=null && rate!=null) ? unitCostOriginal*rate : null;
+        // Priority's item card knows the real last sale even when it is older than the invoice lines we hold.
+        const lastSaleDate = ex?.lastSale ? new Date(ex.lastSale) : null;
         return {
           key:k, sku:k, name:nameMap[k]||k, abc:'C', xyz:'', abcXyz:'C', currentStock:q, unitCost, unitCostOriginal,
-          costCurrencyBlocked: unitCostOriginal!=null && rate==null ? currency : null,
-          supplier: supplierMap[k] ?? null, lastSaleDate:null, daysSince:null, neverSold:true,
+          currency: avgOnly ? 'ILS' : currency, family: ex?.fam || '',
+          costCurrencyBlocked: !avgOnly && unitCostOriginal!=null && rate==null ? currency : null,
+          supplier: supplierMap[k] ?? null, lastSaleDate, daysSince: lastSaleDate ? Math.round((Date.now()-lastSaleDate)/(24*60*60*1000)) : null, neverSold: !lastSaleDate,
           stockValue: q * (unitCost ?? 0),
         };
       });
@@ -3133,17 +3184,18 @@ const ProcurementPage = ({ onSalesLinesChange, salesData: salesDataRaw, supplier
           .filter(([,v])=>v>0)
           .map(([d])=>toDate(d))
           .filter(Boolean);
+        const fromCard = p.lastSalePriority ? new Date(p.lastSalePriority) : null;
         const lastSaleDate = saleDates.length
           ? new Date(Math.max(...saleDates.map(d=>d.getTime())))
-          : null;
-        const daysSince = lastSaleDate
+          : fromCard;
+        const daysSince = saleDates.length
           ? Math.round((latestDate-lastSaleDate)/(24*60*60*1000))
-          : null;
+          : fromCard ? Math.round((Date.now()-fromCard)/(24*60*60*1000)) : null;
         const stockValue = (p.currentStock??0) * (p.unitCost??0);
-        return { ...p, lastSaleDate, daysSince, stockValue };
+        return { ...p, lastSaleDate, daysSince, stockValue, neverSold: !lastSaleDate };
       }), ...neverSold]
       .sort((a,b) => (b.stockValue||0)-(a.stockValue||0));
-  }, [products, salesData, deadStockDays, stockMap, nameMap, costMap, currencyMap, supplierMap, exchangeRates]);
+  }, [products, salesData, deadStockDays, stockMap, nameMap, costMap, currencyMap, supplierMap, exchangeRates, itemsExtra]);
 
   const deadStockValue = useMemo(() =>
     deadStockData.reduce((a,p)=>a+(p.stockValue||0),0), [deadStockData]);
@@ -3966,6 +4018,7 @@ const renderProductRow = (p) => {
                 <dt className={muted}>מחיר קניה</dt>
                 <dd className={`font-semibold ${strong}`}>
                   {p.unitCostOriginal!=null ? formatUnitCost(p.unitCostOriginal, p.currency) : '—'}
+                  {p.costFromAvg && <span className={`mr-2 text-xs ${muted}`}>(עלות ממוצעת מ-Priority — אין מחיר בכרטיס)</span>}
                   {p.priceChangePct!=null && Math.abs(p.priceChangePct)>=0.5 && <span className={`mr-2 text-xs ${p.priceChangePct>0?(isDarkMode?'text-orange-300':'text-orange-700'):muted}`}>({p.priceChangePct>0?'עלה':'ירד'} {Math.abs(p.priceChangePct).toFixed(1)}% מ-{formatUnitCost(p.prevPrice, p.currency)})</span>}
                 </dd>
                 <dt className={muted}>מינימום הזמנה (MOQ)</dt>
@@ -3981,6 +4034,10 @@ const renderProductRow = (p) => {
                   )}
                 </dd>
                 <dt className={muted}>מינימום מלאי (Priority)</dt><dd className={`font-semibold ${strong}`}>{p.minStock ?? '—'}</dd>
+                {p.family && <><dt className={muted}>משפחת מוצר</dt><dd className={`font-semibold ${strong}`}>{p.family}{p.ownMade && <span className={`mr-2 text-[11px] px-1.5 py-0.5 rounded ${procChipCls('watch',isDarkMode)}`}>ייצור עצמי</span>}</dd></>}
+                {p.avgCostPriority>0 && <><dt className={muted}>עלות ממוצעת (Priority)</dt><dd className={`font-semibold ${strong}`}>{formatUnitCost(p.avgCostPriority, null)}</dd></>}
+                {p.listPrice>0 && <><dt className={muted}>מחיר מחירון</dt><dd className={`font-semibold ${strong}`}>{formatUnitCost(p.listPrice, null)}{p.avgCostPriority>0 && <span className={`mr-2 text-xs ${muted}`}>רווח {Math.round((1 - p.avgCostPriority/p.listPrice)*100)}%</span>}</dd></>}
+                {(p.lastSalePriority || p.lastBuyPriority) && <><dt className={muted}>מכירה / קנייה אחרונה</dt><dd className={`font-semibold ${strong}`}>{p.lastSalePriority ? isoToDisplay(p.lastSalePriority) : '—'} / {p.lastBuyPriority ? isoToDisplay(p.lastBuyPriority) : '—'}</dd></>}
                 <dt className={muted}>ציון סיכון</dt><dd className={`font-semibold ${strong}`} title="כיסוי מלאי 40% · תנודתיות ביקוש 20% · יציבות XYZ 15% · זמן אספקה 15% · ריכוזיות ספק 10%">{p.riskScore} / 100</dd>
               </dl>
             </section>
@@ -4082,6 +4139,12 @@ const renderProductRow = (p) => {
           return next;
         });
         report(`פריטים: ${r.itemsInfo.count.toLocaleString()} פריטים פעילים${r.itemsInfo.hasBalances ? '' : ' (בלי יתרות מלאי)'}`);
+      }
+      if (r.itemsExtra) { setItemsExtra(r.itemsExtra); try { await idbSet('procItemsExtra', r.itemsExtra); } catch { /* best-effort */ } }
+      if (r.customers) {
+        try { await idbSet('priorityCustomers', r.customers); } catch { /* best-effort */ }
+        onCustomersChange?.(r.customers);
+        report(`כרטיסי לקוחות: ${Object.keys(r.customers).length.toLocaleString()}`);
       }
       if (r.files.openOrders) { handlePriorityOrdersUpload(asEvent(r.files.openOrders), { silent:true }); }
       const today = new Date().toISOString().slice(0,10);
@@ -5808,8 +5871,8 @@ const renderProductRow = (p) => {
             <h3 className={`text-base font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}>
               {{all:'כל המוצרים', order:'מוצרים להזמנה', late:'מוצרים עם הזמנה באיחור'}[actionFilter]||'כל המוצרים'}
               <span className={`text-xs font-normal ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{filtered.length.toLocaleString()} מוצרים · לחיצה על שורה פותחת פרטים</span>
-              {(riskFilter!=='all'||abcFilter!=='all'||actionFilter!=='all') && (
-                <button type="button" onClick={()=>{setRiskFilter('all');setAbcFilter('all');setActionFilter('all');}}
+              {(riskFilter!=='all'||abcFilter!=='all'||actionFilter!=='all'||familyFilter) && (
+                <button type="button" onClick={()=>{setRiskFilter('all');setAbcFilter('all');setActionFilter('all');setFamilyFilter('');}}
                   className={`text-xs px-2 py-0.5 rounded-full flex items-center gap-1 font-normal ${isDarkMode?'bg-slate-700 text-slate-200 hover:bg-slate-600':'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>
                   <X className="w-3 h-3"/> נקה סינון
                 </button>
@@ -5820,6 +5883,14 @@ const renderProductRow = (p) => {
                 <button type="button" key={k} onClick={()=>setAbcFilter(k)} aria-pressed={abcFilter===k} className={`px-2.5 py-1 rounded-md transition-all font-semibold ${abcFilter===k?(isDarkMode?'bg-slate-600 text-white shadow':'bg-white shadow text-slate-800'):(isDarkMode?'text-slate-400':'text-slate-500')}`}>{l}</button>
               ))}
             </div>
+            {familyOptions.length>1 && (
+              <select aria-label="סינון לפי משפחת מוצר" value={familyFilter} onChange={e=>setFamilyFilter(e.target.value)}
+                style={isDarkMode?{background:'#334155',color:'#f1f5f9'}:{}}
+                className={`px-2.5 py-1.5 rounded-lg text-xs font-semibold border ${isDarkMode?'border-slate-600':'bg-slate-100 border-slate-200 text-slate-700'}`}>
+                <option value="">כל המשפחות</option>
+                {familyOptions.map(([f,n]) => <option key={f} value={f}>{f} ({n})</option>)}
+              </select>
+            )}
             <button type="button" onClick={()=>setShowLegend(p=>!p)} aria-expanded={showLegend}
               className={`flex items-center gap-1.5 text-xs font-semibold ${isDarkMode?'text-blue-300 hover:text-blue-200':'text-blue-700 hover:text-blue-800'}`}>
               <Info className="w-3.5 h-3.5"/> מה זה A/B/C?
@@ -6401,6 +6472,9 @@ const App = () => {
   // What every tab shows: months covered by the invoice lines come from them, older months from the files.
   const salesData = useMemo(() => mergeLinesIntoMonthly(salesFileData, procSalesLines, { includeExtra: true }), [salesFileData, procSalesLines]);
   const salesLinesRange = useMemo(() => linesRange(procSalesLines), [procSalesLines]);
+  // Customer cards pulled from Priority (city, agent, payment terms, customer since)
+  const [priorityCustomers, setPriorityCustomers] = useState({});
+  useEffect(() => { idbGet('priorityCustomers').then(v => { if (v && typeof v === 'object') setPriorityCustomers(v); }).catch(() => {}); }, []);
   // Customer data — two independent, optional files (see parseCustomerMonthlyFile/
   // parseCustomerProductFile): one gives the time dimension, the other the product mix.
   const [customerMonthlyData, setCustomerMonthlyData] = useState([]);
@@ -7609,7 +7683,7 @@ const App = () => {
         </header>
 
         {/* Content */}
-        <main className="flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
+        <main className="relative flex-1 overflow-y-auto p-6 space-y-6 scroll-smooth">
           {/* IDB load failure — surfaced loudly instead of silently losing data */}
           {idbLoadFailed.length > 0 && (
             <div className={`flex items-start gap-3 px-5 py-4 rounded-2xl border-2 ${isDarkMode?'bg-red-500/10 border-red-500/40 text-red-300':'bg-red-50 border-red-300 text-red-800'}`}>
@@ -7635,6 +7709,7 @@ const App = () => {
               monthlyData={customerMonthlyEff}
               productData={customerProductEff}
               priorityRange={salesLinesRange}
+              customerCards={priorityCustomers}
               fileCounts={{ monthly: customerMonthlyData.length, product: customerProductData.length }}
               isDarkMode={isDarkMode}
               fileNames={{ monthly:customerMonthlyFileName, product:customerProductFileName }}
@@ -7652,7 +7727,7 @@ const App = () => {
 
           {/* Procurement Planning */}
           {activeTab==='procurement' && (
-            <ProcurementPage onSalesLinesChange={setProcSalesLines} salesData={salesFileData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
+            <ProcurementPage onSalesLinesChange={setProcSalesLines} onCustomersChange={setPriorityCustomers} salesData={salesFileData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
           )}
 
           {/* Summary */}

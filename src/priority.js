@@ -24,7 +24,7 @@ export const pingPriority = () => call({ action: 'ping' });
 // Priority's $metadata is huge and slow (~30s). The field lists of the forms we
 // use are fetched in ONE request and kept for 7 days (saved like any other
 // setting, so every signed-in device shares them).
-const SYNC_FORMS = ['LOGPART', 'PORDERS', 'AINVOICES', 'CINVOICES', 'EINVOICES', 'YINVOICES'];
+const SYNC_FORMS = ['LOGPART', 'PORDERS', 'AINVOICES', 'CINVOICES', 'EINVOICES', 'YINVOICES', 'CUSTOMERS'];
 const SCHEMA_KEY = 'prioritySchema';
 const SCHEMA_TTL = 7 * 86400000;
 let schemaPromise = null;
@@ -120,6 +120,8 @@ const F = {
   supInvName: ['CDES', 'SUPDES', 'SUPNAME'],
   cur: ['CODE', 'ICODE'], lineCur: ['ICODE', 'CODE'], rate: ['EXCH', 'IEXCH', 'EXCHANGE'],
   debit: ['DEBIT'],
+  family: ['FAMILYDES'], familyCode: ['FAMILYNAME'], partType: ['TYPE'], avgCost: ['COST'], listPrice: ['BASEPLPRICE'],
+  lastSale: ['SALETRANSDATE'], lastBuy: ['PURTRANSDATE'], created: ['CREATEDDATE'],
   final: ['FINAL'], docStatus: ['STATDES'], hdrGross: ['QPRICE'], hdrNet: ['DISPRICE'], lineExch: ['EXCH'],
 };
 // Only finalized, non-cancelled documents count (drafts and cancelled invoices exist in the same forms).
@@ -133,16 +135,26 @@ async function pullItems(report) {
   const sku = need(f, F.part, 'מק"ט', 'LOGPART'), des = need(f, F.partDes, 'תאור', 'LOGPART');
   const st = pick(f, F.status), inv = pick(f, F.invFlag), sup = pick(f, F.supName), price = pick(f, F.buyPrice),
     cur = pick(f, F.buyCur), min = pick(f, F.minStock), moq = pick(f, F.moq);
+  const fam = pick(f, F.family), famCode = pick(f, F.familyCode), typ = pick(f, F.partType), avg = pick(f, F.avgCost),
+    list = pick(f, F.listPrice), lastSale = pick(f, F.lastSale), lastBuy = pick(f, F.lastBuy), created = pick(f, F.created);
   const balSub = Object.keys(d.subforms || {}).find(n => /BAL/.test(n));
   const balField = balSub ? pick(d.subforms[balSub], F.balance) : null;
   if (!balSub || !balField) report(`יתרות מלאי: לא נמצא תת-טופס יתרות ב-LOGPART (${Object.keys(d.subforms || {}).join(', ') || 'אין'}) — הכמויות לא יעודכנו`);
   const rows = await query('LOGPART', {
-    select: sel(sku, des, st, inv, sup, price, cur, min, moq),
+    select: sel(sku, des, st, inv, sup, price, cur, min, moq, fam, famCode, typ, avg, list, lastSale, lastBuy, created),
     expand: balSub && balField ? `${balSub}($select=${balField})` : '',
   });
-  const out = [];
+  const out = [], extra = {};
+  const iso = (v) => String(v || '').slice(0, 10);
   for (const r of rows) {
     if (st && r[st] && r[st] !== 'פעיל') continue;
+    // Extra item-card facts (family, own production, average cost, list price, last sale/purchase)
+    // — kept for every active item, also the non-stock ones.
+    extra[r[sku]] = {
+      fam: fam ? r[fam] || '' : '', famCode: famCode ? r[famCode] || '' : '', type: typ ? r[typ] || '' : '',
+      avgCost: avg ? numv(r[avg]) || null : null, listPrice: list ? numv(r[list]) || null : null,
+      lastSale: lastSale ? iso(r[lastSale]) : '', lastBuy: lastBuy ? iso(r[lastBuy]) : '', created: created ? iso(r[created]) : '',
+    };
     if (inv && r[inv] && r[inv] !== 'Y') continue;
     const bal = balSub && balField ? (r[balSub] || []).reduce((s, b) => s + numv(b[balField]), 0) : null;
     out.push({
@@ -152,7 +164,24 @@ async function pullItems(report) {
       'שם ספק': sup ? r[sup] ?? '' : '',
     });
   }
-  return { rows: out, hasBalances: !!(balSub && balField), hasCost: !!price };
+  return { rows: out, extra, hasBalances: !!(balSub && balField), hasCost: !!price };
+}
+
+// ── 1b. customer cards: city, agent, payment terms, customer since ──
+async function pullCustomers() {
+  const d = await describe('CUSTOMERS');
+  const f = d.fields;
+  const num = need(f, ['CUSTNAME'], 'מס. לקוח', 'CUSTOMERS'), name = need(f, ['CUSTDES'], 'שם לקוח', 'CUSTOMERS');
+  const cols = { status: pick(f, ['STATDES']), created: pick(f, ['CREATEDDATE']), city: pick(f, ['STATEA', 'STATE']),
+    agent: pick(f, ['AGENTNAME']), pay: pick(f, ['PAYDES']), type: pick(f, ['CTYPENAME']), zone: pick(f, ['ZONEDES']), credit: pick(f, ['MAX_CREDIT']) };
+  const rows = await query('CUSTOMERS', { select: sel(num, name, ...Object.values(cols)) });
+  const out = {};
+  for (const r of rows) {
+    const c = { num: r[num], name: r[name] };
+    for (const [k, fld] of Object.entries(cols)) if (fld) c[k] = k === 'created' ? String(r[fld] || '').slice(0, 10) : k === 'credit' ? numv(r[fld]) || null : (r[fld] || '');
+    out[r[num]] = c;
+  }
+  return out;
 }
 
 // ── 2. purchase orders (open lines → open-orders slot; dates also used by purchase lines) ──
@@ -294,6 +323,7 @@ export async function pullAllFromPriority({ months = 24, salesSince = null, purc
     if (!r.rows.length) throw new Error('לא התקבלו פריטים');
     out.files.items = rowsToFile(r.rows, `Priority פריטים ${stamp}.xlsx`);
     out.itemsInfo = { count: r.rows.length, hasBalances: r.hasBalances, hasCost: r.hasCost };
+    out.itemsExtra = r.extra;
   });
   const ordersThenPurchases = (async () => {
     let poDates = {};
@@ -326,7 +356,11 @@ export async function pullAllFromPriority({ months = 24, salesSince = null, purc
     out.files.salesLines = rowsToFile([SALES_HEADERS, ...lines], `Priority חשבוניות מכירה ${stamp}.xlsx`);
     out.counts = { ...(out.counts || {}), salesLines: lines.length };
   });
-  await Promise.all([items, ordersThenPurchases, sales]);
+  const customers = step('customers', 'כרטיסי לקוחות', async () => {
+    out.customers = await pullCustomers();
+    out.counts = { ...(out.counts || {}), customers: Object.keys(out.customers).length };
+  });
+  await Promise.all([items, ordersThenPurchases, sales, customers]);
   return out;
 }
 
