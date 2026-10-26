@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import * as XLSXLib from 'xlsx';
 import { queueDataset } from './cloud.js';
 import { pullAllFromPriority, describeAll } from './priority.js';
+import { applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
+
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
 if (typeof window !== 'undefined' && !window.XLSX) window.XLSX = XLSXLib;
@@ -52,14 +54,6 @@ const smartMatch = (text, query) => {
   return t.includes(q);
 };
 
-const HebrewMonthsMap = {
-  0:'ינו',1:'פבר',2:'מרץ',3:'אפר',4:'מאי',5:'יונ',
-  6:'יול',7:'אוג',8:'ספט',9:'אוק',10:'נוב',11:'דצמ'
-};
-const HebrewMonthsReverse = {
-  'ינו':1,'פבר':2,'מרץ':3,'אפר':4,'מאי':5,'יונ':6,
-  'יול':7,'אוג':8,'ספט':9,'אוק':10,'נוב':11,'דצמ':12
-};
 
 // Negative amounts: the minus sign must stay on the left of the number. In an
 // RTL page a bare "-₪809K" gets reordered by the browser into "809K-₪", so the
@@ -227,29 +221,9 @@ const trashSet = async (key, value, extra) => {
 const trashGet = async (key) => { try { return await idbGet('_trash_' + key); } catch { return null; } };
 const trashClear = async (key) => { try { await idbDelete('_trash_' + key); } catch { /* best-effort */ } };
 
-const excelDateToJS = (serial) => new Date((Math.floor(serial - 25569)) * 86400 * 1000);
 
-const normalizeDate = (val) => {
-  if (!val) return '';
-  if (typeof val === 'string' && val.includes('-') && isNaN(parseFloat(val))) return val;
-  const n = parseFloat(val);
-  const d = (!isNaN(n) && n > 30000 && n < 60000) ? excelDateToJS(n) : new Date(val);
-  if (d && !isNaN(d.getTime())) return `${HebrewMonthsMap[d.getMonth()]}-${d.getFullYear().toString().slice(-2)}`;
-  return String(val);
-};
 
-const getDateVal = (s) => {
-  if (!s || typeof s !== 'string') return 0;
-  const [m, y] = s.split('-');
-  return ((parseInt(y)+2000) * 100) + (HebrewMonthsReverse[m] || 0);
-};
 
-const monthsDiff = (a, b) => {
-  if (!a || !b) return 1;
-  const p = (d) => { const [m,y]=d.split('-'); return { m:HebrewMonthsReverse[m]||1, y:parseInt(y)+2000 }; };
-  const s=p(a), e=p(b);
-  return ((e.y-s.y)*12)+(e.m-s.m)+1;
-};
 
 const COLORS = ['#3b82f6','#10b981','#f59e0b','#ef4444','#8b5cf6','#ec4899','#06b6d4','#84cc16','#f43f5e','#6366f1'];
 const CHART_COLORS = { blue:'#3b82f6', green:'#10b981', amber:'#f59e0b', red:'#ef4444', purple:'#8b5cf6' };
@@ -1558,294 +1532,13 @@ const useTableSort = () => {
 };
 
 
-// ─── PRIORITY OPEN ORDERS PARSER ──────────────────────────────────
-const parsePriorityOrders = (rows) => {
-  if (!rows.length) return [];
-  const norm = s => (s||'').toString().trim();
-  const headers = Object.keys(rows[0]).map(norm);
 
-  // Detect columns — exact match first, then partial (avoids "ת. הזמנה" matching "הזמנה")
-  const findCol = (...variants) => {
-    for (const v of variants) {
-      const idx = headers.findIndex(h => h === v);          // exact
-      if (idx !== -1) return idx;
-    }
-    for (const v of variants) {
-      const idx = headers.findIndex(h => h.startsWith(v));  // starts-with
-      if (idx !== -1) return idx;
-    }
-    for (const v of variants) {
-      const idx = headers.findIndex(h => h.includes(v));    // contains
-      if (idx !== -1) return idx;
-    }
-    return -1;
-  };
 
-  const colPO    = findCol('הזמנה', 'מספר הזמנה', 'PO', 'po number');
-  const colSKU   = findCol('מק"ט', "מק'ט", 'מקט', 'sku', 'item number');
-  const colName  = findCol('תאור מוצר', 'תיאור מוצר', 'תאור פריט', 'תיאור פריט', 'שם מוצר');
-  const colQty   = findCol('יתרה לאספקה', 'יתרה');
-  const colVal   = findCol('שווי יתרה', 'שווי');
-  const colDate  = findCol('ת. הזמנה', 'תאריך הזמנה', 'ת.הזמנה', 'תאריך');
-  const colExpDate = findCol('ת. אספקה', 'תאריך אספקה', 'ת.אספקה', 'תאריך אספקה צפוי');
-  const colSup   = findCol('שם ספק', 'ספק', 'שם יצרן');
 
-  // Convert Excel serial date → dd/mm/yyyy
-  const excelToDate = (serial) => {
-    const n = parseFloat(serial);
-    if (isNaN(n) || n < 30000 || n > 70000) return serial?.toString() || '';
-    const dt = new Date((n - 25569) * 86400 * 1000);
-    return dt.toLocaleDateString('he-IL', { day:'2-digit', month:'2-digit', year:'numeric' });
-  };
 
-  const result = [];
-  rows.forEach(row => {
-    const vals = Object.values(row).map(v => norm(String(v)));
-    const sku  = colSKU  !== -1 ? vals[colSKU]  : '';
-    const name = colName !== -1 ? vals[colName] : '';
-    if (!sku && !name) return;
 
-    const qtyRaw = colQty !== -1 ? parseFloat(vals[colQty]) : NaN;
-    const qty = isNaN(qtyRaw) || qtyRaw <= 0 ? 0 : qtyRaw;
-    if (qty <= 0) return; // skip rows with no remaining qty
 
-    const valRaw = colVal !== -1 ? parseFloat(vals[colVal]) : NaN;
 
-    result.push({
-      id:          Date.now().toString(36) + Math.random().toString(36).slice(2),
-      poNumber:    colPO   !== -1 ? vals[colPO]   : '',
-      productKey:  sku || name,
-      productName: name || sku,
-      supplier:    colSup  !== -1 ? vals[colSup]  : '',
-      orderedQty:  qty,
-      orderDate:   colDate !== -1 ? excelToDate(vals[colDate]) : '',
-      expectedDate: colExpDate !== -1 ? excelToDate(vals[colExpDate]) : '',
-      status:      'ordered',
-      notes:       '',
-      value:       isNaN(valRaw) ? 0 : valRaw,
-      fromPriority: true,
-    });
-  });
-  return result;
-};
-
-// ─── INVENTORY FILE PARSER ─────────────────────────────
-const parseInventoryFile = (rows) => {
-  // Column name variants — Priority "יתרות מלאי" uses: מק'ט (B), תאור מוצר (C), יתרה (J)
-  // Priority "כרטיס פריטים" uses: מק"ט (A), תאור (B), מחיר קניה אחרון (AI), עלות ש"ח (AN)
-  const COL = {
-    sku:      ["מק'ט",'מק"ט','מקט','sku','item number','item','barcode','ברקוד','קוד פריט','קוד מוצר','מספר פריט'],
-    name:     ['תאור מוצר','תיאור מוצר','תאור','תיאור','שם מוצר','שם פריט','item name','description','פריט','שם'],
-    status:   ['סטטוס','status'],
-    managed:  ['מנוהל מלאי'],
-    quantity: ['יתרה','יתרה במלאי','יתרת מלאי','כמות במלאי','כמות מלאי','qty','stock','quantity','כמות בסטוק'],
-    minStock: ['כמות מינימום למלאי','מינימום למלאי','מינימום מלאי','min stock','מינ מלאי','רמת הזמנה'],
-    cost:     ['מחיר קניה אחרון','מחיר קניה','עלות ש"ח','עלות שח','עלות','unit cost','cost','מחיר ספק'],
-    costAlt:  ['עלות ש"ח','עלות שח','עלות כוללת'],
-    supplier: ['שם ספק','ספק','supplier'],
-    moq:      ['כמות מינימום להזמנה','מינימום הזמנה','כמות הזמנה מינימלית','moq','min order','minimum order qty','minimum order quantity'],
-    currency: ['מטבע','currency'],
-  };
-  const norm = (s) => (s||'').toString().trim().replace(/\s+/g,' ');
-  const findCol = (headers, variants) => {
-    for (const v of variants) {
-      const idx = headers.findIndex(h => norm(h) === v);
-      if (idx !== -1) return idx;
-    }
-    for (const v of variants) {
-      const idx = headers.findIndex(h => norm(h).includes(v));
-      if (idx !== -1) return idx;
-    }
-    return -1;
-  };
-  if (!rows.length) return [];
-  const headers = Object.keys(rows[0]).map(norm);
-
-  const skuIdx      = findCol(headers, COL.sku);
-  const nameIdx     = findCol(headers, COL.name);
-  const statusIdx   = findCol(headers, COL.status);
-  const managedIdx  = findCol(headers, COL.managed);
-  const qtyIdx      = findCol(headers, COL.quantity);
-  const minStockIdx = findCol(headers, COL.minStock);
-  const costIdx     = findCol(headers, COL.cost);
-  const costAltIdx  = findCol(headers, COL.costAlt);
-  const supplierIdx = findCol(headers, COL.supplier);
-  const moqIdx      = findCol(headers, COL.moq);
-  // Currency: only meaningful when paired with the primary cost column
-  // ("מחיר קניה אחרון"), since that's the column whose value we store as unitCost.
-  const currencyIdx = (costIdx !== -1) ? findCol(headers, COL.currency) : -1;
-
-  // Priority master (כרטיס פריטים) = has SKU + cost but NO quantity column
-  const isPriorityMaster = skuIdx !== -1 && costIdx !== -1 && qtyIdx === -1;
-
-  const result = [];
-  rows.forEach(row => {
-    const vals = Object.values(row).map(v => norm(String(v)));
-    const sku  = skuIdx  !== -1 ? vals[skuIdx]  : '';
-    const name = nameIdx !== -1 ? vals[nameIdx] : '';
-    if (!sku && !name) return;
-
-    if (isPriorityMaster) {
-      const status  = statusIdx  !== -1 ? vals[statusIdx]  : '';
-      const managed = managedIdx !== -1 ? vals[managedIdx] : '';
-      if (status && status !== 'פעיל') return;
-      if (managed && managed !== 'Y') return;
-    }
-
-    // Quantity — ALLOW NEGATIVE (backorder/deficit), only skip if absent
-    const qtyRaw = qtyIdx !== -1 ? parseFloat(vals[qtyIdx].replace(/[^\d.-]/g,'')) : NaN;
-    const qty = isNaN(qtyRaw) ? null : qtyRaw;
-    if (!isPriorityMaster && qty === null) return;
-
-    const c1 = costIdx    !== -1 ? parseFloat(vals[costIdx].replace(/[^\d.-]/g,''))    : NaN;
-    const c2 = costAltIdx !== -1 ? parseFloat(vals[costAltIdx].replace(/[^\d.-]/g,'')) : NaN;
-    const cost = (!isNaN(c1) && c1 > 0) ? c1 : ((!isNaN(c2) && c2 > 0) ? c2 : null);
-
-    const minRaw = minStockIdx !== -1 ? parseFloat(vals[minStockIdx].replace(/[^\d.-]/g,'')) : NaN;
-    const minStock = (!isNaN(minRaw) && minRaw > 0) ? minRaw : null;
-
-    const supplier = supplierIdx !== -1 ? vals[supplierIdx] : null;
-    const moqRaw = moqIdx !== -1 ? parseFloat(vals[moqIdx].replace(/[^\d.-]/g,'')) : NaN;
-    const moq = (!isNaN(moqRaw) && moqRaw > 0) ? moqRaw : null;
-    const currRaw = currencyIdx !== -1 ? vals[currencyIdx] : '';
-    // Broad, case-insensitive normalization — Priority exports vary a lot in
-    // how currency is written (symbol, Hebrew word, English code, ISO code),
-    // and a miss here silently falls through to "treat as ILS" elsewhere, so
-    // it's worth casting a wide net rather than only matching exact symbols.
-    const currNorm = currRaw.toLowerCase().replace(/\s+/g,'');
-    const currency = !currNorm ? null
-      : ['ש"ח','שח','₪','ils','nis','שקל','שקלים'].includes(currNorm) ? 'ILS'
-      : ['$','usd','us$','דולר','דולרים'].includes(currNorm) ? 'USD'
-      : ['€','eur','אירו','יורו'].includes(currNorm) ? 'EUR'
-      : currRaw; // unrecognized value kept as-is — will show as a blocked/unmapped currency rather than silently defaulting to ILS
-    result.push({ sku: sku||name, name: name||sku, quantity: qty, cost, minStock, supplier, moq, currency });
-  });
-  return result;
-};
-
-// ─── CUSTOMER FILES ─────────────────────────────────────
-// File 1: "מכירות ללקוח" — customer × month, no product breakdown.
-// Gives the time dimension: trend, churn, new customers.
-const parseCustomerMonthlyFile = (rows) => {
-  if (!rows.length) return [];
-  const norm = (s) => (s||'').toString().trim();
-  const headers = Object.keys(rows[0]).map(norm);
-  const findCol = (variants) => {
-    for (const v of variants) { const idx = headers.findIndex(h => h === v); if (idx !== -1) return idx; }
-    for (const v of variants) { const idx = headers.findIndex(h => h.includes(v)); if (idx !== -1) return idx; }
-    return -1;
-  };
-  const idIdx     = findCol(['מס. לקוח','מספר לקוח','מס לקוח','קוד לקוח']);
-  const nameIdx    = findCol(['שם לקוח','לקוח']);
-  const monthIdx   = findCol(['חודש']);
-  const revIdx     = findCol(['הכנסה משוערכת','הכנסה']); // prefer the normalized/revalued figure if present
-  const revInclIdx = findCol(["הכנסה כולל מע'מ","הכנסה כולל מעמ"]);
-  const result = [];
-  rows.forEach(row => {
-    const vals = Object.values(row).map(v => norm(String(v)));
-    const name = nameIdx !== -1 ? vals[nameIdx] : '';
-    const month = monthIdx !== -1 ? vals[monthIdx] : '';
-    if (!name || !month) return;
-    const revenue = revIdx !== -1 ? parseFloat(vals[revIdx].replace(/[^\d.-]/g,'')) : NaN;
-    const revenueIncl = revInclIdx !== -1 ? parseFloat(vals[revInclIdx].replace(/[^\d.-]/g,'')) : NaN;
-    result.push({
-      customerId: idIdx !== -1 ? vals[idIdx] : name,
-      customer: name,
-      date: month,
-      revenue: isNaN(revenue) ? 0 : revenue,
-      revenueIncl: isNaN(revenueIncl) ? null : revenueIncl,
-    });
-  });
-  return result;
-};
-
-// File 2: "מכירות מוצר ללקוח" — customer × product, totals over the whole period (no month).
-// Gives the breadth dimension: product mix, cross-sell, customer-product concentration.
-const parseCustomerProductFile = (rows) => {
-  if (!rows.length) return [];
-  const norm = (s) => (s||'').toString().trim();
-  const headers = Object.keys(rows[0]).map(norm);
-  const findCol = (variants) => {
-    for (const v of variants) { const idx = headers.findIndex(h => h === v); if (idx !== -1) return idx; }
-    for (const v of variants) { const idx = headers.findIndex(h => h.includes(v)); if (idx !== -1) return idx; }
-    return -1;
-  };
-  const idIdx   = findCol(['מס. לקוח','מספר לקוח','מס לקוח','קוד לקוח']);
-  const nameIdx  = findCol(['שם לקוח','לקוח']);
-  const skuIdx   = findCol(["מק'ט",'מק"ט','מקט']);
-  const prodIdx  = findCol(['תאור מוצר','תיאור מוצר','תאור','תיאור']);
-  const qtyIdx   = findCol(['כמות']);
-  const revIdx   = findCol(['הכנסה משוערכת','הכנסה']);
-  const result = [];
-  rows.forEach(row => {
-    const vals = Object.values(row).map(v => norm(String(v)));
-    const name = nameIdx !== -1 ? vals[nameIdx] : '';
-    const product = prodIdx !== -1 ? vals[prodIdx] : '';
-    if (!name || !product) return;
-    const qty = qtyIdx !== -1 ? parseFloat(vals[qtyIdx].replace(/[^\d.-]/g,'')) : NaN;
-    const revenue = revIdx !== -1 ? parseFloat(vals[revIdx].replace(/[^\d.-]/g,'')) : NaN;
-    result.push({
-      customerId: idIdx !== -1 ? vals[idIdx] : name,
-      customer: name,
-      sku: skuIdx !== -1 ? vals[skuIdx] : '',
-      product,
-      quantity: isNaN(qty) ? 0 : qty,
-      revenue: isNaN(revenue) ? 0 : revenue,
-    });
-  });
-  return result;
-};
-
-// ─── PROCUREMENT PAGE ──────────────────────────────────
-const MONTH_FULL_LABELS = ['ינואר','פברואר','מרץ','אפריל','מאי','יוני','יולי','אוגוסט','ספטמבר','אוקטובר','נובמבר','דצמבר'];
-const MONTH_ABBR_LABELS_SHORT = ['ינו','פבר','מרץ','אפר','מאי','יונ','יול','אוג','ספט','אוק','נוב','דצמ'];
-
-// Parses both date formats that reach the procurement page: Priority exports
-// arrive as "dd/mm/yyyy" (he-IL), the manual order form stores "yyyy-mm-dd".
-// `new Date("15/07/2026")` is Invalid Date, which is why overdue detection
-// never fired for Priority-imported orders — every date must go through here.
-const parseFlexDate = (s) => {
-  if (!s) return null;
-  if (s instanceof Date) return isNaN(s.getTime()) ? null : s;
-  const str = String(s).trim();
-  if (str.includes('/')) { const [d,m,y] = str.split('/').map(Number); if (d&&m&&y) return new Date(y<100?2000+y:y, m-1, d); return null; }
-  if (/^\d{4}-\d{1,2}-\d{1,2}/.test(str)) { const [y,m,d] = str.slice(0,10).split('-').map(Number); return new Date(y, m-1, d); }
-  return null;
-};
-const DAY_MS = 24*60*60*1000;
-const startOfToday = () => { const t = new Date(); t.setHours(0,0,0,0); return t; };
-
-// Service level per ABC class — A items must not run out (98%), C items
-// shouldn't tie up cash in buffer stock (90%). Z = standard-normal quantile.
-const SERVICE_LEVEL = { A:{ z:2.05, pct:98 }, B:{ z:1.65, pct:95 }, C:{ z:1.28, pct:90 } };
-
-// Single source of truth for "how much to order" — used by the main table
-// AND the what-if scenario, so the two can never drift apart again.
-//   demand over the horizon (lead time + months of stock), month by month,
-//   scaled by the seasonal index of each upcoming calendar month when the
-//   product has enough history for seasonality to be trusted
-// + buffer  = max(statistical safety stock, Priority minimum stock)
-// − stock on hand − quantity already on the way
-// then rounded up to the supplier's MOQ.
-const calcOrderPlan = ({ avgMonthly, stdDev, abc, leadTime, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq, multiplier = 1 }) => {
-  const base = avgMonthly * multiplier;
-  const horizon = Math.max(0, leadTime + monthsToStock);
-  let projectedDemand = 0;
-  const useSeason = seasonalityReliable && nextMonIdx >= 0 && Array.isArray(seasonalityIdx);
-  for (let i = 0; i < Math.ceil(horizon); i++) {
-    const portion = Math.min(1, horizon - i);
-    const f = useSeason ? Math.max(0.5, Math.min(2.0, seasonalityIdx[(nextMonIdx + i) % 12] || 1)) : 1;
-    projectedDemand += base * f * portion;
-  }
-  const flatDemand = base * horizon;
-  const sl = SERVICE_LEVEL[abc] || SERVICE_LEVEL.B;
-  const safetyStock = Math.ceil(sl.z * (stdDev||0) * Math.sqrt(multiplier) * Math.sqrt(Math.max(leadTime, 0.5)));
-  const buffer = Math.max(safetyStock, minStock || 0);
-  const raw = Math.max(0, Math.ceil(projectedDemand + buffer - (effectiveStock || 0)));
-  const rounded = (moq && moq > 0 && raw > 0) ? Math.ceil(raw / moq) * moq : raw;
-  const rawFlat = Math.max(0, Math.ceil(flatDemand + buffer - (effectiveStock || 0)));
-  return { suggestedOrder: rounded, suggestedOrderRaw: raw, suggestedOrderFlat: rawFlat, projectedDemand, safetyStock, buffer, serviceLevel: sl.pct, seasonalApplied: useSeason && Math.abs(projectedDemand - flatDemand) > 0.5 };
-};
 
 // Builds a downloadable RTL .xls from an HTML table body (same approach used
 // everywhere else in the app — ExcelJS doesn't load reliably from CDN).
@@ -1875,233 +1568,11 @@ const readSheetAsRows = (file) => new Promise((resolve, reject) => {
   r.onerror = () => reject(new Error('קריאת הקובץ נכשלה.'));
   r.readAsArrayBuffer(file);
 });
-const normHeader = (h) => String(h??'').replace(/[‎‏]/g,'').replace(/\s+/g,' ').trim();
-const findHeaderRow = (rows, required) => {
-  for (let i = 0; i < Math.min(rows.length, 40); i++) {
-    const hs = rows[i].map(normHeader);
-    if (required.every(req => hs.some(h => h === req))) return i;
-  }
-  return -1;
-};
-const colIndex = (headers, ...names) => { for (const n of names) { const i = headers.indexOf(n); if (i !== -1) return i; } return -1; };
-// Any date shape Excel / Priority hands us → 'yyyy-mm-dd' (or '' when absent)
-const toIsoDate = (v) => {
-  if (v == null || v === '') return '';
-  let d = null;
-  if (v instanceof Date) d = v;
-  else if (typeof v === 'number') { if (v > 20000 && v < 80000) d = new Date(Math.round((v - 25569) * 86400 * 1000)); }
-  else {
-    const s = String(v).trim();
-    let m = s.match(/^(\d{1,2})[/.](\d{1,2})[/.](\d{2,4})/);
-    if (m) { const y = +m[3] < 100 ? 2000 + +m[3] : +m[3]; d = new Date(y, +m[2]-1, +m[1]); }
-    else if ((m = s.match(/^(\d{4})-(\d{1,2})-(\d{1,2})/))) d = new Date(+m[1], +m[2]-1, +m[3]);
-  }
-  if (!d || isNaN(d.getTime())) return '';
-  // Dates from Excel arrive as UTC midnight; nudge by 12h so the local date never slips a day.
-  const dd = new Date(d.getTime() + 12*3600*1000);
-  return `${dd.getUTCFullYear()}-${String(dd.getUTCMonth()+1).padStart(2,'0')}-${String(dd.getUTCDate()).padStart(2,'0')}`;
-};
-const isoToDisplay = (iso) => iso ? `${iso.slice(8,10)}.${iso.slice(5,7)}.${iso.slice(2,4)}` : '';
-const isoToMonthKey = (iso) => iso ? `${HebrewMonthsMap[+iso.slice(5,7)-1]}-${iso.slice(2,4)}` : '';
-const daysBetween = (a, b) => (parseFlexDate(b) - parseFlexDate(a)) / DAY_MS;
-const num = (v) => { const n = typeof v === 'number' ? v : parseFloat(String(v??'').replace(/[^\d.-]/g,'')); return isNaN(n) ? 0 : n; };
-const normCurrency = (c) => {
-  const s = String(c||'').toLowerCase().replace(/\s+/g,'');
-  if (!s || ['ש"ח','שח','₪','ils','nis'].includes(s)) return 'ILS';
-  if (['$','usd','us$','דולר'].includes(s)) return 'USD';
-  if (['eur','€','אירו','יורו'].includes(s)) return 'EUR';
-  return String(c).trim();
-};
-// Text / summary / discount lines Priority puts inside invoices — not products.
-const isJunkSku = (sku, desc) => !sku || sku === '000' || sku === '1' || sku === 'H000' || /^-{3,}/.test(String(desc||''));
 
-// ─── Invoice lines → the monthly datasets the other tabs use ───────────
-// Months the lines cover replace the same months from uploaded files; older
-// months still come from the files. The earliest month counts as covered only
-// if the lines start in its first days — otherwise (a sync that began mid-month)
-// that month stays with the file when the file has it.
-const linesCoverage = (lines, fileMonths) => {
-  const covered = new Set(lines.map(l => isoToMonthKey(l.d)));
-  if (lines.length) {
-    const first = lines.reduce((m, l) => l.d < m ? l.d : m, lines[0].d);
-    const fk = isoToMonthKey(first);
-    if (+first.slice(8, 10) > 3 && fileMonths.has(fk)) covered.delete(fk);
-  }
-  return covered;
-};
-const linesRange = (lines) => {
-  if (!lines?.length) return null;
-  let from = lines[0].d, to = lines[0].d;
-  lines.forEach(l => { if (l.d < from) from = l.d; if (l.d > to) to = l.d; });
-  return { from, to };
-};
-const NON_PRODUCT_LABEL = 'שורות ללא מוצר (הנחות, שירות, הובלה)';
-// product × month rows (same shape as the "מכירות חודשיות לפי מוצר" file)
-const mergeLinesIntoMonthly = (raw, lines, { includeExtra = false } = {}) => {
-  const use = includeExtra ? lines : lines.filter(l => !l.x);
-  if (!use.length) return raw;
-  const covered = linesCoverage(use, new Set(raw.map(r => r.date)));
-  const agg = {}, names = {};
-  use.forEach(l => {
-    const m = isoToMonthKey(l.d); if (!covered.has(m)) return;
-    const sku = l.k || '__extra'; const key = sku + '|' + m;
-    if (!agg[key]) agg[key] = { sku: l.k, date: m, quantity: 0, total: 0, extra: !l.k };
-    agg[key].quantity += l.x ? 0 : l.q; agg[key].total += l.v;
-    if (l.k && !names[l.k] && l.q > 0 && !l.x) names[l.k] = l.n;
-    if (l.k && !names[l.k]) names[l.k] = l.n;
-  });
-  const fromLines = Object.values(agg).map((r, i) => ({ id: 'sl-' + i, sku: r.sku, date: r.date, quantity: r.quantity, total: Math.round(r.total * 100) / 100,
-    description: r.extra ? NON_PRODUCT_LABEL : (names[r.sku] || r.sku), unit: "יח'", supplier: 'כללי', fromLines: true }));
-  return [...raw.filter(r => !covered.has(r.date)), ...fromLines];
-};
-// customer × month revenue (same shape as the "מכירות ללקוח בחתך חודשי" file)
-const customerMonthlyFromLines = (raw, lines) => {
-  if (!lines.length) return raw;
-  const covered = linesCoverage(lines, new Set(raw.map(r => r.date)));
-  const agg = {};
-  lines.forEach(l => {
-    const m = isoToMonthKey(l.d); if (!covered.has(m) || !l.c) return;
-    const key = l.c + '|' + m;
-    if (!agg[key]) agg[key] = { customerId: l.cid || l.c, customer: l.c, date: m, revenue: 0, revenueIncl: null, fromLines: true };
-    agg[key].revenue += l.v;
-  });
-  Object.values(agg).forEach(r => { r.revenue = Math.round(r.revenue * 100) / 100; });
-  return [...raw.filter(r => !covered.has(r.date)), ...Object.values(agg)];
-};
-// customer × product totals for the whole period the lines cover
-const customerProductsFromLines = (lines) => {
-  const agg = {}, names = {};
-  lines.forEach(l => {
-    if (!l.k || !l.c) return;
-    if (!names[l.k] || (!l.x && l.q > 0)) names[l.k] = names[l.k] && l.x ? names[l.k] : l.n;
-    const key = l.c + '|' + l.k;
-    if (!agg[key]) agg[key] = { customerId: l.cid || l.c, customer: l.c, sku: l.k, product: '', quantity: 0, revenue: 0 };
-    agg[key].quantity += l.x ? 0 : l.q; agg[key].revenue += l.v;
-  });
-  return Object.values(agg).map(r => ({ ...r, product: names[r.sku] || r.sku, revenue: Math.round(r.revenue * 100) / 100 }))
-    .filter(r => r.quantity !== 0 || r.revenue !== 0);
-};
 
-// What a file is, from its headers — used to warn when a file is dropped into the wrong slot.
-const PROC_FILE_SIGNATURES = [
-  { type:'shipments',     test: hs => hs.includes('Containers List') || (hs.includes('Supplier Name') && hs.includes('Arrival Date')) },
-  { type:'salesLines',    test: hs => hs.includes('שם לקוח') && hs.includes('מק"ט') && hs.includes('כמות') && hs.includes('חשבונית') },
-  { type:'purchaseLines', test: hs => hs.includes('שם ספק') && hs.includes('מק"ט') && hs.includes('כמות') && hs.includes('חשבונית') },
-  { type:'openOrders',    test: hs => hs.some(h => h.startsWith('יתרה לאספקה')) },
-  { type:'inventory',     test: hs => hs.includes('יתרה') || hs.some(h => h.startsWith('יתרה במלאי')) },
-  { type:'masterCard',    test: hs => hs.some(h => h.startsWith('מחיר קניה')) },
-];
-const detectProcFileType = (rows) => {
-  for (let i = 0; i < Math.min(rows.length, 40); i++) {
-    const hs = rows[i].map(normHeader);
-    const hit = PROC_FILE_SIGNATURES.find(s => s.test(hs));
-    if (hit) return hit.type;
-  }
-  return null;
-};
 
-// Sales invoice lines → [{d, inv, cid, c, k, n, q, v}]  (q is net: returns are negative)
-const parseSalesLines = (rows) => {
-  const hi = findHeaderRow(rows, ['תאריך','מק"ט','כמות','שם לקוח']);
-  if (hi === -1) return null;
-  const H = rows[hi].map(normHeader);
-  const c = {
-    d: colIndex(H,'תאריך'), inv: colIndex(H,'חשבונית'), cid: colIndex(H,'מס. לקוח'), cn: colIndex(H,'שם לקוח'),
-    k: colIndex(H,'מק"ט'), n: colIndex(H,'תאור מוצר','תיאור מוצר'), q: colIndex(H,'כמות'),
-    v: colIndex(H,'סה"כ אחרי הנחה','סה"כ מחיר'), ord: colIndex(H,'הזמנה'),
-  };
-  const out = [];
-  for (let i = hi + 1; i < rows.length; i++) {
-    const r = rows[i];
-    const k = String(r[c.k]??'').trim(), n = String(r[c.n]??'').trim();
-    const q = num(r[c.q]), v = c.v!==-1 ? num(r[c.v]) : 0;
-    const junk = isJunkSku(k, n);
-    // Lines that aren't a product sale (discount / service / shipping lines, or a
-    // price-only correction) still count toward revenue — kept, flagged x:1.
-    if ((junk || !q) && !v) continue;
-    const d = toIsoDate(r[c.d]); if (!d) continue;
-    const line = { d, inv:String(r[c.inv]??''), cid:String(r[c.cid]??''), c:String(r[c.cn]??'').trim(), k: junk ? '' : k, n, q: junk ? 0 : q, v, o: c.ord!==-1 ? String(r[c.ord]??'') : '' };
-    if (junk || !q) line.x = 1;
-    out.push(line);
-  }
-  out.sort((a,b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0); // newest first
-  return out;
-};
 
-// Supplier invoice lines → [{d, s, k, n, q, p, cur, tot, rate, po, pod}]
-const parsePurchaseLines = (rows) => {
-  const hi = findHeaderRow(rows, ['תאריך','שם ספק','מק"ט','כמות']);
-  if (hi === -1) return null;
-  const H = rows[hi].map(normHeader);
-  const c = {
-    d: colIndex(H,'תאריך'), inv: colIndex(H,'חשבונית'), s: colIndex(H,'שם ספק'), k: colIndex(H,'מק"ט'),
-    n: colIndex(H,'תאור מוצר','תיאור מוצר'), q: colIndex(H,'כמות'), p: colIndex(H,'מחיר ליחידה'),
-    cur: colIndex(H,'מטבע שורה','מטבע חשבונית'), tot: colIndex(H,'סה"כ אחרי הנחה','סה"כ מחיר'),
-    rate: colIndex(H,'שער חליפין'), po: colIndex(H,'הזמנת רכש'), pod: colIndex(H,'תאריך ההזמנה','תאריך הזמנה'), dc: colIndex(H,'חיוב/זכוי'),
-  };
-  const out = [];
-  for (let i = hi + 1; i < rows.length; i++) {
-    const r = rows[i];
-    const s = String(r[c.s]??'').trim(); if (!s) continue;
-    const d = toIsoDate(r[c.d]); if (!d) continue;
-    const k = String(r[c.k]??'').trim(), n = String(r[c.n]??'').trim();
-    const sign = c.dc!==-1 && String(r[c.dc]).trim()==='C' ? -1 : 1;
-    const cur = normCurrency(r[c.cur]);
-    const rate = c.rate!==-1 ? (num(r[c.rate]) || 1) : 1;
-    out.push({ d, inv:String(r[c.inv]??''), s, k, n, junk: isJunkSku(k, n), q: num(r[c.q]) * sign, p: num(r[c.p]), cur,
-      tot: num(r[c.tot]) * sign, rate: cur==='ILS' ? 1 : rate, po: c.po!==-1 ? String(r[c.po]??'').trim() : '', pod: c.pod!==-1 ? toIsoDate(r[c.pod]) : '' });
-  }
-  out.sort((a,b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0);
-  return out;
-};
 
-// Forwarder daily report → [{id, job, file, ref, sup, from, to, pickup, dep, arr, mode, qty, pkg, cont, event, transport}]
-const parseShipments = (rows) => {
-  const hi = findHeaderRow(rows, ['Supplier Name','Arrival Date']);
-  if (hi === -1) return null;
-  const H = rows[hi].map(normHeader);
-  const g = (r, ...n) => { const i = colIndex(H, ...n); return i === -1 ? '' : r[i]; };
-  const out = [];
-  for (let i = hi + 1; i < rows.length; i++) {
-    const r = rows[i];
-    const sup = String(g(r,'Supplier Name')||'').trim(); if (!sup) continue;
-    const job = String(g(r,'Job Order No')||'').trim();
-    const file = String(g(r,'File Number')||'').trim();
-    out.push({
-      id: job || file || `${sup}-${i}`, job, file: /^0*$/.test(file) ? '' : file, ref: String(g(r,'Customer Reference')||'').trim(), sup,
-      from: String(g(r,'Load Port')||'').trim(), to: String(g(r,'Discharge Port')||'').trim(),
-      pickup: toIsoDate(g(r,'Pick Up Date')), dep: toIsoDate(g(r,'Departure Date')), arr: toIsoDate(g(r,'Arrival Date')),
-      mode: String(g(r,'FCL/LCL')||'').trim(), qty: num(g(r,'QTY')), pkg: String(g(r,'Freight Package Desc')||'').trim(),
-      cont: String(g(r,'Containers List')||'').trim(), event: String(g(r,'Last Event Desc')||'').trim(), transport: String(g(r,'Transport Type')||'').trim(),
-    });
-  }
-  return out;
-};
-// Where a shipment is, in plain words — from its dates (the event text is free-form).
-const shipmentStage = (s, todayIso) => {
-  if (!s.dep) return { idx:0, label:'בהכנה' };
-  if (s.dep > todayIso) return { idx:0, label:'ממתין להפלגה' };
-  if (!s.arr || s.arr > todayIso) return { idx:1, label:'בדרך' };
-  return { idx:2, label:'הגיע לנמל' };
-};
-// Forwarder supplier names are English ("JIE LONG SHUTTER MOTORS LTD"), Priority
-// names are often Hebrew + English ("בנינקה - BENINCA"). Match on distinctive
-// Latin words, also allowing split words to join ("JIE LONG" → "JIELONG").
-const SHIP_NAME_STOP = new Set(['LTD','LIMITED','CO','COMPANY','CORP','CORPORATION','INC','GMBH','SPA','SRL','SA','INTERNATIONAL','TRADE','TRADING','INDUSTRY','INDUSTRIAL','TECHNOLOGY','TECH','INTELLIGENT','ELECTRIC','ELECTRONIC','ELECTRONICS','MACHINE','MOTORS','MOTOR','SHUTTER','HARDWARE','GROUP','AND','THE','CITY','CHINA','GUANGDONG','NINGBO','ZHEJIANG','SHANGHAI','SHENZHEN','XIAMEN','JIANGSU','FUJIAN','UND','AUTOMATISMI','AUTOMATION','SYSTEMS','SYSTEM']);
-const matchShipSupplier = (fwdName, candidates) => {
-  const words = String(fwdName).toUpperCase().replace(/[^A-Z0-9 ]/g,' ').split(/\s+/).filter(Boolean);
-  const keys = new Set();
-  words.forEach((w,i) => { if (w.length >= 4 && !SHIP_NAME_STOP.has(w)) keys.add(w); if (i < words.length-1) { const j = w + words[i+1]; if (j.length >= 6) keys.add(j); } });
-  if (!keys.size) return null;
-  let best = null, bestScore = 0;
-  candidates.forEach(cand => {
-    const flat = String(cand).toUpperCase().replace(/[^A-Z0-9]/g,'');
-    if (!flat) return;
-    let score = 0; keys.forEach(k => { if (flat.includes(k)) score += k.length; });
-    if (score > bestScore) { bestScore = score; best = cand; }
-  });
-  return bestScore >= 5 ? best : null;
-};
 
 
 // ─── PROCUREMENT PAGE ──────────────────────────────────
@@ -2180,7 +1651,7 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
       if (slot === 'salesLines') {
         let parsed = parseSalesLines(rows);
         if (!parsed) throw new Error('לא נמצאו עמודות תאריך / שם לקוח / מק"ט / כמות בקובץ.');
-        if (opts.mergeFrom) parsed = [...parsed, ...salesLinesAll.filter(l => l.d < opts.mergeFrom)].sort((a,b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0);
+        if (opts.mergeFrom) parsed = mergeLinesSince(salesLinesAll, parsed, opts.mergeFrom);
         if (!parsed.length) throw new Error('לא נמצאו שורות מכירה.');
         await idbSet('procSalesLines', parsed);
         setSalesLines(parsed);
@@ -2189,7 +1660,7 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
       } else if (slot === 'purchaseLines') {
         let parsed = parsePurchaseLines(rows);
         if (!parsed) throw new Error('לא נמצאו עמודות תאריך / שם ספק / מק"ט / כמות בקובץ.');
-        if (opts.mergeFrom) parsed = [...parsed, ...purchaseLines.filter(l => l.d < opts.mergeFrom)].sort((a,b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0);
+        if (opts.mergeFrom) parsed = mergeLinesSince(purchaseLines, parsed, opts.mergeFrom);
         if (!parsed.length) throw new Error('לא נמצאו שורות קנייה.');
         await idbSet('procPurchaseLines', parsed);
         setPurchaseLines(parsed);
@@ -2507,26 +1978,11 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
       // from this one were (almost always) received in between. Log them as
       // received today — an estimate, flagged as such — so supplier
       // reliability can be measured without manual bookkeeping.
-      const idOf = (o) => `${o.poNumber||''}|${o.productKey||o.productName||''}`;
-      const newIds = new Set(parsed.map(idOf));
-      const todayIso = new Date().toISOString().slice(0,10);
-      const vanished = openOrders.filter(o => o.fromPriority && o.poNumber && !newIds.has(idOf(o)));
-      if (vanished.length) {
-        saveReceiptLog([...receiptLog, ...vanished.map(o => ({
-          supplier:o.supplier||'', productKey:o.productKey||o.productName, poNumber:o.poNumber,
-          orderDate:o.orderDate||'', expectedDate:o.expectedDate||'', receivedDate:todayIso, qty:o.orderedQty||0, estimated:true,
-        }))]);
-      }
-      // Quantities typed on a supplier page are done once Priority has the PO.
-      const orderedKeys = new Set(parsed.map(o => o.productKey));
-      if (Object.keys(draftQty).some(k => orderedKeys.has(k))) {
-        const nd = { ...draftQty }; orderedKeys.forEach(k => delete nd[k]); saveDraft(nd);
-      }
+      const res = applyOpenOrders({ prevOrders: openOrders, parsed, receiptLog, draftQty });
+      if (res.receiptLog !== receiptLog) saveReceiptLog(res.receiptLog);
+      if (res.draftQty !== draftQty) saveDraft(res.draftQty);
       saveFileMeta('openOrders', { name:file.name, rows:parsed.length });
-      // Remove existing fromPriority orders and replace with new import
-      const manual = openOrders.filter(o => !o.fromPriority);
-      const merged = [...manual, ...parsed];
-      saveOrders(merged);
+      saveOrders(res.orders);
       setOrdersFileName(file.name);
       localStorage.setItem('ordersFileName', file.name);
       setImportBanner({ count: parsed.length, skipped: rows.length - parsed.length });
@@ -2729,31 +2185,9 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
         setInvLoading(false);
         return;
       }
-      const ns = opts.replaceStock ? {} : {...stockMap}, nc = {...costMap}, nm = {...minStockMap}, nsup = {...supplierMap}, nmoq = {...moqMap}, ncur = {...currencyMap};
-      const nnames = {...nameMap}, nhist = {...costHistory};
-      const todayIso = new Date().toISOString().slice(0,10);
-      parsed.forEach(item => {
-        const k = item.sku||item.name;
-        if (item.name && item.name!==k) nnames[k] = item.name;
-        if (item.quantity !== null) ns[k] = item.quantity;
-        if (item.cost !== null) {
-          // Price history: append only when the price actually changed (or on
-          // first sight), so the history reflects real price moves, not imports.
-          const cur = item.currency || ncur[k] || 'ILS';
-          const hist = nhist[k] ? [...nhist[k]] : [];
-          const last = hist[hist.length-1];
-          if (!last || Math.abs(last.c - item.cost) > 1e-9 || last.cur !== cur) {
-            if (last && last.d === todayIso) hist[hist.length-1] = { d:todayIso, c:item.cost, cur };
-            else hist.push({ d:todayIso, c:item.cost, cur });
-            nhist[k] = hist.slice(-24);
-          }
-          nc[k] = item.cost;
-        }
-        if (item.minStock !== null) nm[k] = item.minStock;
-        if (item.supplier) nsup[k] = item.supplier;
-        if (item.moq !== null) nmoq[k] = item.moq;
-        if (item.currency) ncur[k] = item.currency;
-      });
+      const nx = applyInventory({ stock:stockMap, cost:costMap, minStock:minStockMap, supplier:supplierMap, moq:moqMap, currency:currencyMap, names:nameMap, costHistory },
+        parsed, { replaceStock: !!opts.replaceStock });
+      const { stock:ns, cost:nc, minStock:nm, supplier:nsup, moq:nmoq, currency:ncur, names:nnames, costHistory:nhist } = nx;
       setStockMap(ns); setCostMap(nc); setMinStockMap(nm); setSupplierMap(nsup); setMoqMap(nmoq); setCurrencyMap(ncur);
       setNameMap(nnames); setCostHistory(nhist);
       try {
@@ -2778,10 +2212,7 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
         setInvUploadError('הקובץ נטען למסך אבל לא נשמר בדפדפן — כנראה אחסון הדפדפן מלא. פנה מקום ונסה שוב, אחרת המידע ייעלם ברענון.');
       }
       setInvFileName(file.name);
-      const withQty = parsed.filter(p=>p.quantity!==null).length;
-      const withCost = parsed.filter(p=>p.cost!==null).length;
-      const withMinStock = parsed.filter(p=>p.minStock!==null).length;
-      const withSupplier = parsed.filter(p=>p.supplier).length;
+      const { withQty, withCost, withMinStock, withSupplier } = nx.stats;
       setImportStats({ total: parsed.length, withQty, withCost, withMinStock });
       setInvSlots(prev => {
         const next = { ...prev, [slotKey]: { name: file.name, total: parsed.length, withQty, withCost, withMinStock, withSupplier, importedAt: Date.now() } };
