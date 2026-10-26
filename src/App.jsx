@@ -2717,6 +2717,40 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
       .sort((a,b) => (b.stockValue||0)-(a.stockValue||0));
   }, [products, salesData, deadStockDays, stockMap, nameMap, costMap, currencyMap, supplierMap, exchangeRates, itemsExtra]);
 
+  // ── Excess stock: items that DO sell, but stock (+ what's on the way) is far
+  // beyond what the plan needs: demand over lead time + target months, plus the
+  // safety buffer, plus a margin of `excessMarginMonths`.
+  const [excessMarginMonths, setExcessMarginMonths] = useState(3);
+  const excessData = useMemo(() => {
+    const rows = [];
+    products.forEach(p => {
+      if (!(p.avgMonthly > 0) || !(p.currentStock > 0)) return;
+      const buffer = Math.max(p.safetyStock || 0, p.minStock || 0);
+      const needed = (p.projectedDemand || 0) + buffer + p.avgMonthly * excessMarginMonths;
+      const total = p.currentStock + (p.incomingQty || 0);
+      const excessQty = Math.floor(total - needed);
+      if (excessQty <= 0) return;
+      const onHandExcess = Math.min(excessQty, p.currentStock);
+      const poExcess = Math.min(p.incomingQty || 0, excessQty);   // on order but not needed
+      const coverMonths = total / p.avgMonthly;
+      rows.push({ ...p, excessQty, onHandExcess, poExcess, coverMonths,
+        excessValue: p.unitCost ? onHandExcess * p.unitCost : null, poExcessValue: p.unitCost ? poExcess * p.unitCost : null });
+    });
+    return rows.sort((a, b) => (b.excessValue || 0) - (a.excessValue || 0));
+  }, [products, excessMarginMonths]);
+  const excessSummary = useMemo(() => {
+    const bySup = {}, byFam = {};
+    let value = 0, poValue = 0, poCount = 0;
+    excessData.forEach(p => {
+      value += p.excessValue || 0; poValue += p.poExcessValue || 0; if (p.poExcess > 0) poCount++;
+      const s = p.supplier || 'ספק לא ידוע', f = p.family || 'ללא משפחה';
+      (bySup[s] ||= { name:s, value:0, n:0 }); bySup[s].value += p.excessValue || 0; bySup[s].n++;
+      (byFam[f] ||= { name:f, value:0, n:0 }); byFam[f].value += p.excessValue || 0; byFam[f].n++;
+    });
+    const top = (m) => Object.values(m).sort((a, b) => b.value - a.value).slice(0, 8);
+    return { value, poValue, poCount, bySup: top(bySup), byFam: top(byFam) };
+  }, [excessData]);
+
   const deadStockValue = useMemo(() =>
     deadStockData.reduce((a,p)=>a+(p.stockValue||0),0), [deadStockData]);
 
@@ -4008,6 +4042,82 @@ const renderProductRow = (p) => {
       </div>
     );
   };
+  const renderExcess = () => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const box = `rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`;
+    const rows = sortRows('excess', excessData, { excessValue: p => p.excessValue, poExcess: p => p.poExcess || null });
+    const bar = (list) => {
+      const max = Math.max(1, ...list.map(x => x.value));
+      return list.map(x => (
+        <div key={x.name} className="flex items-center gap-2 text-sm">
+          <span className={`w-40 truncate ${strong}`} title={x.name}>{x.name}</span>
+          <div className={`flex-1 h-2 rounded-full ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}><div className="h-2 rounded-full bg-orange-500" style={{width:`${Math.max(3, x.value/max*100)}%`}}/></div>
+          <b className={`w-20 text-left tabular-nums ${strong}`}>{formatShort(x.value)}</b>
+          <span className={`w-14 text-xs ${muted}`}>{x.n} פריטים</span>
+        </div>
+      ));
+    };
+    return (
+      <div className="space-y-4 animate-in fade-in duration-300">
+        <div className={`${box} p-5 flex flex-wrap items-center gap-6`}>
+          <div className="flex-1 min-w-[260px]">
+            <p className={`font-bold ${strong}`}>מלאי עודף — נמכר, אבל יש יותר מדי</p>
+            <p className={`text-xs mt-0.5 ${muted}`}>מלאי + בדרך מעבר למה שהתכנון צריך (צפי מכירות לזמן האספקה + חודשי היעד, מלאי ביטחון) ועוד מרווח. השווי לפי עלות. פריטים שלא נמכרים בכלל נמצאים ב"מלאי תקוע".</p>
+          </div>
+          <label className={`flex items-center gap-2 text-xs ${muted}`}>מרווח:
+            <select value={excessMarginMonths} onChange={e=>setExcessMarginMonths(Number(e.target.value))} style={isDarkMode?{background:'#0f172a',color:'#f1f5f9'}:{}}
+              className={`px-2 py-1.5 rounded-lg border text-sm ${isDarkMode?'border-slate-600':'border-slate-300 bg-white'}`}>
+              {[1,2,3,6,12].map(m => <option key={m} value={m}>{m} ח׳</option>)}
+            </select>
+          </label>
+          <div className="flex gap-6">
+            <div><p className={`text-xs ${muted}`}>כסף בעודף (במחסן)</p><p className={`text-2xl font-bold ${strong}`}>{formatShort(excessSummary.value)}</p></div>
+            <div><p className={`text-xs ${muted}`}>הזמנות פתוחות מיותרות</p><p className={`text-2xl font-bold ${excessSummary.poCount?(isDarkMode?'text-orange-300':'text-orange-700'):strong}`}>{excessSummary.poCount} <span className="text-sm font-semibold">· {formatShort(excessSummary.poValue)}</span></p></div>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
+          <div className={`${box} p-5 space-y-2`}><p className={`text-sm font-bold mb-1 ${strong}`}>לפי ספק</p>{bar(excessSummary.bySup)}</div>
+          <div className={`${box} p-5 space-y-2`}><p className={`text-sm font-bold mb-1 ${strong}`}>לפי משפחה</p>{bar(excessSummary.byFam)}</div>
+        </div>
+        <div className={`${box} overflow-hidden`}>
+          <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
+            <table className={`w-full text-sm text-right min-w-[860px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+              <thead className={`text-[11px] font-semibold sticky top-0 z-10 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
+                <tr>
+                  {sortTh('excess','name','מוצר',{className:'px-4 py-2.5'})}
+                  {sortTh('excess','supplier','ספק',{className:'px-4 py-2.5'})}
+                  {sortTh('excess','currentStock','מלאי',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('excess','incomingQty','בדרך',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('excess','avgMonthly','ממוצע לחודש',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('excess','coverMonths','מספיק ל-',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('excess','excessQty','עודף',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('excess','excessValue','שווי עודף',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('excess','poExcess','הזמנה מיותרת',{className:'px-4 py-2.5',firstDir:'desc'})}
+                </tr>
+              </thead>
+              <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                {rows.map(p => (
+                  <tr key={p.key} onClick={()=>setDrawerKey(p.key)} className={`cursor-pointer ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}`}>
+                    <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[240px] ${strong}`} title={p.name}>{p.name}</p><p className={`text-[11px] font-mono ${muted}`}>{p.sku}</p></td>
+                    <td className="px-4 py-2.5 text-xs">{p.supplier || '—'}</td>
+                    <td className="px-4 py-2.5 tabular-nums">{p.currentStock.toLocaleString()}</td>
+                    <td className="px-4 py-2.5 tabular-nums">{p.incomingQty ? p.incomingQty.toLocaleString() : '—'}</td>
+                    <td className="px-4 py-2.5 tabular-nums">{p.avgMonthly.toFixed(p.avgMonthly<10?1:0)}</td>
+                    <td className="px-4 py-2.5 tabular-nums">{p.coverMonths >= 99 ? '99+' : Math.round(p.coverMonths)} ח׳</td>
+                    <td className="px-4 py-2.5 tabular-nums font-semibold">{p.excessQty.toLocaleString()}</td>
+                    <td className={`px-4 py-2.5 tabular-nums font-bold ${strong}`}>{p.excessValue!=null ? formatShort(p.excessValue) : '—'}</td>
+                    <td className="px-4 py-2.5">{p.poExcess > 0 ? <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded ${procChipCls('watch',isDarkMode)}`}>{p.poExcess.toLocaleString()} יח׳ — לשקול לדחות/לבטל</span> : <span className={muted}>—</span>}</td>
+                  </tr>
+                ))}
+                {!rows.length && <tr><td colSpan={9} className={`px-4 py-12 text-center ${muted}`}>אין מלאי עודף לפי ההגדרות</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  };
   const renderVendors = () => {
     const muted = isDarkMode?'text-slate-400':'text-slate-500';
     const strong = isDarkMode?'text-slate-100':'text-slate-800';
@@ -4674,7 +4784,7 @@ const renderProductRow = (p) => {
             const groups = [
               ['החלטות', [['suppliers','ספקים',null], ['products','כל המוצרים',null], ['schedule','לוח זמנים', urgentSched>0?{n:urgentSched,k:'now'}:null]]],
               ['מעקב', [['shipments','משלוחים בדרך', shipDelayedCount>0?{n:`${shipDelayedCount} נדחו`,k:'watch'}:(activeShipCount?{n:activeShipCount,k:'muted'}:null)], ['orders','הזמנות פתוחות', lateCount>0?{n:`${lateCount} באיחור`,k:'now'}:(openOrders.length?{n:openOrders.length,k:'muted'}:null)], ['prices','מחירי רכש', priceUp>0?{n:`${priceUp} עליות`,k:'watch'}:null]]],
-              ['ניתוח', [['whatif','תרחיש',null], ['dead','מלאי תקוע', deadStockData.length?{n:deadStockData.length,k:'muted'}:null]]],
+              ['ניתוח', [['whatif','תרחיש',null], ['dead','מלאי תקוע', deadStockData.length?{n:deadStockData.length,k:'muted'}:null], ['excess','מלאי עודף', excessSummary.poCount?{n:`${excessSummary.poCount} עם הזמנה`,k:'watch'}:(excessData.length?{n:excessData.length,k:'muted'}:null)]]],
             ];
             return groups.map(([gLabel, tabs], gi) => (
               <React.Fragment key={gLabel}>
@@ -5321,6 +5431,7 @@ const renderProductRow = (p) => {
       )}
 
       {/* Dead Stock View */}
+      {viewMode==='excess' && renderExcess()}
       {viewMode==='dead' && (
         <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
           {/* Config + KPIs */}
