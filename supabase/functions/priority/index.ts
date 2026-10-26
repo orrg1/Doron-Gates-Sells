@@ -23,7 +23,7 @@ const PAT = Deno.env.get('PRIORITY_PAT') || '';
 const ALLOWED_FORMS = new Set([
   'LOGPART', 'PARTBAL', 'ACCBAL', 'ACCBALSON', 'WARHSBAL',
   'PORDERS', 'DOCUMENTS_P',
-  'AINVOICES', 'CINVOICES', 'YINVOICES',
+  'AINVOICES', 'CINVOICES', 'EINVOICES', 'YINVOICES',
   'ORDERS', 'CUSTOMERS', 'SUPPLIERS', 'FAMILY_LOG',
 ]);
 const PAGE = 500;               // rows per Priority request (MAXAPILINES default is 2000)

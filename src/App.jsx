@@ -402,7 +402,7 @@ const KPICard = ({ title, value, formatted, subtext, icon: Icon, color, trend, s
 
 // Overview Dashboard Page
 // ─── CUSTOMERS PAGE ─────────────────────────────────────
-const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUploadMonthly, onUploadProduct, onClearMonthly, onClearProduct, loading, uploadError, uploadSuccess, onDismissError, excludeCurrentMonth }) => {
+const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUploadMonthly, onUploadProduct, onClearMonthly, onClearProduct, loading, uploadError, uploadSuccess, onDismissError, excludeCurrentMonth, priorityRange = null, fileCounts = {} }) => {
   const [search, setSearch] = useState('');
   const [sortConfig, setSortConfig] = useState({ key:'totalRevenue', direction:'desc' });
   const { sortRows, sortTh } = useTableSort();
@@ -680,10 +680,16 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
           <span>הקובץ נשמר בהצלחה</span>
         </div>
       )}
+      {priorityRange && (
+        <div className={`flex items-start gap-3 px-4 py-3 rounded-xl text-sm border ${isDarkMode?'bg-blue-500/10 border-blue-500/20 text-blue-200':'bg-blue-50 border-blue-200 text-blue-900'}`}>
+          <RefreshCw className="w-4 h-4 mt-0.5 shrink-0"/>
+          <p>נתוני הלקוחות מתעדכנים אוטומטית מחשבוניות המכירה ב-Priority ({isoToDisplay(priorityRange.from)}–{isoToDisplay(priorityRange.to)}). הקבצים כאן משמשים רק לחודשים שלפני כן — לא חובה להעלות אותם.</p>
+        </div>
+      )}
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
       {[
-        { label:'מכירות ללקוח בחתך חודשי', sub:'מגמה, נטישה, לקוחות חדשים', fileName:fileNames.monthly, onUpload:onUploadMonthly, onClear:onClearMonthly, isLoading:loading.monthly, count:monthlyData.length },
-        { label:'מכירות ללקוח לפי מוצר', sub:'תמהיל מוצרים, Cross-sell', fileName:fileNames.product, onUpload:onUploadProduct, onClear:onClearProduct, isLoading:loading.product, count:productData.length },
+        { label:'מכירות ללקוח בחתך חודשי', sub:'מגמה, נטישה, לקוחות חדשים', fileName:fileNames.monthly, onUpload:onUploadMonthly, onClear:onClearMonthly, isLoading:loading.monthly, count:fileCounts.monthly ?? monthlyData.length },
+        { label:'מכירות ללקוח לפי מוצר', sub:priorityRange ? 'תמהיל מוצרים, Cross-sell · כרגע מוצג מ-Priority' : 'תמהיל מוצרים, Cross-sell', fileName:fileNames.product, onUpload:onUploadProduct, onClear:onClearProduct, isLoading:loading.product, count:fileCounts.product ?? productData.length },
       ].map((card,i) => (
         <div key={i} className={`p-4 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
           <p className={`text-sm font-bold mb-0.5 ${isDarkMode?'text-white':'text-slate-800'}`}>{card.label}</p>
@@ -863,7 +869,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
                                 <p className={`text-xs font-bold ${isDarkMode?'text-slate-400':'text-slate-500'}`}>מוצרים שנרכשו — {c.name} ({myProducts.length} מוצרים שונים)</p>
                                 <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>סה"כ {formatCurrency(myTotal)}</p>
                               </div>
-                              <p className={`text-[10px] mb-2 ${isDarkMode?'text-slate-600':'text-slate-400'}`}>על כל התקופה בקובץ — לא ניתן לסינון לפי תאריך</p>
+                              <p className={`text-[10px] mb-2 ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{priorityRange ? `מחשבוניות Priority ${isoToDisplay(priorityRange.from)}–${isoToDisplay(priorityRange.to)} — לא מסונן לפי טווח התאריכים` : 'על כל התקופה בקובץ — לא ניתן לסינון לפי תאריך'}</p>
                               <div className="overflow-x-auto max-h-64">
                                 <table className="w-full text-xs text-right">
                                   <thead className={`${isDarkMode?'text-slate-500':'text-slate-400'}`}>
@@ -915,7 +921,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
         <div className={`p-6 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
           <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
             <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Box className="w-5 h-5 text-pink-500"/>מוצרים מובילים (כל הלקוחות)</h3>
-            <span className={`text-[11px] px-2 py-1 rounded-lg ${isDarkMode?'bg-orange-500/10 text-orange-400':'bg-orange-50 text-orange-700'}`}>על כל התקופה בקובץ — לא ניתן לסינון לפי תאריך</span>
+            <span className={`text-[11px] px-2 py-1 rounded-lg ${isDarkMode?'bg-orange-500/10 text-orange-400':'bg-orange-50 text-orange-700'}`}>{priorityRange ? `חשבוניות Priority ${isoToDisplay(priorityRange.from)}–${isoToDisplay(priorityRange.to)} — לא לפי בורר התאריכים` : 'על כל התקופה בקובץ — לא ניתן לסינון לפי תאריך'}</span>
           </div>
           <p className={`text-xs mb-4 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>קובץ "מכירות ללקוח לפי מוצר" לא כולל עמודת חודש — הסכומים כאן הם סכום מצטבר על כל מה שיובא, בלי קשר לבורר התאריכים שמעל.</p>
           <div className="space-y-1.5">
@@ -934,7 +940,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
         <div className={`p-6 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
           <div className="flex items-center justify-between mb-1 flex-wrap gap-2">
             <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><Box className="w-5 h-5 text-pink-500"/>נקנים יחד (Cross-sell)</h3>
-            <span className={`text-[11px] px-2 py-1 rounded-lg ${isDarkMode?'bg-orange-500/10 text-orange-400':'bg-orange-50 text-orange-700'}`}>על כל התקופה בקובץ — לא ניתן לסינון לפי תאריך</span>
+            <span className={`text-[11px] px-2 py-1 rounded-lg ${isDarkMode?'bg-orange-500/10 text-orange-400':'bg-orange-50 text-orange-700'}`}>{priorityRange ? `חשבוניות Priority ${isoToDisplay(priorityRange.from)}–${isoToDisplay(priorityRange.to)} — לא לפי בורר התאריכים` : 'על כל התקופה בקובץ — לא ניתן לסינון לפי תאריך'}</span>
           </div>
           <p className={`text-xs mb-4 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>זוגות מוצרים שאותו לקוח קנה את שניהם (לא בהכרח באותה עסקה). מבוסס על {Object.keys(productsByCustomer).length.toLocaleString()} לקוחות עם פירוט מוצרים.</p>
           <div className="space-y-1.5">
@@ -1854,6 +1860,73 @@ const normCurrency = (c) => {
 // Text / summary / discount lines Priority puts inside invoices — not products.
 const isJunkSku = (sku, desc) => !sku || sku === '000' || sku === '1' || sku === 'H000' || /^-{3,}/.test(String(desc||''));
 
+// ─── Invoice lines → the monthly datasets the other tabs use ───────────
+// Months the lines cover replace the same months from uploaded files; older
+// months still come from the files. The earliest month counts as covered only
+// if the lines start in its first days — otherwise (a sync that began mid-month)
+// that month stays with the file when the file has it.
+const linesCoverage = (lines, fileMonths) => {
+  const covered = new Set(lines.map(l => isoToMonthKey(l.d)));
+  if (lines.length) {
+    const first = lines.reduce((m, l) => l.d < m ? l.d : m, lines[0].d);
+    const fk = isoToMonthKey(first);
+    if (+first.slice(8, 10) > 3 && fileMonths.has(fk)) covered.delete(fk);
+  }
+  return covered;
+};
+const linesRange = (lines) => {
+  if (!lines?.length) return null;
+  let from = lines[0].d, to = lines[0].d;
+  lines.forEach(l => { if (l.d < from) from = l.d; if (l.d > to) to = l.d; });
+  return { from, to };
+};
+const NON_PRODUCT_LABEL = 'שורות ללא מוצר (הנחות, שירות, הובלה)';
+// product × month rows (same shape as the "מכירות חודשיות לפי מוצר" file)
+const mergeLinesIntoMonthly = (raw, lines, { includeExtra = false } = {}) => {
+  const use = includeExtra ? lines : lines.filter(l => !l.x);
+  if (!use.length) return raw;
+  const covered = linesCoverage(use, new Set(raw.map(r => r.date)));
+  const agg = {}, names = {};
+  use.forEach(l => {
+    const m = isoToMonthKey(l.d); if (!covered.has(m)) return;
+    const sku = l.k || '__extra'; const key = sku + '|' + m;
+    if (!agg[key]) agg[key] = { sku: l.k, date: m, quantity: 0, total: 0, extra: !l.k };
+    agg[key].quantity += l.x ? 0 : l.q; agg[key].total += l.v;
+    if (l.k && !names[l.k] && l.q > 0 && !l.x) names[l.k] = l.n;
+    if (l.k && !names[l.k]) names[l.k] = l.n;
+  });
+  const fromLines = Object.values(agg).map((r, i) => ({ id: 'sl-' + i, sku: r.sku, date: r.date, quantity: r.quantity, total: Math.round(r.total * 100) / 100,
+    description: r.extra ? NON_PRODUCT_LABEL : (names[r.sku] || r.sku), unit: "יח'", supplier: 'כללי', fromLines: true }));
+  return [...raw.filter(r => !covered.has(r.date)), ...fromLines];
+};
+// customer × month revenue (same shape as the "מכירות ללקוח בחתך חודשי" file)
+const customerMonthlyFromLines = (raw, lines) => {
+  if (!lines.length) return raw;
+  const covered = linesCoverage(lines, new Set(raw.map(r => r.date)));
+  const agg = {};
+  lines.forEach(l => {
+    const m = isoToMonthKey(l.d); if (!covered.has(m) || !l.c) return;
+    const key = l.c + '|' + m;
+    if (!agg[key]) agg[key] = { customerId: l.cid || l.c, customer: l.c, date: m, revenue: 0, revenueIncl: null, fromLines: true };
+    agg[key].revenue += l.v;
+  });
+  Object.values(agg).forEach(r => { r.revenue = Math.round(r.revenue * 100) / 100; });
+  return [...raw.filter(r => !covered.has(r.date)), ...Object.values(agg)];
+};
+// customer × product totals for the whole period the lines cover
+const customerProductsFromLines = (lines) => {
+  const agg = {}, names = {};
+  lines.forEach(l => {
+    if (!l.k || !l.c) return;
+    if (!names[l.k] || (!l.x && l.q > 0)) names[l.k] = names[l.k] && l.x ? names[l.k] : l.n;
+    const key = l.c + '|' + l.k;
+    if (!agg[key]) agg[key] = { customerId: l.cid || l.c, customer: l.c, sku: l.k, product: '', quantity: 0, revenue: 0 };
+    agg[key].quantity += l.x ? 0 : l.q; agg[key].revenue += l.v;
+  });
+  return Object.values(agg).map(r => ({ ...r, product: names[r.sku] || r.sku, revenue: Math.round(r.revenue * 100) / 100 }))
+    .filter(r => r.quantity !== 0 || r.revenue !== 0);
+};
+
 // What a file is, from its headers — used to warn when a file is dropped into the wrong slot.
 const PROC_FILE_SIGNATURES = [
   { type:'shipments',     test: hs => hs.includes('Containers List') || (hs.includes('Supplier Name') && hs.includes('Arrival Date')) },
@@ -1886,10 +1959,15 @@ const parseSalesLines = (rows) => {
   for (let i = hi + 1; i < rows.length; i++) {
     const r = rows[i];
     const k = String(r[c.k]??'').trim(), n = String(r[c.n]??'').trim();
-    if (isJunkSku(k, n)) continue;
-    const q = num(r[c.q]); if (!q) continue;
+    const q = num(r[c.q]), v = c.v!==-1 ? num(r[c.v]) : 0;
+    const junk = isJunkSku(k, n);
+    // Lines that aren't a product sale (discount / service / shipping lines, or a
+    // price-only correction) still count toward revenue — kept, flagged x:1.
+    if ((junk || !q) && !v) continue;
     const d = toIsoDate(r[c.d]); if (!d) continue;
-    out.push({ d, inv:String(r[c.inv]??''), cid:String(r[c.cid]??''), c:String(r[c.cn]??'').trim(), k, n, q, v: c.v!==-1 ? num(r[c.v]) : 0, o: c.ord!==-1 ? String(r[c.ord]??'') : '' });
+    const line = { d, inv:String(r[c.inv]??''), cid:String(r[c.cid]??''), c:String(r[c.cn]??'').trim(), k: junk ? '' : k, n, q: junk ? 0 : q, v, o: c.ord!==-1 ? String(r[c.ord]??'') : '' };
+    if (junk || !q) line.x = 1;
+    out.push(line);
   }
   out.sort((a,b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0); // newest first
   return out;
@@ -1972,7 +2050,7 @@ const matchShipSupplier = (fwdName, candidates) => {
 
 
 // ─── PROCUREMENT PAGE ──────────────────────────────────
-const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
+const ProcurementPage = ({ onSalesLinesChange, salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
   // SKU → product name, captured from the inventory file. Needed so items
   // that are in stock but never appear in sales can still be shown by name
@@ -1992,7 +2070,10 @@ const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSu
 
   // ── Purchasing files (sales lines, supplier invoice lines, forwarder report) ──
   // Big datasets live in IndexedDB; a small summary of each file lives in localStorage.
-  const [salesLines, setSalesLines] = useState([]);
+  // All stored invoice lines (incl. value-only lines, x:1); procurement looks only at product lines.
+  const [salesLinesAll, setSalesLinesAll] = useState([]);
+  const setSalesLines = (arr) => { setSalesLinesAll(arr); onSalesLinesChange?.(arr); };
+  const salesLines = useMemo(() => salesLinesAll.filter(l => !l.x), [salesLinesAll]);
   const [purchaseLines, setPurchaseLines] = useState([]);
   const [shipments, setShipments] = useState([]);
   const [filesMeta, setFilesMeta] = useState(() => { try { return JSON.parse(localStorage.getItem('procFilesMeta')||'{}'); } catch { return {}; } });
@@ -2011,7 +2092,7 @@ const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSu
       try {
         const [a, b, c] = await Promise.all([idbGet('procSalesLines'), idbGet('procPurchaseLines'), idbGet('procShipments')]);
         if (cancelled) return;
-        if (Array.isArray(a)) setSalesLines(a);
+        if (Array.isArray(a)) setSalesLinesAll(a);
         if (Array.isArray(b)) setPurchaseLines(b);
         if (Array.isArray(c)) setShipments(c);
       } catch { /* IndexedDB unavailable — the slots simply show "not loaded" */ }
@@ -2040,7 +2121,7 @@ const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSu
       if (slot === 'salesLines') {
         let parsed = parseSalesLines(rows);
         if (!parsed) throw new Error('לא נמצאו עמודות תאריך / שם לקוח / מק"ט / כמות בקובץ.');
-        if (opts.mergeFrom) parsed = [...parsed, ...salesLines.filter(l => l.d < opts.mergeFrom)].sort((a,b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0);
+        if (opts.mergeFrom) parsed = [...parsed, ...salesLinesAll.filter(l => l.d < opts.mergeFrom)].sort((a,b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0);
         if (!parsed.length) throw new Error('לא נמצאו שורות מכירה.');
         await idbSet('procSalesLines', parsed);
         setSalesLines(parsed);
@@ -2081,19 +2162,7 @@ const ProcurementPage = ({ salesData: salesDataRaw, suppliersData = [], onOpenSu
   // Monthly sales the page works from: months covered by the sales-lines file
   // come from the lines (exact, incl. zero-priced kit components and returns);
   // older months still come from the monthly file loaded in "מכירות".
-  const salesData = useMemo(() => {
-    if (!salesLines.length) return salesDataRaw;
-    const covered = new Set(salesLines.map(l => isoToMonthKey(l.d)));
-    const agg = {}; const names = {};
-    salesLines.forEach(l => {
-      const m = isoToMonthKey(l.d); const key = l.k + '|' + m;
-      if (!agg[key]) agg[key] = { sku:l.k, date:m, quantity:0, total:0 };
-      agg[key].quantity += l.q; agg[key].total += l.v;
-      if (!names[l.k] && l.q > 0) names[l.k] = l.n;
-    });
-    const fromLines = Object.values(agg).map((r,i) => ({ id:'sl-'+i, ...r, description: names[r.sku] || r.sku, unit:"יח'", supplier:'כללי' }));
-    return [...salesDataRaw.filter(r => !covered.has(r.date)), ...fromLines];
-  }, [salesDataRaw, salesLines]);
+  const salesData = useMemo(() => mergeLinesIntoMonthly(salesDataRaw, salesLines), [salesDataRaw, salesLines]);
 
   // Per-SKU indexes for the product drawer and supplier figures
   const linesBySku = useMemo(() => { const m = {}; salesLines.forEach(l => { (m[l.k] ||= []).push(l); }); return m; }, [salesLines]);
@@ -3982,10 +4051,10 @@ const renderProductRow = (p) => {
   // to the same handlers, so nothing downstream behaves differently.
   const [prioSync, setPrioSync] = useState({ busy:false, log:[], errors:{}, at: (() => { try { return Number(localStorage.getItem('prioritySyncAt'))||null; } catch { return null; } })() });
   const [prioFields, setPrioFields] = useState(null);
-  // Incremental by default: invoices are re-pulled only from (last sync − 14 days),
+  // Incremental by default: invoices are re-pulled only from (last sync − 45 days),
   // which also catches late edits/credits, and merged into what's stored.
   // The first sync — or "סנכרון מלא" — pulls the full 24 months.
-  const SYNC_OVERLAP_DAYS = 14;
+  const SYNC_OVERLAP_DAYS = 45; // also re-reads invoices cancelled a few weeks after they were issued
   const syncFromPriority = async (full = false) => {
     const log = [];
     const t0 = Date.now();
@@ -3999,7 +4068,7 @@ const renderProductRow = (p) => {
       const d = new Date(through[slot] + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - SYNC_OVERLAP_DAYS);
       return d.toISOString().slice(0,10);
     };
-    const salesSince = sinceFor('salesLines', salesLines.length > 0);
+    const salesSince = sinceFor('salesLines', salesLinesAll.length > 0);
     const purchaseSince = sinceFor('purchaseLines', purchaseLines.length > 0);
     report(salesSince || purchaseSince ? `סנכרון מהיר — חשבוניות מ-${isoToDisplay(salesSince || purchaseSince)} ואילך` : 'סנכרון מלא — 24 חודשים (פעם ראשונה לוקח כמה דקות)');
     try {
@@ -4043,7 +4112,7 @@ const renderProductRow = (p) => {
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex-1 min-w-[220px]">
             <p className={`font-bold text-sm ${strong}`}>סנכרון ישיר מ-Priority</p>
-            <p className={`text-xs mt-0.5 ${muted}`}>מושך פריטים, יתרות מלאי, הזמנות רכש פתוחות, חשבוניות מכירה וחשבוניות ספק — במקום להעלות קבצים. אחרי הפעם הראשונה נמשכים רק השבועיים האחרונים, אז זה מהיר. קריאה בלבד, שום דבר לא משתנה ב-Priority. דוח המשלוחים מהמשלח עדיין נטען כקובץ.</p>
+            <p className={`text-xs mt-0.5 ${muted}`}>מושך פריטים, יתרות מלאי, הזמנות רכש פתוחות, חשבוניות מכירה וחשבוניות ספק — במקום להעלות קבצים. חשבוניות המכירה מעדכנות גם את לשוניות מכירות ולקוחות. רק חשבוניות סופיות נספרות (בלי טיוטות ובלי מבוטלות). אחרי הפעם הראשונה נמשכים רק החודש וחצי האחרונים, אז זה מהיר. קריאה בלבד, שום דבר לא משתנה ב-Priority. דוח המשלוחים מהמשלח עדיין נטען כקובץ.</p>
             {prioSync.at && <p className={`text-xs mt-1 ${muted}`}>סנכרון אחרון: {new Date(prioSync.at).toLocaleString('he-IL', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</p>}
           </div>
           <button type="button" onClick={()=>syncFromPriority(false)} disabled={prioSync.busy}
@@ -6325,11 +6394,19 @@ const App = () => {
   // megabytes on a real business (years of transactions, hundreds of
   // customers × products). They start empty and load asynchronously below;
   // a short loading screen covers that gap on first paint.
-  const [salesData, setSalesData] = useState([]);
+  const [salesFileData, setSalesData] = useState([]); // rows from uploaded monthly files only
+  // Sales-invoice lines saved by the procurement page (Priority sync or uploaded lines file).
+  const [procSalesLines, setProcSalesLines] = useState([]);
+  useEffect(() => { idbGet('procSalesLines').then(v => { if (Array.isArray(v)) setProcSalesLines(v); }).catch(() => {}); }, []);
+  // What every tab shows: months covered by the invoice lines come from them, older months from the files.
+  const salesData = useMemo(() => mergeLinesIntoMonthly(salesFileData, procSalesLines, { includeExtra: true }), [salesFileData, procSalesLines]);
+  const salesLinesRange = useMemo(() => linesRange(procSalesLines), [procSalesLines]);
   // Customer data — two independent, optional files (see parseCustomerMonthlyFile/
   // parseCustomerProductFile): one gives the time dimension, the other the product mix.
   const [customerMonthlyData, setCustomerMonthlyData] = useState([]);
   const [customerProductData, setCustomerProductData] = useState([]);
+  const customerMonthlyEff = useMemo(() => customerMonthlyFromLines(customerMonthlyData, procSalesLines), [customerMonthlyData, procSalesLines]);
+  const customerProductEff = useMemo(() => { const fromLines = customerProductsFromLines(procSalesLines); return fromLines.length ? fromLines : customerProductData; }, [customerProductData, procSalesLines]);
   const [customerMonthlyFileName, setCustomerMonthlyFileName] = useState(() => localStorage.getItem('customerMonthlyFileName')||'');
   const [customerProductFileName, setCustomerProductFileName] = useState(() => localStorage.getItem('customerProductFileName')||'');
   // Cost & currency per SKU — owned here (not inside ProcurementPage) so the
@@ -6488,9 +6565,9 @@ const App = () => {
   useEffect(() => {
     if (!idbReady) return; // avoid overwriting IDB with the initial empty [] before the load effect has run
     if (idbLoadFailed.includes('dashboardSalesData')) return; // load failed — writing now would overwrite real data with the empty in-memory state
-    idbSet('dashboardSalesData', salesData).then(()=>setStorageWarning(false)).catch(()=>setStorageWarning(true));
+    idbSet('dashboardSalesData', salesFileData).then(()=>setStorageWarning(false)).catch(()=>setStorageWarning(true));
     save('salesFileNames', salesFileNames);
-  }, [salesData, salesFileNames, idbReady, idbLoadFailed]);
+  }, [salesFileData, salesFileNames, idbReady, idbLoadFailed]);
   useEffect(() => {
     if (!idbReady) return;
     if (idbLoadFailed.includes('dashboardSuppliersData')) return;
@@ -6616,7 +6693,7 @@ const App = () => {
     const keys = clearBoth ? ['sales','suppliers'] : [activeTab];
     keys.forEach(k => {
       if (k==='sales') {
-        trashSet('dashboardSalesData', salesData, { fileNames: salesFileNames });
+        trashSet('dashboardSalesData', salesFileData, { fileNames: salesFileNames });
         setSalesData([]); setSalesFileNames([]);
         idbDelete('dashboardSalesData').catch(()=>{}); localStorage.removeItem('dashboardSalesData'); localStorage.removeItem('salesFileNames');
       } else if (k==='suppliers') {
@@ -6758,7 +6835,7 @@ const App = () => {
   // Remove the rows of ONE uploaded file (rows carry the file name at the end of their id).
   const removeDataFile = (kind, name) => {
     const isSales = kind === 'sales';
-    const data = isSales ? salesData : suppliersData;
+    const data = isSales ? salesFileData : suppliersData;
     const names = isSales ? salesFileNames : suppliersFileNames;
     const key = isSales ? 'dashboardSalesData' : 'dashboardSuppliersData';
     trashSet(key, data, { fileNames: names });
@@ -6778,13 +6855,13 @@ const App = () => {
   const otherSources = useMemo(() => {
     const out = [];
     const count = (data, n) => data.reduce((c, r) => c + (String(r.id||'').endsWith('-' + n) ? 1 : 0), 0);
-    salesFileNames.forEach(n => out.push({ id:'s:'+n, name:n, label:'מכירות חודשיות לפי מוצר (לשונית מכירות)', detail:`${count(salesData, n).toLocaleString()} שורות`, onDelete:() => removeDataFile('sales', n) }));
+    salesFileNames.forEach(n => out.push({ id:'s:'+n, name:n, label:'מכירות חודשיות לפי מוצר (לשונית מכירות)', detail:`${count(salesFileData, n).toLocaleString()} שורות`, onDelete:() => removeDataFile('sales', n) }));
     suppliersFileNames.forEach(n => out.push({ id:'p:'+n, name:n, label:'הוצאות לפי ספק (לשונית ספקים)', detail:`${count(suppliersData, n).toLocaleString()} שורות`, onDelete:() => removeDataFile('suppliers', n) }));
     if (customerMonthlyFileName && customerMonthlyData.length) out.push({ id:'cm', name:customerMonthlyFileName, label:'מכירות ללקוח בחתך חודשי (לשונית לקוחות)', detail:`${customerMonthlyData.length.toLocaleString()} שורות`, onDelete:clearCustomerMonthly });
     if (customerProductFileName && customerProductData.length) out.push({ id:'cp', name:customerProductFileName, label:'מכירות ללקוח לפי מוצר (לשונית לקוחות)', detail:`${customerProductData.length.toLocaleString()} שורות`, onDelete:clearCustomerProduct });
     return out;
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [salesFileNames, suppliersFileNames, salesData, suppliersData, customerMonthlyFileName, customerMonthlyData, customerProductFileName, customerProductData]);
+  }, [salesFileNames, suppliersFileNames, salesFileData, suppliersData, customerMonthlyFileName, customerMonthlyData, customerProductFileName, customerProductData]);
 
   // ─── Saved views — remembers a filter combo (tab + date range + product/supplier) ───
   const [savedViews, setSavedViews] = useState(() => { try { return JSON.parse(localStorage.getItem('savedViews')||'[]'); } catch { return []; } });
@@ -7555,8 +7632,10 @@ const App = () => {
           {/* Customers */}
           {activeTab==='customers' && (
             <CustomersPage
-              monthlyData={customerMonthlyData}
-              productData={customerProductData}
+              monthlyData={customerMonthlyEff}
+              productData={customerProductEff}
+              priorityRange={salesLinesRange}
+              fileCounts={{ monthly: customerMonthlyData.length, product: customerProductData.length }}
               isDarkMode={isDarkMode}
               fileNames={{ monthly:customerMonthlyFileName, product:customerProductFileName }}
               onUploadMonthly={handleCustomerMonthlyUpload}
@@ -7573,7 +7652,7 @@ const App = () => {
 
           {/* Procurement Planning */}
           {activeTab==='procurement' && (
-            <ProcurementPage salesData={salesData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
+            <ProcurementPage onSalesLinesChange={setProcSalesLines} salesData={salesFileData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
           )}
 
           {/* Summary */}

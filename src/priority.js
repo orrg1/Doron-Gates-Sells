@@ -24,7 +24,7 @@ export const pingPriority = () => call({ action: 'ping' });
 // Priority's $metadata is huge and slow (~30s). The field lists of the forms we
 // use are fetched in ONE request and kept for 7 days (saved like any other
 // setting, so every signed-in device shares them).
-const SYNC_FORMS = ['LOGPART', 'PORDERS', 'AINVOICES', 'CINVOICES', 'YINVOICES'];
+const SYNC_FORMS = ['LOGPART', 'PORDERS', 'AINVOICES', 'CINVOICES', 'EINVOICES', 'YINVOICES'];
 const SCHEMA_KEY = 'prioritySchema';
 const SCHEMA_TTL = 7 * 86400000;
 let schemaPromise = null;
@@ -32,7 +32,7 @@ const loadSchema = (force = false) => {
   if (!force && schemaPromise) return schemaPromise;
   schemaPromise = (async () => {
     if (!force) {
-      try { const c = JSON.parse(localStorage.getItem(SCHEMA_KEY) || 'null'); if (c && Date.now() - c.at < SCHEMA_TTL && c.forms) return c.forms; } catch { /* refetch */ }
+      try { const c = JSON.parse(localStorage.getItem(SCHEMA_KEY) || 'null'); if (c && Date.now() - c.at < SCHEMA_TTL && c.forms && SYNC_FORMS.every(f => c.forms[f])) return c.forms; } catch { /* refetch */ }
     }
     const r = await call({ action: 'describe', forms: SYNC_FORMS });
     try { localStorage.setItem(SCHEMA_KEY, JSON.stringify({ at: Date.now(), forms: r.forms })); } catch { /* best-effort */ }
@@ -120,7 +120,11 @@ const F = {
   supInvName: ['CDES', 'SUPDES', 'SUPNAME'],
   cur: ['CODE', 'ICODE'], lineCur: ['ICODE', 'CODE'], rate: ['EXCH', 'IEXCH', 'EXCHANGE'],
   debit: ['DEBIT'],
+  final: ['FINAL'], docStatus: ['STATDES'], hdrGross: ['QPRICE'], hdrNet: ['DISPRICE'], lineExch: ['EXCH'],
 };
+// Only finalized, non-cancelled documents count (drafts and cancelled invoices exist in the same forms).
+const finalFilter = (f) => pick(f, F.final) ? ` and ${pick(f, F.final)} eq 'Y'` : '';
+const isCancelled = (r, f) => { const st = pick(f, F.docStatus); return !!(st && /מבוטל/.test(String(r[st] || ''))); };
 
 // ── 1. items + stock balances (one sheet → fills both inventory slots) ──
 async function pullItems(report) {
@@ -185,23 +189,35 @@ async function pullSalesForm(form, since, report = () => {}) {
   const f = d.fields;
   const iv = need(f, F.ivNum, 'חשבונית', form), date = need(f, F.ivDate, 'תאריך', form);
   const cn = pick(f, F.custNum), cd = pick(f, F.custName);
+  const st = pick(f, F.docStatus), gross = pick(f, F.hdrGross), net = pick(f, F.hdrNet);
   const it = subformOf(d, n => /ITEMS/.test(n), form);
   const sku = need(it.fields, F.part, 'מק"ט', it.name), des = pick(it.fields, F.partDes);
   const q = need(it.fields, F.quant, 'כמות', it.name), tot = pick(it.fields, F.lineTotal), ord = pick(it.fields, F.ordName);
+  const exch = pick(it.fields, F.lineExch);
   const wins = monthWindows(since);
   let done = 0;
   const parts = await pool(wins, 3, async ([a, b]) => {
     const r = await query(form, {
-      select: sel(iv, date, cn, cd), filter: `${date} ge ${a} and ${date} lt ${b}`, orderby: iv,
-      expand: `${it.name}($select=${sel(sku, des, q, tot, ord)})`,
+      select: sel(iv, date, cn, cd, st, gross, net), filter: `${date} ge ${a} and ${date} lt ${b}${finalFilter(f)}`, orderby: iv,
+      expand: `${it.name}($select=${sel(sku, des, q, tot, ord, exch)})`,
     });
     done++; if (wins.length > 2) report(`${form}: ${done}/${wins.length} חודשים`);
     return r;
   });
   const rows = parts.flat();
   const out = [];
-  for (const r of rows) for (const l of r[it.name] || [])
-    out.push([dmy(r[date]), r[iv], cn ? r[cn] : '', cd ? r[cd] : '', l[sku], des ? l[des] : '', numv(l[q]), tot ? numv(l[tot]) : 0, ord ? l[ord] || '' : '']);
+  for (const r of rows) {
+    if (isCancelled(r, f)) continue;
+    // Line totals are before the invoice-level discount and in the invoice currency:
+    // spread the header discount over the lines and convert to ILS with the line rate.
+    const g = gross ? numv(r[gross]) : 0, n = net ? numv(r[net]) : 0;
+    const factor = g && n && Math.abs(n / g - 1) < 0.5 ? n / g : 1;
+    for (const l of r[it.name] || []) {
+      const rate = exch ? numv(l[exch]) || 1 : 1;
+      const v = tot ? Math.round(numv(l[tot]) * rate * factor * 100) / 100 : 0;
+      out.push([dmy(r[date]), r[iv], cn ? r[cn] : '', cd ? r[cd] : '', l[sku], des ? l[des] : '', numv(l[q]), v, ord ? l[ord] || '' : '']);
+    }
+  }
   return out;
 }
 
@@ -212,18 +228,18 @@ async function pullPurchaseLines(since, poDates) {
   const d = await describe(form);
   const f = d.fields;
   const iv = need(f, F.ivNum, 'חשבונית', form), date = need(f, F.ivDate, 'תאריך', form), sup = need(f, F.supInvName, 'שם ספק', form);
-  const cur = pick(f, F.cur), rate = pick(f, F.rate), deb = pick(f, F.debit);
+  const cur = pick(f, F.cur), rate = pick(f, F.rate), deb = pick(f, F.debit), st = pick(f, F.docStatus);
   const it = subformOf(d, n => /ITEMS/.test(n), form);
   const sku = need(it.fields, F.part, 'מק"ט', it.name), des = pick(it.fields, F.partDes);
   const q = need(it.fields, F.quant, 'כמות', it.name), price = pick(it.fields, F.linePrice), tot = pick(it.fields, F.lineTotal);
   const lcur = pick(it.fields, F.lineCur), ord = pick(it.fields, F.ordName);
   const parts = await pool(monthWindows(since), 3, ([a, b]) => query(form, {
-    select: sel(iv, date, sup, cur, rate, deb), filter: `${date} ge ${a} and ${date} lt ${b}`, orderby: iv,
+    select: sel(iv, date, sup, cur, rate, deb, st), filter: `${date} ge ${a} and ${date} lt ${b}${finalFilter(f)}`, orderby: iv,
     expand: `${it.name}($select=${sel(sku, des, q, price, tot, lcur, ord)})`,
   }));
   const rows = parts.flat();
   const out = [];
-  for (const r of rows) for (const l of r[it.name] || []) {
+  for (const r of rows) for (const l of (isCancelled(r, f) ? [] : r[it.name] || [])) {
     const po = ord ? l[ord] || '' : '';
     out.push([dmy(r[date]), r[iv], r[sup], l[sku], des ? l[des] : '', numv(l[q]), price ? numv(l[price]) : 0,
       (lcur && l[lcur]) || (cur ? r[cur] : '') || '', tot ? numv(l[tot]) : 0, rate ? numv(r[rate]) || '' : '',
@@ -294,11 +310,16 @@ export async function pullAllFromPriority({ months = 24, salesSince = null, purc
   })();
   const sales = step('salesLines', 'שורות חשבוניות מכירה', async () => {
     const lines = [];
-    // Both forms must succeed — a partial pull would silently drop sales.
-    for (const form of ['AINVOICES', 'CINVOICES']) {
+    // Tax invoices must succeed — a partial pull would silently drop sales.
+    // Consolidated invoices and invoice-receipts are added when Priority allows API access to them.
+    const OPTIONAL = { CINVOICES: 'חשבוניות מרכזות', EINVOICES: 'חשבוניות מס קבלה' };
+    for (const form of ['AINVOICES', 'CINVOICES', 'EINVOICES']) {
       try { lines.push(...await pullSalesForm(form, sSince, report)); }
       catch (e) {
-        if (form === 'CINVOICES' && /not open|לא פתוח|not in \$metadata|not in field list/i.test(e.message)) { note('CINVOICES לא פתוח ל-API — רק חשבוניות מס'); continue; }
+        if (OPTIONAL[form] && /not open|לא פתוח|לא ניתן להפעיל API|not in \$metadata|not in field list|not on the allowed list/i.test(e.message)) {
+          note(`${OPTIONAL[form]} (${form}) לא פתוחות ל-API ב-Priority — הן לא נכללות במכירות. אפשר לבקש ממנהל המערכת לפתוח את המסך ל-API.`);
+          continue;
+        }
         throw new Error(`${form}: ${e.message}`);
       }
     }
