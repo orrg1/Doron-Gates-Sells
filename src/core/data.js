@@ -803,3 +803,72 @@ export const stockoutSummary = (timelines) => {
   });
   return out;
 };
+
+// ─── Returns & credits (sales invoice lines) ───
+// Goods returns = product lines with negative quantity. Money-only credits = negative
+// value lines without a product quantity (after-the-fact discounts, price corrections).
+export const returnsAnalysis = (lines = [], { fromIso, toIso, prevFromIso } = {}) => {
+  const inWin = (d) => d >= fromIso && d <= toIso;
+  const prod = {}, cust = {}, inv = {}, months = {};
+  let sold = 0, goods = 0, money = 0, prevGoods = 0, prevMoney = 0, prevSold = 0;
+  lines.forEach(l => {
+    const isPrev = prevFromIso && l.d >= prevFromIso && l.d < fromIso;
+    if (!inWin(l.d) && !isPrev) return;
+    const goodsRet = !l.x && l.q < 0, moneyCr = l.x && l.v < 0;
+    if (isPrev) { if (l.v > 0) prevSold += l.v; if (goodsRet) prevGoods += -l.v; if (moneyCr) prevMoney += -l.v; return; }
+    if (l.v > 0) sold += l.v;
+    if (!l.x && l.k) {
+      const p = (prod[l.k] ||= { k: l.k, n: l.n, soldQ: 0, soldV: 0, retQ: 0, retV: 0, cust: {} });
+      if (l.q > 0) { p.soldQ += l.q; p.soldV += l.v; if (!p.n) p.n = l.n; }
+      if (l.q < 0) { p.retQ += -l.q; p.retV += -l.v; p.cust[l.c] = (p.cust[l.c] || 0) + -l.q; }
+    }
+    const c = (cust[l.c] ||= { c: l.c, soldV: 0, goodsV: 0, moneyV: 0, invs: new Set() });
+    if (l.v > 0) c.soldV += l.v;
+    if (goodsRet || moneyCr) {
+      if (goodsRet) { goods += -l.v; c.goodsV += -l.v; } else { money += -l.v; c.moneyV += -l.v; }
+      c.invs.add(l.inv);
+      const iv = (inv[l.inv] ||= { inv: l.inv, d: l.d, c: l.c, goodsV: 0, moneyV: 0, items: [] });
+      if (goodsRet) { iv.goodsV += -l.v; iv.items.push({ k: l.k, n: l.n, q: -l.q }); } else iv.moneyV += -l.v;
+      const m = l.d.slice(0, 7); (months[m] ||= { m, goods: 0, money: 0 }); months[m][goodsRet ? 'goods' : 'money'] += -l.v;
+    }
+  });
+  const products = Object.values(prod).filter(p => p.retQ > 0).map(p => ({ ...p, rate: p.soldQ > 0 ? p.retQ / p.soldQ * 100 : null,
+    topCust: Object.entries(p.cust).sort((a, b) => b[1] - a[1])[0]?.[0] || '' })).sort((a, b) => b.retV - a.retV);
+  const customers = Object.values(cust).filter(c => c.goodsV || c.moneyV).map(c => ({ c: c.c, soldV: c.soldV, goodsV: c.goodsV, moneyV: c.moneyV, total: c.goodsV + c.moneyV,
+    share: c.soldV > 0 ? (c.goodsV + c.moneyV) / c.soldV * 100 : null, n: c.invs.size })).sort((a, b) => b.total - a.total);
+  const invoices = Object.values(inv).map(i => ({ ...i, total: i.goodsV + i.moneyV, kind: i.goodsV && i.moneyV ? 'both' : i.goodsV ? 'goods' : 'money' })).sort((a, b) => a.d < b.d ? 1 : -1);
+  return { sold, goods, money, prevSold, prevGoods, prevMoney, products, customers, invoices, months: Object.values(months).sort((a, b) => a.m < b.m ? -1 : 1) };
+};
+
+// ─── Brands (product families) ───
+export const brandsAnalysis = (lines = [], { itemsExtra = {}, stock = {}, fromIso, toIso, prevFromIso } = {}) => {
+  const fam = {};
+  const famOf = (k) => (itemsExtra[k]?.fam || '').trim() || 'ללא משפחה';
+  lines.forEach(l => {
+    if (l.x || !l.k) return;
+    const cur = l.d >= fromIso && l.d <= toIso, prev = prevFromIso && l.d >= prevFromIso && l.d < fromIso;
+    if (!cur && !prev) return;
+    const f = (fam[famOf(l.k)] ||= { name: famOf(l.k), v: 0, q: 0, prevV: 0, cost: 0, costedV: 0, skus: new Set(), cust: {}, months: {}, prod: {} });
+    if (prev) { f.prevV += l.v; return; }
+    f.v += l.v; f.q += l.q; f.skus.add(l.k); f.cust[l.c] = (f.cust[l.c] || 0) + l.v;
+    const m = l.d.slice(0, 7); f.months[m] = (f.months[m] || 0) + l.v;
+    const pr = (f.prod[l.k] ||= { k: l.k, n: l.n, v: 0, q: 0 }); pr.v += l.v; pr.q += l.q;
+    const ac = itemsExtra[l.k]?.avgCost;
+    if (ac > 0) { f.cost += ac * l.q; f.costedV += l.v; }
+  });
+  // stock value by family (average cost)
+  Object.entries(stock).forEach(([k, q]) => {
+    if (!(q > 0)) return; const ac = itemsExtra[k]?.avgCost; const n = famOf(k);
+    const f = fam[n]; if (!f) return;
+    f.stockV = (f.stockV || 0) + (ac > 0 ? q * ac : 0);
+  });
+  return Object.values(fam).filter(f => f.v || f.prevV).map(f => ({
+    name: f.name, v: f.v, q: f.q, prevV: f.prevV, change: f.prevV > 0 ? (f.v / f.prevV - 1) * 100 : null,
+    margin: f.costedV > 0 ? (1 - f.cost / f.costedV) * 100 : null, marginCoverage: f.v > 0 ? f.costedV / f.v * 100 : 0,
+    skus: f.skus.size, customers: Object.keys(f.cust).length, stockV: f.stockV || 0,
+    coverMonths: f.v > 0 && f.stockV ? f.stockV / ((f.cost > 0 && f.costedV > 0 ? f.cost / f.costedV * f.v : f.v) / 12) : null,
+    months: Object.entries(f.months).sort(([a], [b]) => a < b ? -1 : 1).map(([m, v]) => ({ m, v })),
+    topProducts: Object.values(f.prod).sort((a, b) => b.v - a.v).slice(0, 10),
+    topCustomers: Object.entries(f.cust).sort((a, b) => b[1] - a[1]).slice(0, 8).map(([c, v]) => ({ c, v })),
+  })).sort((a, b) => b.v - a.v);
+};

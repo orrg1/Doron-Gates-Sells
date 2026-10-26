@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import * as XLSXLib from 'xlsx';
 import { describeAll } from './priority.js';
 import { supabase, flushAll, queueDataset } from './cloud.js';
-import { purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
+import { returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
@@ -6430,6 +6430,9 @@ const App = () => {
   const salesLinesRange = useMemo(() => linesRange(procSalesLines), [procSalesLines]);
   // Customer cards pulled from Priority (city, agent, payment terms, customer since)
   const [priorityCustomers, setPriorityCustomers] = useState({});
+  // Item-card extras (family, average cost) for the brands view in "מכירות"
+  const [itemsExtraApp, setItemsExtraApp] = useState({});
+  useEffect(() => { idbGet('procItemsExtra').then(v => { if (v && typeof v === 'object') setItemsExtraApp(v); }).catch(() => {}); }, []);
   const [syncRequest, setSyncRequest] = useState(null);
   const [lastSyncAt, setLastSyncAt] = useState(() => { try { return Number(localStorage.getItem('prioritySyncAt')) || null; } catch { return null; } });
   const requestPrioritySync = () => { setSyncRequest({ ts: Date.now() }); setActiveTab('procurement'); };
@@ -7286,7 +7289,16 @@ const App = () => {
     return sorted;
   }, [activeTab, filteredData, costMap, currencyMap, exchangeRates]);
 
-  const [salesViewMode, setSalesViewMode] = useState('transactions'); // 'transactions' | 'byProduct'
+  const [salesViewMode, setSalesViewMode] = useState('transactions'); // 'transactions' | 'byProduct' | 'returns' | 'brands'
+  const [openBrand, setOpenBrand] = useState(null);
+  // Last 12 months vs the 12 before — for returns and brands
+  const yearWindow = useMemo(() => { const now = Date.now(); const iso = (ms) => new Date(ms).toISOString().slice(0,10); return { from: iso(now - 365*DAY_MS), to: iso(now), prevFrom: iso(now - 730*DAY_MS) }; }, []);
+  const returnsData = useMemo(() => salesViewMode==='returns' ? returnsAnalysis(procSalesLines, { fromIso: yearWindow.from, toIso: yearWindow.to, prevFromIso: yearWindow.prevFrom }) : null, [salesViewMode, procSalesLines, yearWindow]);
+  const brandsData = useMemo(() => {
+    if (salesViewMode!=='brands') return null;
+    let stock = {}; try { stock = JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { /* none */ }
+    return brandsAnalysis(procSalesLines, { itemsExtra: itemsExtraApp, stock, fromIso: yearWindow.from, toIso: yearWindow.to, prevFromIso: yearWindow.prevFrom });
+  }, [salesViewMode, procSalesLines, itemsExtraApp, yearWindow]);
   const [productAbcFilter, setProductAbcFilter] = useState('all'); // 'all'|'A'|'B'|'C'
   const [productSortConfig, setProductSortConfig] = useState({ key:'totalRev', direction:'desc' });
   const sortedProductAggregates = useMemo(() => {
@@ -7421,6 +7433,183 @@ const App = () => {
   const hasBlockedCurrency = productAggregates.some(p=>p.costCurrencyBlocked);
 
   const requestSort = (key) => setSortConfig(p=>({ key, direction:p.key===key&&p.direction==='asc'?'desc':'asc' }));
+  const appSort = useTableSort();
+
+  // ══ Sales: returns & credits (last 12 months) ══
+  const renderReturns = (r) => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const box = `rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`;
+    const head = `text-[11px] font-semibold sticky top-0 z-10 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`;
+    const rowCls = isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50';
+    const pctOf = (a, b) => b > 0 ? a / b * 100 : 0;
+    const rate = pctOf(r.goods + r.money, r.sold), prevRate = pctOf(r.prevGoods + r.prevMoney, r.prevSold);
+    const flagged = (p) => p.rate != null && p.rate >= 5 && p.retQ >= 3;
+    const prods = appSort.sortRows('ret-prod', r.products);
+    const custs = appSort.sortRows('ret-cust', r.customers);
+    const invs = appSort.sortRows('ret-inv', r.invoices.slice(0, 300));
+    const { sortTh } = appSort;
+    const th = (id, k, l, d) => sortTh(id, k, l, { className:'px-4 py-2.5', firstDir: d||'asc' });
+    return (
+      <div className="space-y-4">
+        <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
+          {[
+            ['החזרות סחורה', formatShort(r.goods), `${pctOf(r.goods, r.sold).toFixed(1)}% מהמכירות`],
+            ['זיכויים כספיים', formatShort(r.money), 'הנחות בדיעבד ותיקוני מחיר'],
+            ['סה״כ זיכויים', `${rate.toFixed(1)}%`, r.prevSold ? `שנה קודמת: ${prevRate.toFixed(1)}%` : '12 חודשים אחרונים'],
+            ['מוצרים עם אחוז החזרה גבוה', String(r.products.filter(flagged).length), '5% ומעלה, לפחות 3 יח׳'],
+          ].map(([l, v, sub]) => (
+            <div key={l} className={`${box} p-4`}><p className={`text-xs ${muted}`}>{l}</p><p className={`text-2xl font-bold mt-1 ${strong}`}>{v}</p><p className={`text-xs mt-0.5 ${muted}`}>{sub}</p></div>
+          ))}
+        </div>
+        {r.months.length>1 && (
+          <div className={`${box} p-5`}>
+            <p className={`text-sm font-bold mb-3 ${strong}`}>זיכויים לפי חודש</p>
+            <div style={{height:180}} dir="ltr">
+              <ResponsiveContainer width="100%" height="100%">
+                <ComposedChart data={r.months.map(x => ({ ...x, label: isoToMonthKey(x.m + '-01') }))} margin={{top:4,right:8,left:0,bottom:0}}>
+                  <CartesianGrid strokeDasharray="3 3" vertical={false} stroke={isDarkMode?'#334155':'#E2E8F0'}/>
+                  <XAxis dataKey="label" tick={{fontSize:11}}/><YAxis tick={{fontSize:11}} tickFormatter={v=>formatShort(v)}/>
+                  <RechartsTooltip formatter={(v,n)=>[formatShort(v), n==='goods'?'החזרת סחורה':'זיכוי כספי']}/>
+                  <Bar dataKey="goods" stackId="a" fill="#C8322B" isAnimationActive={false}/>
+                  <Bar dataKey="money" stackId="a" fill="#D9822B" isAnimationActive={false}/>
+                </ComposedChart>
+              </ResponsiveContainer>
+            </div>
+          </div>
+        )}
+        <div className={box}>
+          <div className={`px-5 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}><h3 className={`font-bold text-sm ${strong}`}>מוצרים שחוזרים</h3><p className={`text-[11px] mt-0.5 ${muted}`}>אדום = 5% ומעלה מהכמות חזרה (לפחות 3 יח׳) — כדאי לבדוק איכות</p></div>
+          <div className="overflow-x-auto max-h-96 overflow-y-auto">
+            <table className={`w-full text-sm text-right min-w-[760px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+              <thead className={head}><tr>{th('ret-prod','n','מוצר')}{th('ret-prod','soldQ','נמכרו','desc')}{th('ret-prod','retQ','חזרו','desc')}{th('ret-prod','rate','אחוז החזרה','desc')}{th('ret-prod','retV','שווי','desc')}{th('ret-prod','topCust','לקוח מחזיר עיקרי')}</tr></thead>
+              <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                {prods.slice(0,300).map(p => (
+                  <tr key={p.k} className={rowCls}>
+                    <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[260px] ${strong}`} title={p.n}>{p.n}</p><p className={`text-[11px] font-mono ${muted}`}>{p.k}</p></td>
+                    <td className="px-4 py-2.5 tabular-nums">{p.soldQ.toLocaleString()}</td>
+                    <td className="px-4 py-2.5 tabular-nums font-semibold">{p.retQ.toLocaleString()}</td>
+                    <td className={`px-4 py-2.5 tabular-nums font-bold ${flagged(p)?'text-red-500':''}`}>{p.rate!=null ? `${p.rate.toFixed(1)}%` : '—'}</td>
+                    <td className="px-4 py-2.5 tabular-nums">{formatShort(p.retV)}</td>
+                    <td className="px-4 py-2.5 text-xs truncate max-w-[200px]" title={p.topCust}>{p.topCust}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <div className="grid grid-cols-1 xl:grid-cols-2 gap-4">
+          <div className={box}>
+            <div className={`px-5 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}><h3 className={`font-bold text-sm ${strong}`}>לקוחות</h3></div>
+            <div className="overflow-x-auto max-h-96 overflow-y-auto">
+              <table className={`w-full text-sm text-right ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                <thead className={head}><tr>{th('ret-cust','c','לקוח')}{th('ret-cust','goodsV','החזרות','desc')}{th('ret-cust','moneyV','זיכוי כספי','desc')}{th('ret-cust','share','מהקניות','desc')}{th('ret-cust','n','חשבוניות','desc')}</tr></thead>
+                <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                  {custs.slice(0,200).map(c => (
+                    <tr key={c.c} className={rowCls}>
+                      <td className={`px-4 py-2.5 font-medium truncate max-w-[220px] ${strong}`} title={c.c}>{c.c}</td>
+                      <td className="px-4 py-2.5 tabular-nums">{c.goodsV ? formatShort(c.goodsV) : '—'}</td>
+                      <td className="px-4 py-2.5 tabular-nums">{c.moneyV ? formatShort(c.moneyV) : '—'}</td>
+                      <td className="px-4 py-2.5 tabular-nums">{c.share!=null ? `${c.share.toFixed(1)}%` : '—'}</td>
+                      <td className="px-4 py-2.5 tabular-nums">{c.n}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+          <div className={box}>
+            <div className={`px-5 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}><h3 className={`font-bold text-sm ${strong}`}>חשבוניות זיכוי</h3></div>
+            <div className="overflow-x-auto max-h-96 overflow-y-auto">
+              <table className={`w-full text-sm text-right ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                <thead className={head}><tr>{th('ret-inv','d','תאריך','desc')}{th('ret-inv','c','לקוח')}{th('ret-inv','kind','סוג')}{th('ret-inv','total','סכום','desc')}</tr></thead>
+                <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                  {invs.map(i => (
+                    <tr key={i.inv} className={rowCls} title={i.items.map(x => `${x.q} × ${x.n}`).join('\n')}>
+                      <td className="px-4 py-2.5 text-xs tabular-nums whitespace-nowrap">{isoToDisplay(i.d)}<p className={`font-mono text-[10px] ${muted}`}>{i.inv}</p></td>
+                      <td className={`px-4 py-2.5 text-xs truncate max-w-[180px] ${strong}`} title={i.c}>{i.c}</td>
+                      <td className="px-4 py-2.5 text-xs">{{goods:`החזרה (${i.items.length} שורות)`, money:'זיכוי כספי', both:'החזרה + זיכוי'}[i.kind]}</td>
+                      <td className="px-4 py-2.5 text-xs tabular-nums font-semibold">{formatShort(i.total)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        </div>
+        <p className={`text-xs ${muted}`}>12 חודשים אחרונים ({isoToDisplay(yearWindow.from)}–{isoToDisplay(yearWindow.to)}), מחשבוניות Priority. חשבוניות מבוטלות וחשבוניות הזיכוי שמבטלות אותן לא נכללות.</p>
+      </div>
+    );
+  };
+
+  // ══ Sales: brands (product families) ══
+  const renderBrands = (list) => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const box = `rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`;
+    const head = `text-[11px] font-semibold sticky top-0 z-10 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`;
+    const th = (k, l, d) => appSort.sortTh('brands', k, l, { className:'px-4 py-2.5', firstDir: d||'asc' });
+    const rows = appSort.sortRows('brands', list);
+    const total = list.reduce((a,f) => a + f.v, 0);
+    const general = list.filter(f => /ללא משפחה|כללית/.test(f.name)).reduce((a,f) => a + f.v, 0);
+    const pct = (v) => v==null ? '—' : <span className={`font-semibold ${v>0?'text-emerald-500':v<0?'text-red-500':''}`}>{v>0?'+':''}{v.toFixed(0)}%</span>;
+    return (
+      <div className="space-y-4">
+        {!Object.keys(itemsExtraApp).length && <p className={`text-sm ${muted}`}>משפחות המוצר מגיעות מכרטיס הפריט ב-Priority — יופיעו אחרי הסנכרון הבא.</p>}
+        <div className={box}>
+          <div className={`px-5 py-3 border-b flex flex-wrap items-baseline gap-3 ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+            <h3 className={`font-bold text-sm ${strong}`}>מותגים / משפחות מוצר — 12 חודשים אחרונים</h3>
+            <span className={`text-xs ${muted}`}>{general>0 ? `${Math.round(general/total*100)}% מהמכירות במשפחות כלליות / ללא משפחה — שווה לסווג ב-Priority` : ''}</span>
+          </div>
+          <div className="overflow-x-auto max-h-[520px] overflow-y-auto">
+            <table className={`w-full text-sm text-right min-w-[900px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+              <thead className={head}><tr>{th('name','משפחה')}{th('v','מכירות','desc')}{th('change','מול שנה קודמת','desc')}{th('margin','רווח גולמי','desc')}{th('skus','פריטים','desc')}{th('customers','לקוחות','desc')}{th('stockV','מלאי (עלות)','desc')}{th('coverMonths','מספיק ל-','desc')}</tr></thead>
+              <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                {rows.map(f => (
+                  <React.Fragment key={f.name}>
+                    <tr onClick={()=>setOpenBrand(openBrand===f.name?null:f.name)} className={`cursor-pointer ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'} ${openBrand===f.name?(isDarkMode?'bg-slate-700/40':'bg-blue-50/50'):''}`}>
+                      <td className={`px-4 py-2.5 font-semibold ${strong}`}><ChevronDown className={`w-3.5 h-3.5 inline ml-1 transition-transform ${openBrand===f.name?'rotate-180':''}`}/>{f.name}</td>
+                      <td className="px-4 py-2.5 tabular-nums font-bold">{formatShort(f.v)} <span className={`text-xs font-normal ${muted}`}>{total?`${(f.v/total*100).toFixed(1)}%`:''}</span></td>
+                      <td className="px-4 py-2.5 tabular-nums">{pct(f.change)}</td>
+                      <td className="px-4 py-2.5 tabular-nums" title={`מבוסס על ${Math.round(f.marginCoverage)}% מהמכירות שיש להן עלות ממוצעת`}>{f.margin!=null ? `${f.margin.toFixed(0)}%` : '—'}{f.margin!=null && f.marginCoverage<80 ? <span className={`text-[10px] ${muted}`}> (חלקי)</span> : null}</td>
+                      <td className="px-4 py-2.5 tabular-nums">{f.skus}</td>
+                      <td className="px-4 py-2.5 tabular-nums">{f.customers}</td>
+                      <td className="px-4 py-2.5 tabular-nums">{f.stockV ? formatShort(f.stockV) : '—'}</td>
+                      <td className="px-4 py-2.5 tabular-nums">{f.coverMonths!=null ? `${f.coverMonths.toFixed(1)} ח׳` : '—'}</td>
+                    </tr>
+                    {openBrand===f.name && (
+                      <tr><td colSpan={8} className={`px-4 py-4 ${isDarkMode?'bg-slate-900/40':'bg-slate-50'}`}>
+                        <div className="grid grid-cols-1 xl:grid-cols-3 gap-4">
+                          <div className="xl:col-span-1" style={{height:160}} dir="ltr">
+                            <ResponsiveContainer width="100%" height="100%">
+                              <ComposedChart data={f.months.map(x => ({ ...x, label: isoToMonthKey(x.m + '-01') }))} margin={{top:4,right:4,left:0,bottom:0}}>
+                                <XAxis dataKey="label" tick={{fontSize:10}}/><YAxis tick={{fontSize:10}} tickFormatter={v=>formatShort(v)}/>
+                                <RechartsTooltip formatter={(v)=>[formatShort(v),'מכירות']}/>
+                                <Bar dataKey="v" fill="#1F5FBF" isAnimationActive={false}/>
+                              </ComposedChart>
+                            </ResponsiveContainer>
+                          </div>
+                          <div>
+                            <p className={`text-xs font-bold mb-1.5 ${strong}`}>מוצרים מובילים</p>
+                            {f.topProducts.map(p => <div key={p.k} className="flex justify-between gap-2 text-xs py-0.5"><span className="truncate" title={p.n}>{p.n}</span><b className="tabular-nums shrink-0">{formatShort(p.v)}</b></div>)}
+                          </div>
+                          <div>
+                            <p className={`text-xs font-bold mb-1.5 ${strong}`}>לקוחות מובילים</p>
+                            {f.topCustomers.map(c => <div key={c.c} className="flex justify-between gap-2 text-xs py-0.5"><span className="truncate" title={c.c}>{c.c}</span><b className="tabular-nums shrink-0">{formatShort(c.v)}</b></div>)}
+                          </div>
+                        </div>
+                      </td></tr>
+                    )}
+                  </React.Fragment>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+        <p className={`text-xs ${muted}`}>רווח גולמי לפי העלות הממוצעת בכרטיס הפריט. "מספיק ל-" = שווי המלאי חלקי עלות המכירות החודשית. לחיצה על משפחה פותחת גרף, מוצרים ולקוחות.</p>
+      </div>
+    );
+  };
 
   const navItems = [
     { id:'overview', label:'סקירה כללית', icon:Home, color:'text-sky-400' },
@@ -8087,11 +8276,18 @@ const App = () => {
                     <button onClick={()=>setSalesViewMode('byProduct')} className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${salesViewMode==='byProduct'?(isDarkMode?'bg-blue-500/20 border-blue-500/30 text-blue-300':'bg-blue-50 border-blue-200 text-blue-700'):(isDarkMode?'border-slate-700 text-slate-400 hover:text-white':'border-slate-200 text-slate-500 hover:text-slate-700')}`}>
                       <Box className="w-3.5 h-3.5"/> לפי מוצר
                     </button>
+                    {procSalesLines.length>0 && [['returns', 'החזרות וזיכויים', RefreshCw], ['brands', 'מותגים', Layers]].map(([mode, label, Icon]) => (
+                      <button key={mode} onClick={()=>setSalesViewMode(mode)} className={`flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${salesViewMode===mode?(isDarkMode?'bg-blue-500/20 border-blue-500/30 text-blue-300':'bg-blue-50 border-blue-200 text-blue-700'):(isDarkMode?'border-slate-700 text-slate-400 hover:text-white':'border-slate-200 text-slate-500 hover:text-slate-700')}`}>
+                        <Icon className="w-3.5 h-3.5"/> {label}
+                      </button>
+                    ))}
                   </div>
                 )}
+                {activeTab==='sales' && salesViewMode==='returns' && returnsData && renderReturns(returnsData)}
+                {activeTab==='sales' && salesViewMode==='brands' && brandsData && renderBrands(brandsData)}
 
                 {/* Table — raw transactions */}
-                {!(activeTab==='sales' && salesViewMode==='byProduct') && (
+                {!(activeTab==='sales' && salesViewMode!=='transactions') && (
                 <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
                   <div className={`px-5 py-4 border-b flex flex-wrap justify-between items-center gap-3 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
                     <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}><FileText className="w-4 h-4 text-slate-400"/> פירוט עסקאות <span className={`text-xs font-normal px-2 py-0.5 rounded-full ${isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500'}`}>{filteredData.length.toLocaleString()}</span></h3>
