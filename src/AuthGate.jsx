@@ -47,13 +47,13 @@ function CloudBadge({ email, isAdmin, onSignOut }) {
   const dot = st.state === 'saving' ? '#D9822B' : st.state === 'error' ? '#C8322B' : st.state === 'saved' ? '#2E8B57' : '#8A919E';
   const d = dark();
   return (
-    <div dir="rtl" className="fixed bottom-24 right-4 z-40 max-w-[220px]">
+    <div dir="rtl" className="fixed bottom-7 left-24 z-40 max-w-[220px]">
       <button type="button" onClick={() => { setOpen(o => !o); if (!open && isAdmin) loadUsers(); }} aria-expanded={open} aria-label={`מצב שמירה: ${label}`} title={st.message || label}
         className={`flex items-center gap-2 px-3 py-2 rounded-full border text-xs font-semibold shadow-sm ${d ? 'bg-slate-800 border-slate-600 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}>
         <span className="w-2 h-2 rounded-full" style={{ background: dot }} />{label}
       </button>
       {open && (
-        <div className={`absolute bottom-12 right-0 w-80 rounded-xl border shadow-2xl p-4 space-y-3 text-sm ${d ? 'bg-slate-800 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}>
+        <div className={`absolute bottom-12 left-0 w-80 rounded-xl border shadow-2xl p-4 space-y-3 text-sm ${d ? 'bg-slate-800 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}>
           <div>
             <p className="font-bold">{email || 'מצב מקומי'}</p>
             <p className="text-xs opacity-70">{email ? 'הנתונים נשמרים בשרת ומסונכרנים בין המחשבים' : 'הנתונים נשמרים רק בדפדפן הזה'}</p>

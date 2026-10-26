@@ -402,7 +402,7 @@ const KPICard = ({ title, value, formatted, subtext, icon: Icon, color, trend, s
 
 // Overview Dashboard Page
 // ─── CUSTOMERS PAGE ─────────────────────────────────────
-const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUploadMonthly, onUploadProduct, onClearMonthly, onClearProduct, loading, uploadError, uploadSuccess, onDismissError, excludeCurrentMonth, priorityRange = null, fileCounts = {}, customerCards = {} }) => {
+const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUploadMonthly, onUploadProduct, onClearMonthly, onClearProduct, loading, uploadError, uploadSuccess, onDismissError, excludeCurrentMonth, priorityRange = null, fileCounts = {}, customerCards = {}, onSyncPriority = null, lastSyncAt = null }) => {
   const [search, setSearch] = useState('');
   const [cityFilter, setCityFilter] = useState('');
   const [sortConfig, setSortConfig] = useState({ key:'totalRevenue', direction:'desc' });
@@ -695,12 +695,16 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
           <span>הקובץ נשמר בהצלחה</span>
         </div>
       )}
-      {priorityRange && (
-        <div className={`flex items-start gap-3 px-4 py-3 rounded-xl text-sm border ${isDarkMode?'bg-blue-500/10 border-blue-500/20 text-blue-200':'bg-blue-50 border-blue-200 text-blue-900'}`}>
-          <RefreshCw className="w-4 h-4 mt-0.5 shrink-0"/>
-          <p>נתוני הלקוחות מתעדכנים אוטומטית מחשבוניות המכירה ב-Priority ({isoToDisplay(priorityRange.from)}–{isoToDisplay(priorityRange.to)}). הקבצים כאן משמשים רק לחודשים שלפני כן — לא חובה להעלות אותם.</p>
-        </div>
-      )}
+      <PrioritySyncBar isDarkMode={isDarkMode} range={priorityRange} lastSyncAt={lastSyncAt} onSync={onSyncPriority} what="נתוני הלקוחות"/>
+      {priorityRange && !fileNames.monthly && !fileNames.product ? (
+        <details className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+          <summary className="cursor-pointer select-none font-semibold">קבצים ישנים (לא חובה) — רק אם צריך היסטוריה מלפני {isoToDisplay(priorityRange.from)}</summary>
+          <div className="mt-3">{renderUploadGrid()}</div>
+        </details>
+      ) : renderUploadGrid()}
+    </div>
+  );
+  function renderUploadGrid() { return (
       <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
       {[
         { label:'מכירות ללקוח בחתך חודשי', sub:'מגמה, נטישה, לקוחות חדשים', fileName:fileNames.monthly, onUpload:onUploadMonthly, onClear:onClearMonthly, isLoading:loading.monthly, count:fileCounts.monthly ?? monthlyData.length },
@@ -727,8 +731,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
         </div>
       ))}
       </div>
-    </div>
-  );
+  ); }
 
   if (!hasAnyData) {
     return (
@@ -739,7 +742,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
             <div className={`relative p-6 rounded-full ${isDarkMode?'bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700':'bg-gradient-to-br from-slate-50 to-white border border-slate-100'}`}><User className={`w-12 h-12 ${isDarkMode?'text-slate-500':'text-slate-300'}`}/></div>
           </div>
           <h3 className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>אין נתוני לקוחות עדיין</h3>
-          <p className={`mt-2 max-w-sm ${isDarkMode?'text-slate-400':'text-slate-500'}`}>טען קובץ "מכירות ללקוח בחתך חודשי" ו/או "מכירות ללקוח לפי מוצר" כדי להתחיל</p>
+          <p className={`mt-2 max-w-sm ${isDarkMode?'text-slate-400':'text-slate-500'}`}>לחץ "סנכרן עכשיו מ-Priority" למעלה — או טען קובץ "מכירות ללקוח בחתך חודשי" / "מכירות ללקוח לפי מוצר"</p>
         </div>
         {uploadCards}
       </div>
@@ -1255,7 +1258,22 @@ const OverviewPage = ({ salesData, suppliersData, dateFilter, availableDates, is
 };
 
 // Empty State
-const EmptyState = ({ onUpload, loading, isDarkMode, activeTab }) => (
+// "Sync from Priority" call-to-action used on the sales and customers tabs.
+const PrioritySyncBar = ({ isDarkMode, range, lastSyncAt, onSync, what }) => (
+  <div className={`flex flex-wrap items-center gap-3 px-4 py-3 rounded-xl text-sm border ${isDarkMode?'bg-blue-500/10 border-blue-500/20 text-blue-200':'bg-blue-50 border-blue-200 text-blue-900'}`}>
+    <RefreshCw className="w-4 h-4 shrink-0"/>
+    <p className="flex-1 min-w-[240px]">
+      {range
+        ? <>{what} מתעדכנים מחשבוניות המכירה ב-Priority ({isoToDisplay(range.from)}–{isoToDisplay(range.to)}){lastSyncAt ? ` · סונכרן לאחרונה ${new Date(lastSyncAt).toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}` : ''}. לא צריך להעלות קבצים.</>
+        : <>אפשר למשוך את {what} ישירות מ-Priority, בלי קבצים. הסנכרון הראשון לוקח כמה דקות.</>}
+    </p>
+    {onSync && <button type="button" onClick={onSync} className="inline-flex items-center gap-2 px-4 py-2 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">
+      <Activity className="w-4 h-4"/> סנכרן עכשיו מ-Priority
+    </button>}
+  </div>
+);
+
+const EmptyState = ({ onUpload, loading, isDarkMode, activeTab, onSync }) => (
   <div className="flex flex-col items-center justify-center h-full text-center p-8 animate-in fade-in zoom-in duration-500">
     <div className="relative mb-6">
       <div className={`absolute inset-0 rounded-3xl blur-2xl opacity-40 ${isDarkMode?'bg-blue-600':'bg-blue-300'}`}/>
@@ -1267,6 +1285,11 @@ const EmptyState = ({ onUpload, loading, isDarkMode, activeTab }) => (
     <p className={`max-w-xs mb-2 text-sm leading-relaxed ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
       טען קבצי Excel או CSV של מכירות / ספקים כדי להתחיל
     </p>
+    {activeTab==='sales' && onSync && (
+      <button type="button" onClick={onSync} className="mb-4 inline-flex items-center gap-2 px-6 py-3 rounded-2xl text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">
+        <Activity className="w-4 h-4"/> סנכרן מכירות מ-Priority
+      </button>
+    )}
     {activeTab==='sales' && (
       <p className={`max-w-xs mb-6 text-xs px-3 py-1.5 rounded-lg ${isDarkMode?'bg-slate-800 text-slate-400 border border-slate-700':'bg-slate-100 text-slate-500 border border-slate-200'}`}>
         שם הקובץ הנדרש: <span className="font-bold">מכירות חודשיות לפי מוצר</span>
@@ -2082,7 +2105,7 @@ const matchShipSupplier = (fwdName, candidates) => {
 
 
 // ─── PROCUREMENT PAGE ──────────────────────────────────
-const ProcurementPage = ({ onSalesLinesChange, onCustomersChange, salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
+const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone, onSalesLinesChange, onCustomersChange, salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
   // SKU → product name, captured from the inventory file. Needed so items
   // that are in stock but never appear in sales can still be shown by name
@@ -4153,7 +4176,7 @@ const renderProductRow = (p) => {
       if (r.files.purchaseLines) { await handleProcFile(asEvent(r.files.purchaseLines), 'purchaseLines', { mergeFrom: purchaseSince }); nextThrough.purchaseLines = today; }
       try { localStorage.setItem('prioritySyncThrough', JSON.stringify(nextThrough)); } catch { /* best-effort */ }
       const okCount = Object.keys(r.files).filter(k => r.files[k]).length;
-      if (okCount) { const at = Date.now(); try { localStorage.setItem('prioritySyncAt', String(at)); } catch { /* best-effort */ } setPrioSync(s => ({ ...s, at })); }
+      if (okCount) { const at = Date.now(); try { localStorage.setItem('prioritySyncAt', String(at)); } catch { /* best-effort */ } setPrioSync(s => ({ ...s, at })); onSyncDone?.(at); }
       const secs = Math.round((Date.now()-t0)/1000);
       report(Object.keys(r.errors).length ? `הסתיים עם ${Object.keys(r.errors).length} בעיות (${secs} שנ׳) — פרטים למעלה. מה שנכשל לא עודכן; הנתונים הקודמים נשמרו.` : `הסנכרון הסתיים בהצלחה (${secs} שנ׳)`);
       setPrioSync(s => ({ ...s, busy:false, errors:r.errors }));
@@ -4162,6 +4185,15 @@ const renderProductRow = (p) => {
       setPrioSync(s => ({ ...s, busy:false, errors:{ all: err.message || String(err) } }));
     }
   };
+  // A sync asked for from another tab (sales / customers): open the files panel so the progress is visible, and run it.
+  useEffect(() => {
+    if (!syncRequest || prioSync.busy) return;
+    onSyncRequestHandled?.();
+    setSettingsOpen(true);
+    syncFromPriority(false);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [syncRequest]);
+
   const showPriorityFields = async () => {
     setPrioFields({ loading:true });
     try { setPrioFields({ data: await describeAll() }); } catch (e) { setPrioFields({ error: e.message || String(e) }); }
@@ -6474,6 +6506,9 @@ const App = () => {
   const salesLinesRange = useMemo(() => linesRange(procSalesLines), [procSalesLines]);
   // Customer cards pulled from Priority (city, agent, payment terms, customer since)
   const [priorityCustomers, setPriorityCustomers] = useState({});
+  const [syncRequest, setSyncRequest] = useState(null);
+  const [lastSyncAt, setLastSyncAt] = useState(() => { try { return Number(localStorage.getItem('prioritySyncAt')) || null; } catch { return null; } });
+  const requestPrioritySync = () => { setSyncRequest({ ts: Date.now() }); setActiveTab('procurement'); };
   useEffect(() => { idbGet('priorityCustomers').then(v => { if (v && typeof v === 'object') setPriorityCustomers(v); }).catch(() => {}); }, []);
   // Customer data — two independent, optional files (see parseCustomerMonthlyFile/
   // parseCustomerProductFile): one gives the time dimension, the other the product mix.
@@ -7534,6 +7569,11 @@ const App = () => {
           ))}
         </nav>
         <div className={`p-3 border-t border-white/10 space-y-2`}>
+          <button type="button" onClick={requestPrioritySync} title="מושך מכירות, לקוחות, מלאי, הזמנות רכש וחשבוניות ספק מ-Priority"
+            className={`w-full flex items-center gap-3 p-2.5 rounded-xl transition-colors group hover:bg-white/10 ${isSidebarCollapsed?'justify-center':''}`}>
+            <Activity className="w-5 h-5 text-emerald-400 shrink-0 group-hover:text-emerald-300"/>
+            {!isSidebarCollapsed && <span className="text-sm font-medium text-slate-300 group-hover:text-white text-right">סנכרן מ-Priority{lastSyncAt && <span className="block text-[11px] text-slate-500">לאחרונה {new Date(lastSyncAt).toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span>}</span>}
+          </button>
           <label className={`flex items-center gap-3 p-2.5 rounded-xl cursor-pointer transition-colors group ${isSidebarCollapsed?'justify-center':''} ${loading?'opacity-50':'hover:bg-white/10'}`}>
             {loading?<Loader2 className="w-5 h-5 animate-spin text-blue-400 shrink-0"/>:<Upload className="w-5 h-5 text-blue-400 shrink-0 group-hover:text-blue-300"/>}
             {!isSidebarCollapsed && <span className="text-sm font-medium text-slate-300 group-hover:text-white">טען קבצים</span>}
@@ -7546,6 +7586,7 @@ const App = () => {
               {!isSidebarCollapsed && <span className="text-sm font-medium">נקה נתונים</span>}
             </button>
           )}
+          {!isSidebarCollapsed && typeof __BUILD_TIME__ !== 'undefined' && <p className="px-2.5 text-[10px] text-slate-600" title="אם התאריך כאן ישן — רענן את הדף (Ctrl+Shift+R)">גרסה {new Date(__BUILD_TIME__).toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</p>}
         </div>
       </div>
 
@@ -7710,6 +7751,8 @@ const App = () => {
               productData={customerProductEff}
               priorityRange={salesLinesRange}
               customerCards={priorityCustomers}
+              onSyncPriority={requestPrioritySync}
+              lastSyncAt={lastSyncAt}
               fileCounts={{ monthly: customerMonthlyData.length, product: customerProductData.length }}
               isDarkMode={isDarkMode}
               fileNames={{ monthly:customerMonthlyFileName, product:customerProductFileName }}
@@ -7727,7 +7770,7 @@ const App = () => {
 
           {/* Procurement Planning */}
           {activeTab==='procurement' && (
-            <ProcurementPage onSalesLinesChange={setProcSalesLines} onCustomersChange={setPriorityCustomers} salesData={salesFileData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
+            <ProcurementPage syncRequest={syncRequest} onSyncRequestHandled={()=>setSyncRequest(null)} onSyncDone={setLastSyncAt} onSalesLinesChange={setProcSalesLines} onCustomersChange={setPriorityCustomers} salesData={salesFileData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
           )}
 
           {/* Summary */}
@@ -7778,8 +7821,9 @@ const App = () => {
 
           {/* Sales / Suppliers */}
           {(activeTab==='sales'||activeTab==='suppliers') && (
-            activeData.length===0 ? <EmptyState onUpload={handleFileUpload} loading={loading} isDarkMode={isDarkMode} activeTab={activeTab}/> : (
+            activeData.length===0 ? <EmptyState onUpload={handleFileUpload} loading={loading} isDarkMode={isDarkMode} activeTab={activeTab} onSync={requestPrioritySync}/> : (
               <div className="space-y-6 animate-in fade-in duration-400">
+                {activeTab==='sales' && <PrioritySyncBar isDarkMode={isDarkMode} range={salesLinesRange} lastSyncAt={lastSyncAt} onSync={requestPrioritySync} what="נתוני המכירות"/>}
                 {/* Filters Bar */}
                 <div className={`p-4 rounded-2xl border flex flex-wrap gap-3 items-center ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
                   <div className={`p-2 rounded-xl ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}><Filter className={`w-4 h-4 ${isDarkMode?'text-slate-300':'text-slate-500'}`}/></div>
