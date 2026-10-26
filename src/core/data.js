@@ -707,3 +707,99 @@ export const detectOutliers = (lines, { sinceIso = null, factor = 4, minQty = 5,
   }
   return out;
 };
+
+// ─── Purchase prices over time (from supplier invoice lines) ───
+// Unit price in the supplier's currency and in ₪ (invoice rate), per product.
+export const purchasePriceHistory = (purchaseLines = []) => {
+  const by = {};
+  purchaseLines.forEach(l => {
+    if (l.junk || !l.k || !(l.q > 0) || !(l.p > 0)) return;
+    (by[l.k] ||= []).push({ d: l.d, s: l.s, n: l.n, p: l.p, cur: l.cur || 'ILS', rate: l.rate || 1, ils: l.p * (l.rate || 1), q: l.q, inv: l.inv });
+  });
+  Object.values(by).forEach(a => a.sort((x, y) => x.d < y.d ? -1 : x.d > y.d ? 1 : 0));
+  return by;
+};
+// Price increases: an invoice ≥ minPct above the previous invoice of the same product, supplier and currency.
+export const priceIncreases = (hist, { sinceIso, minPct = 5 } = {}) => {
+  const out = [];
+  Object.entries(hist).forEach(([k, pts]) => {
+    for (let i = 1; i < pts.length; i++) {
+      const a = pts[i], prev = [...pts.slice(0, i)].reverse().find(x => x.s === a.s && x.cur === a.cur && x.d < a.d);
+      if (!prev || (sinceIso && a.d < sinceIso)) continue;
+      const pct = (a.p / prev.p - 1) * 100;
+      if (pct >= minPct) out.push({ k, s: a.s, d: a.d, prevD: prev.d, p: a.p, prevP: prev.p, cur: a.cur, pct, ilsPct: (a.ils / prev.ils - 1) * 100, q: a.q, inv: a.inv });
+    }
+  });
+  return out.sort((x, y) => x.d < y.d ? 1 : -1);
+};
+// Supplier price index: the same products, recent price (last `recentDays`) vs a year earlier,
+// weighted by recent quantity. Split into the supplier's own price change (in its currency)
+// and the exchange-rate effect (₪ change minus currency change).
+export const supplierPriceIndex = (hist, { now = Date.now(), recentDays = 180 } = {}) => {
+  const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const rFrom = iso(now - recentDays * 86400000), bFrom = iso(now - (365 + recentDays / 2) * 86400000), bTo = iso(now - (365 - recentDays / 2) * 86400000);
+  const sup = {};
+  Object.entries(hist).forEach(([k, pts]) => {
+    const groups = {};
+    pts.forEach(x => { (groups[x.s + '|' + x.cur] ||= []).push(x); });
+    Object.values(groups).forEach(g => {
+      const rec = g.filter(x => x.d >= rFrom), base = g.filter(x => x.d >= bFrom && x.d <= bTo);
+      if (!rec.length || !base.length) return;
+      const avg = (a, f) => a.reduce((s, x) => s + f(x) * x.q, 0) / a.reduce((s, x) => s + x.q, 0);
+      const w = rec.reduce((s, x) => s + x.q * x.ils, 0);
+      const s = (sup[g[0].s] ||= { n: 0, w: 0, cur: 0, ils: 0, items: [] });
+      const curPct = avg(rec, x => x.p) / avg(base, x => x.p) - 1, ilsPct = avg(rec, x => x.ils) / avg(base, x => x.ils) - 1;
+      s.n++; s.w += w; s.cur += curPct * w; s.ils += ilsPct * w;
+      s.items.push({ k, curPct: curPct * 100, ilsPct: ilsPct * 100, cur: g[0].cur });
+    });
+  });
+  return Object.entries(sup).map(([name, s]) => ({ name, n: s.n, curPct: s.cur / s.w * 100, ilsPct: s.ils / s.w * 100, fxPct: (s.ils - s.cur) / s.w * 100, spend: s.w,
+    items: s.items.sort((a, b) => b.curPct - a.curPct) })).sort((a, b) => b.spend - a.spend);
+};
+
+// ─── Stock history ───
+// Real daily balances from the nightly snapshots (stockHistory = { days:[{ d, s:{sku:qty} }] },
+// only changes stored), and for the time before the first snapshot an estimate worked
+// backwards from the first known balance: earlier stock = later stock + sales − purchases.
+// The estimate ignores counts/adjustments/own production, so it is marked as such.
+export const stockTimelines = ({ stockHistory, currentStock = {}, salesLines = [], purchaseLines = [], skus, fromIso, toIso }) => {
+  const want = new Set(skus);
+  const mv = {}; // sku → { day → net change that day (+in, −out) }
+  salesLines.forEach(l => { if (!l.x && want.has(l.k) && l.d >= fromIso && l.d <= toIso) { const m = (mv[l.k] ||= {}); m[l.d] = (m[l.d] || 0) - l.q; } });
+  purchaseLines.forEach(l => { if (!l.junk && want.has(l.k) && l.d >= fromIso && l.d <= toIso) { const m = (mv[l.k] ||= {}); m[l.d] = (m[l.d] || 0) + l.q; } });
+  // snapshot values per sku per day (cumulative)
+  const snaps = {}; const cum = {};
+  (stockHistory?.days || []).slice().sort((a, b) => a.d < b.d ? -1 : 1).forEach(day => {
+    Object.assign(cum, day.s);
+    want.forEach(k => { if (k in cum) (snaps[k] ||= {})[day.d] = cum[k]; });
+  });
+  const days = []; for (let t = Date.parse(toIso); t >= Date.parse(fromIso); t -= 86400000) days.push(new Date(t).toISOString().slice(0, 10));
+  const out = {};
+  want.forEach(k => {
+    const sn = snaps[k] || {}, m = mv[k] || {};
+    let q = currentStock[k] ?? null;
+    if (q == null && !Object.keys(sn).length) return;
+    const series = []; let src = 'calc';
+    for (const d of days) {             // newest → oldest; value = balance at END of day d
+      if (sn[d] != null) { q = sn[d]; src = 'snap'; }
+      else if (q == null) continue;
+      series.push({ d, q: Math.max(0, Math.round(q * 100) / 100), src, neg: q < 0 });
+      q = q - (m[d] || 0);              // step back to the end of the previous day
+      if (sn[d] == null) src = 'calc';
+    }
+    out[k] = series.reverse();
+  });
+  return out;
+};
+// Days out of stock per product and month (a month counts as "out" when ≥ half its days had no stock).
+export const stockoutSummary = (timelines) => {
+  const out = {};
+  Object.entries(timelines).forEach(([k, s]) => {
+    let outDays = 0; const byMonth = {};
+    // a negative estimate means the books don't add up (counts, adjustments) — unknown, not "out"
+    s.forEach(x => { const m = x.d.slice(0, 7); const b = (byMonth[m] ||= { days: 0, out: 0 }); b.days++; if (x.q <= 0 && !x.neg) { b.out++; outDays++; } });
+    const monthsOut = Object.entries(byMonth).filter(([, b]) => b.out >= b.days / 2).map(([m]) => m);
+    out[k] = { outDays, days: s.length, monthsOut, estimated: s.some(x => x.src === 'calc') };
+  });
+  return out;
+};

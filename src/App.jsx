@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import * as XLSXLib from 'xlsx';
 import { describeAll } from './priority.js';
 import { supabase, flushAll, queueDataset } from './cloud.js';
-import { detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
+import { purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
@@ -1602,6 +1602,10 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
   const [itemsExtra, setItemsExtra] = useState({});
   const [familyFilter, setFamilyFilter] = useState('');
   const [outlierOnly, setOutlierOnly] = useState(false);
+  // Daily stock snapshots written by the nightly server sync ({ days:[{ d, s:{sku:qty} }] })
+  const [stockHistory, setStockHistory] = useState({ days: [] });
+  // Months a product was out of stock don't count as "low demand" in its average (on by default).
+  const [skipStockoutMonths, setSkipStockoutMonths] = useState(() => { try { return localStorage.getItem('procSkipStockoutMonths') !== '0'; } catch { return true; } });
   const setSalesLines = (arr) => { setSalesLinesAll(arr); onSalesLinesChange?.(arr); };
   const salesLines = useMemo(() => salesLinesAll.filter(l => !l.x), [salesLinesAll]);
   const [purchaseLines, setPurchaseLines] = useState([]);
@@ -1620,8 +1624,9 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
     let cancelled = false;
     (async () => {
       try {
-        const [a, b, c, x] = await Promise.all([idbGet('procSalesLines'), idbGet('procPurchaseLines'), idbGet('procShipments'), idbGet('procItemsExtra')]);
+        const [a, b, c, x, h] = await Promise.all([idbGet('procSalesLines'), idbGet('procPurchaseLines'), idbGet('procShipments'), idbGet('procItemsExtra'), idbGet('stockHistory')]);
         if (cancelled) return;
+        if (h && Array.isArray(h.days)) setStockHistory(h);
         if (x && typeof x === 'object') setItemsExtra(x);
         if (Array.isArray(a)) setSalesLinesAll(a);
         if (Array.isArray(b)) setPurchaseLines(b);
@@ -1693,6 +1698,19 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
   // Monthly sales the page works from: months covered by the sales-lines file
   // come from the lines (exact, incl. zero-priced kit components and returns);
   // older months still come from the monthly file loaded in "מכירות".
+  // ── Stock history (last 12 months): real nightly snapshots, estimated before them ──
+  const stockWindow = useMemo(() => { const to = new Date().toISOString().slice(0,10); return { from: new Date(Date.now() - 364*DAY_MS).toISOString().slice(0,10), to }; }, []);
+  const stockTl = useMemo(() => {
+    const skus = [...new Set(salesLines.filter(l => l.d >= stockWindow.from).map(l => l.k))].filter(k => k && (stockMap[k] != null));
+    return stockTimelines({ stockHistory, currentStock: stockMap, salesLines, purchaseLines, skus, fromIso: stockWindow.from, toIso: stockWindow.to });
+  }, [stockHistory, stockMap, salesLines, purchaseLines, stockWindow]);
+  const stockouts = useMemo(() => stockoutSummary(stockTl), [stockTl]);
+  const firstSnapshot = stockHistory.days?.length ? stockHistory.days.map(d => d.d).sort()[0] : null;
+  // ── Purchase prices over time (supplier invoices) ──
+  const priceHist = useMemo(() => purchasePriceHistory(purchaseLines), [purchaseLines]);
+  const invoicePriceUps = useMemo(() => priceIncreases(priceHist, { sinceIso: new Date(Date.now() - 120*DAY_MS).toISOString().slice(0,10) }), [priceHist]);
+  const supIndex = useMemo(() => supplierPriceIndex(priceHist), [priceHist]);
+
   // ── Unusually large deals: detected per product; YOU decide per deal whether the
   // forecast treats it as "large but normal" (cap) or keeps it as is. Undecided = kept.
   const [outlierDecisions, setOutlierDecisions] = useState(() => { try { return JSON.parse(localStorage.getItem('procOutlierDecisions')||'{}'); } catch { return {}; } });
@@ -2399,10 +2417,18 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
       // months before its first sale.
       const firstActiveIdx = allMonths.findIndex(m => (p.monthlyDataWindow[m]||0) > 0);
       let avgMonthly, avgDataMonths, isLimitedData, cappedVals = [];
+      // Months the product was out of stock (≥ half the month) — low sales there were no demand signal.
+      const so = stockouts[p.sku] || null;
+      const outMonthKeys = so ? new Set(so.monthsOut.map(m => isoToMonthKey(m + '-01'))) : new Set();
+      let skippedMonths = [];
       if (firstActiveIdx === -1) {
         avgMonthly = 0; avgDataMonths = 0; isLimitedData = true;
       } else {
-        const relevantMonths = allMonths.slice(firstActiveIdx);
+        let relevantMonths = allMonths.slice(firstActiveIdx);
+        if (skipStockoutMonths && outMonthKeys.size) {
+          const kept = relevantMonths.filter(m => !outMonthKeys.has(m));
+          if (kept.length >= 3) { skippedMonths = relevantMonths.filter(m => outMonthKeys.has(m)); relevantMonths = kept; }
+        }
         const rawVals = relevantMonths.map(m => p.monthlyDataWindow[m]||0);
         const activeVals = rawVals.filter(v => v>0);
         // Cap (never drop) a rare abnormally-large single month — e.g. one
@@ -2566,13 +2592,16 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
       out.costFromPurchase = costFromPurchase; out.costFromAvg = costFromAvg; out.lastPurchase = lastP;
       out.family = ex?.fam || ''; out.ownMade = ex?.type === 'P'; out.avgCostPriority = ex?.avgCost ?? null; out.listPrice = ex?.listPrice ?? null;
       out.lastSalePriority = ex?.lastSale || ''; out.lastBuyPriority = ex?.lastBuy || '';
+      out.stockout = so; out.skippedMonths = skippedMonths;
+      out.lostQty = so && so.outDays && avgMonthly > 0 ? Math.round(so.outDays * avgMonthly / 30) : 0;
+      out.avgPrice = p.totalQty > 0 ? p.totalRev / p.totalQty : null;
       const ol = outliers[p.sku] || outliers[key];
       out.outliers = ol || null;
       out.outlierPending = ol ? ol.lines.filter(l => !outlierDecisions[l.id]).length : 0;
       out.outlierCapped = ol ? ol.lines.filter(l => outlierDecisions[l.id] === 'cap').length : 0;
       return out;
     });
-  }, [outliers, outlierDecisions, salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, leadStats, leadAddTransit, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku, itemsExtra]);
+  }, [stockouts, skipStockoutMonths, outliers, outlierDecisions, salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, leadStats, leadAddTransit, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku, itemsExtra]);
 
   const filtered = useMemo(() => {
     let data = products;
@@ -3528,6 +3557,65 @@ const renderProductRow = (p) => {
               );
             })()}
 
+            {/* Stock over the last 12 months */}
+            {(() => {
+              const tl = stockTl[p.sku];
+              if (!tl || !tl.length) return null;
+              const data = tl.filter((_, i) => i % 3 === 0 || i === tl.length - 1).map(x => ({ d: x.d, q: x.q, est: x.src === 'calc' }));
+              const so = p.stockout;
+              return (
+                <section>
+                  <h3 className={`text-sm font-bold mb-1 ${strong}`}>מלאי ב-12 החודשים האחרונים</h3>
+                  <p className={`text-xs mb-2 ${muted}`}>{firstSnapshot ? `מ-${isoToDisplay(firstSnapshot)} לפי צילום יומי מ-Priority; לפני כן משוער (מלאי היום פחות קניות ועוד מכירות — בלי ספירות ותיקונים).` : 'משוער — מלאי היום פחות קניות ועוד מכירות. מהסנכרון הלילי הבא נשמר גם צילום יומי אמיתי.'}</p>
+                  <div style={{height:120}} dir="ltr">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <AreaChart data={data} margin={{top:4,right:4,left:-20,bottom:0}}>
+                        <XAxis dataKey="d" tick={{fontSize:10}} tickFormatter={d=>d.slice(5,7)+'/'+d.slice(2,4)} interval={Math.max(1, Math.floor(data.length/6))}/>
+                        <YAxis tick={{fontSize:10}} allowDecimals={false}/>
+                        <RechartsTooltip formatter={(v)=>[`${v} יח׳`,'מלאי']} labelFormatter={d=>isoToDisplay(d)}/>
+                        <Area type="stepAfter" dataKey="q" stroke="#1F5FBF" fill="#1F5FBF" fillOpacity={0.15} isAnimationActive={false}/>
+                      </AreaChart>
+                    </ResponsiveContainer>
+                  </div>
+                  {so && (
+                    <p className={`text-xs mt-1.5 ${so.outDays ? (isDarkMode?'text-orange-300':'text-orange-700') : muted}`}>
+                      {so.outDays ? `${so.outDays} ימים בלי מלאי${p.lostQty ? ` · אומדן מכירות שהפסדו: ~${p.lostQty.toLocaleString()} יח׳${p.avgPrice ? ` (${formatShort(p.lostQty * p.avgPrice)})` : ''}` : ''}` : 'לא היו ימים בלי מלאי'}
+                      {p.skippedMonths?.length ? ` · ${p.skippedMonths.length} חודשי חוסר לא נספרו בממוצע` : ''}
+                    </p>
+                  )}
+                </section>
+              );
+            })()}
+
+            {/* Purchase price over time */}
+            {(() => {
+              const pts = priceHist[p.sku];
+              if (!pts || pts.length < 2) return null;
+              const curs = [...new Set(pts.map(x => x.cur))];
+              const mainCur = curs[0];
+              const data = pts.map(x => ({ d: x.d, p: x.cur === mainCur ? x.p : null, ils: Math.round(x.ils * 100) / 100, s: x.s }));
+              const first = pts.find(x => x.cur === mainCur), last = [...pts].reverse().find(x => x.cur === mainCur);
+              const chg = first && last ? (last.p / first.p - 1) * 100 : null;
+              return (
+                <section>
+                  <h3 className={`text-sm font-bold mb-1 ${strong}`}>מחיר קנייה לאורך זמן</h3>
+                  <p className={`text-xs mb-2 ${muted}`}>{pts.length} חשבוניות ספק{chg!=null ? ` · מ-${isoToDisplay(first.d)}: ${chg>=0?'+':''}${chg.toFixed(1)}% ב-${mainCur==='ILS'?'₪':mainCur}` : ''}{mainCur!=='ILS' ? ' · כחול = מטבע הספק, אפור = בשקלים' : ''}</p>
+                  <div style={{height:120}} dir="ltr">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={data} margin={{top:4,right:4,left:-20,bottom:0}}>
+                        <XAxis dataKey="d" tick={{fontSize:10}} tickFormatter={d=>d.slice(5,7)+'/'+d.slice(2,4)}/>
+                        <YAxis yAxisId="a" tick={{fontSize:10}} domain={['auto','auto']}/>
+                        {mainCur!=='ILS' && <YAxis yAxisId="b" orientation="right" tick={{fontSize:10}} domain={['auto','auto']} hide/>}
+                        <RechartsTooltip labelFormatter={d=>isoToDisplay(d)} formatter={(v,n)=>[v, n==='ils'?'₪':mainCur]}/>
+                        {mainCur!=='ILS' && <Line yAxisId="b" type="stepAfter" dataKey="ils" stroke="#94A3B8" dot={false} isAnimationActive={false}/>}
+                        <Line yAxisId="a" type="stepAfter" dataKey={mainCur==='ILS'?'ils':'p'} stroke="#1F5FBF" dot={{r:2}} connectNulls isAnimationActive={false}/>
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                </section>
+              );
+            })()}
+
             {/* Purchase history — from supplier invoice lines */}
             {(() => {
               const buys = (purchBySku[p.sku] || purchBySku[p.key] || []).slice(0,6);
@@ -4042,6 +4130,153 @@ const renderProductRow = (p) => {
       </div>
     );
   };
+  // ══ STOCKOUTS: days without stock and the sales they likely cost ══
+  const renderStockouts = () => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const box = `rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`;
+    const list = products.filter(p => p.stockout?.outDays > 0).map(p => ({ ...p, outDays: p.stockout.outDays, lostValue: p.avgPrice ? p.lostQty * p.avgPrice : null }));
+    const rows = sortRows('stockouts', list.sort((a,b) => (b.lostValue||0) - (a.lostValue||0)));
+    const total = list.reduce((a,p) => a + (p.lostValue||0), 0);
+    const bySup = {}; list.forEach(p => { const k = p.supplier || 'ספק לא ידוע'; (bySup[k] ||= { name:k, v:0, n:0 }); bySup[k].v += p.lostValue||0; bySup[k].n++; });
+    const supTop = Object.values(bySup).sort((a,b) => b.v - a.v).slice(0, 8);
+    const max = Math.max(1, ...supTop.map(x => x.v));
+    return (
+      <div className="space-y-4 animate-in fade-in duration-300">
+        <div className={`${box} p-5 flex flex-wrap items-center gap-6`}>
+          <div className="flex-1 min-w-[260px]">
+            <p className={`font-bold ${strong}`}>חוסרים — ימים בלי מלאי ב-12 החודשים האחרונים</p>
+            <p className={`text-xs mt-0.5 ${muted}`}>{firstSnapshot ? `מ-${isoToDisplay(firstSnapshot)} לפי צילום מלאי יומי; לפני כן משוער מהמכירות והקניות.` : 'משוער מהמכירות והקניות (מלאי היום פחות קניות ועוד מכירות). מהסנכרון הלילי נשמר צילום יומי אמיתי, והתמונה תהיה מדויקת יותר מיום ליום.'} "הפסד" = ימי חוסר × ממוצע יומי × מחיר מכירה ממוצע — אומדן, לא חשבון.</p>
+          </div>
+          <label className={`flex items-center gap-2 text-sm cursor-pointer ${strong}`}>
+            <input type="checkbox" checked={skipStockoutMonths} onChange={e=>{ setSkipStockoutMonths(e.target.checked); try { localStorage.setItem('procSkipStockoutMonths', e.target.checked?'1':'0'); } catch { /* best-effort */ } }}/>
+            לא לספור בממוצע חודשים שבהם המוצר היה חסר
+          </label>
+          <div><p className={`text-xs ${muted}`}>אומדן מכירות שהפסדנו</p><p className={`text-2xl font-bold ${strong}`}>{formatShort(total)}</p><p className={`text-xs ${muted}`}>{list.length} מוצרים</p></div>
+        </div>
+        {supTop.length>0 && (
+          <div className={`${box} p-5 space-y-2`}>
+            <p className={`text-sm font-bold mb-1 ${strong}`}>לפי ספק</p>
+            {supTop.map(x => (
+              <div key={x.name} className="flex items-center gap-2 text-sm">
+                <span className={`w-48 truncate ${strong}`} title={x.name}>{x.name}</span>
+                <div className={`flex-1 h-2 rounded-full ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}><div className="h-2 rounded-full bg-red-500" style={{width:`${Math.max(3, x.v/max*100)}%`}}/></div>
+                <b className={`w-20 text-left tabular-nums ${strong}`}>{formatShort(x.v)}</b>
+                <span className={`w-16 text-xs ${muted}`}>{x.n} מוצרים</span>
+              </div>
+            ))}
+          </div>
+        )}
+        <div className={`${box} overflow-hidden`}>
+          <div className="overflow-x-auto max-h-[560px] overflow-y-auto">
+            <table className={`w-full text-sm text-right min-w-[760px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+              <thead className={`text-[11px] font-semibold sticky top-0 z-10 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
+                <tr>
+                  {sortTh('stockouts','name','מוצר',{className:'px-4 py-2.5'})}
+                  {sortTh('stockouts','supplier','ספק',{className:'px-4 py-2.5'})}
+                  {sortTh('stockouts','outDays','ימים בלי מלאי',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('stockouts','avgMonthly','ממוצע לחודש',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('stockouts','lostQty','יח׳ שהפסדנו',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('stockouts','lostValue','שווי',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('stockouts','currentStock','מלאי היום',{className:'px-4 py-2.5',firstDir:'desc'})}
+                </tr>
+              </thead>
+              <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                {rows.map(p => (
+                  <tr key={p.key} onClick={()=>setDrawerKey(p.key)} className={`cursor-pointer ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}`}>
+                    <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[260px] ${strong}`} title={p.name}>{p.name}</p><p className={`text-[11px] font-mono ${muted}`}>{p.sku}{p.stockout.estimated ? ' · משוער' : ''}</p></td>
+                    <td className="px-4 py-2.5 text-xs">{p.supplier || '—'}</td>
+                    <td className="px-4 py-2.5 tabular-nums font-semibold">{p.outDays}</td>
+                    <td className="px-4 py-2.5 tabular-nums">{p.avgMonthly.toFixed(p.avgMonthly<10?1:0)}</td>
+                    <td className="px-4 py-2.5 tabular-nums">{p.lostQty.toLocaleString()}</td>
+                    <td className={`px-4 py-2.5 tabular-nums font-bold ${strong}`}>{p.lostValue!=null ? formatShort(p.lostValue) : '—'}</td>
+                    <td className="px-4 py-2.5 tabular-nums">{p.currentStock?.toLocaleString() ?? '—'}</td>
+                  </tr>
+                ))}
+                {!rows.length && <tr><td colSpan={7} className={`px-4 py-12 text-center ${muted}`}>לא נמצאו ימים בלי מלאי</td></tr>}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      </div>
+    );
+  };
+
+  // ══ PRICES FROM SUPPLIER INVOICES: increases + supplier price index ══
+  const renderInvoicePrices = () => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const box = `rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`;
+    const head = `text-[11px] font-semibold sticky top-0 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`;
+    const pct = (v) => <span className={`font-bold tabular-nums ${v>0.05?'text-red-500':v<-0.05?'text-emerald-500':''}`}>{v>0?'+':''}{v.toFixed(1)}%</span>;
+    const ups = sortRows('invUps', invoicePriceUps.map(x => ({ ...x, name: nameMap[x.k] || priceHist[x.k]?.[0]?.n || x.k })));
+    const idx = sortRows('supIdx', supIndex);
+    if (!purchaseLines.length) return null;
+    return (
+      <>
+        <div className={box}>
+          <div className={`px-5 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+            <h3 className={`font-bold text-sm ${strong}`}>התייקרויות בחשבוניות ספק — 4 חודשים אחרונים</h3>
+            <p className={`text-[11px] mt-0.5 ${muted}`}>חשבונית שבה המחיר ליחידה עלה ב-5% או יותר מהחשבונית הקודמת של אותו מוצר, מאותו ספק ובאותו מטבע</p>
+          </div>
+          {ups.length===0 ? <p className={`px-5 py-8 text-center text-xs ${muted}`}>אין התייקרויות בתקופה</p> : (
+            <div className="overflow-x-auto max-h-80 overflow-y-auto">
+              <table className={`w-full text-sm text-right min-w-[720px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                <thead className={head}><tr>
+                  {sortTh('invUps','name','מוצר',{className:'px-4 py-2.5'})}{sortTh('invUps','s','ספק',{className:'px-4 py-2.5'})}
+                  {sortTh('invUps','prevP','מחיר קודם',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('invUps','p','מחיר חדש',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('invUps','pct','שינוי',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('invUps','ilsPct','בשקלים',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('invUps','d','תאריך',{className:'px-4 py-2.5',firstDir:'desc'})}
+                </tr></thead>
+                <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                  {ups.map(x => (
+                    <tr key={x.k+x.inv} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
+                      <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[220px] ${strong}`} title={x.name}>{x.name}</p><p className={`text-[11px] font-mono ${muted}`}>{x.k}</p></td>
+                      <td className="px-4 py-2.5 text-xs">{x.s}</td>
+                      <td className="px-4 py-2.5 text-xs tabular-nums">{formatUnitCost(x.prevP, x.cur==='ILS'?null:x.cur)} <span className={muted}>({isoToDisplay(x.prevD)})</span></td>
+                      <td className="px-4 py-2.5 text-xs tabular-nums font-bold">{formatUnitCost(x.p, x.cur==='ILS'?null:x.cur)}</td>
+                      <td className="px-4 py-2.5 text-xs">{pct(x.pct)}</td>
+                      <td className="px-4 py-2.5 text-xs">{x.cur==='ILS' ? '—' : pct(x.ilsPct)}</td>
+                      <td className="px-4 py-2.5 text-xs">{isoToDisplay(x.d)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+        <div className={box}>
+          <div className={`px-5 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+            <h3 className={`font-bold text-sm ${strong}`}>מדד מחירים לפי ספק — 6 חודשים אחרונים מול שנה קודם</h3>
+            <p className={`text-[11px] mt-0.5 ${muted}`}>אותם מוצרים, משוקלל לפי כמות. "מחיר הספק" = השינוי במטבע שלו; "שער" = כמה מהשינוי בשקלים בא מהמטבע. צריך קניות מאותו מוצר בשתי התקופות.</p>
+          </div>
+          {idx.length===0 ? <p className={`px-5 py-8 text-center text-xs ${muted}`}>עוד אין מספיק היסטוריה להשוואה שנתית</p> : (
+            <div className="overflow-x-auto max-h-96 overflow-y-auto">
+              <table className={`w-full text-sm text-right min-w-[640px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                <thead className={head}><tr>
+                  {sortTh('supIdx','name','ספק',{className:'px-4 py-2.5'})}{sortTh('supIdx','n','מוצרים בהשוואה',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('supIdx','curPct','מחיר הספק',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('supIdx','fxPct','שער',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('supIdx','ilsPct','סה״כ בשקלים',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('supIdx','spend','קניות (6 ח׳)',{className:'px-4 py-2.5',firstDir:'desc'})}
+                </tr></thead>
+                <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                  {idx.map(x => (
+                    <tr key={x.name} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
+                      <td className={`px-4 py-2.5 text-sm font-medium ${strong}`}>{x.name}</td>
+                      <td className="px-4 py-2.5 text-xs tabular-nums">{x.n}</td>
+                      <td className="px-4 py-2.5 text-xs">{pct(x.curPct)}</td>
+                      <td className="px-4 py-2.5 text-xs">{pct(x.fxPct)}</td>
+                      <td className="px-4 py-2.5 text-xs">{pct(x.ilsPct)}</td>
+                      <td className="px-4 py-2.5 text-xs tabular-nums">{formatShort(x.spend)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </>
+    );
+  };
+
   const renderExcess = () => {
     const muted = isDarkMode?'text-slate-400':'text-slate-500';
     const strong = isDarkMode?'text-slate-100':'text-slate-800';
@@ -4784,7 +5019,7 @@ const renderProductRow = (p) => {
             const groups = [
               ['החלטות', [['suppliers','ספקים',null], ['products','כל המוצרים',null], ['schedule','לוח זמנים', urgentSched>0?{n:urgentSched,k:'now'}:null]]],
               ['מעקב', [['shipments','משלוחים בדרך', shipDelayedCount>0?{n:`${shipDelayedCount} נדחו`,k:'watch'}:(activeShipCount?{n:activeShipCount,k:'muted'}:null)], ['orders','הזמנות פתוחות', lateCount>0?{n:`${lateCount} באיחור`,k:'now'}:(openOrders.length?{n:openOrders.length,k:'muted'}:null)], ['prices','מחירי רכש', priceUp>0?{n:`${priceUp} עליות`,k:'watch'}:null]]],
-              ['ניתוח', [['whatif','תרחיש',null], ['dead','מלאי תקוע', deadStockData.length?{n:deadStockData.length,k:'muted'}:null], ['excess','מלאי עודף', excessSummary.poCount?{n:`${excessSummary.poCount} עם הזמנה`,k:'watch'}:(excessData.length?{n:excessData.length,k:'muted'}:null)]]],
+              ['ניתוח', [['whatif','תרחיש',null], ['dead','מלאי תקוע', deadStockData.length?{n:deadStockData.length,k:'muted'}:null], ['stockouts','חוסרים', null], ['excess','מלאי עודף', excessSummary.poCount?{n:`${excessSummary.poCount} עם הזמנה`,k:'watch'}:(excessData.length?{n:excessData.length,k:'muted'}:null)]]],
             ];
             return groups.map(([gLabel, tabs], gi) => (
               <React.Fragment key={gLabel}>
@@ -5321,6 +5556,7 @@ const renderProductRow = (p) => {
       {/* ══ PURCHASE PRICES VIEW ══ */}
       {viewMode==='prices' && (
         <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+          {renderInvoicePrices()}
           <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
             <div className="flex items-center gap-3">
               <div className={`p-2.5 rounded-xl ${isDarkMode?'bg-emerald-500/15':'bg-emerald-50'}`}><DollarSign className="w-5 h-5 text-emerald-500"/></div>
@@ -5432,6 +5668,7 @@ const renderProductRow = (p) => {
 
       {/* Dead Stock View */}
       {viewMode==='excess' && renderExcess()}
+      {viewMode==='stockouts' && renderStockouts()}
       {viewMode==='dead' && (
         <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
           {/* Config + KPIs */}

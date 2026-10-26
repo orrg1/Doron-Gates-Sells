@@ -331,8 +331,8 @@ export function finalizeSync({ prev, payloads, failed = {}, since = {}, sSince, 
     // daily stock snapshot → stock history (only items whose balance changed are stored)
     if (it.hasBalances) {
       const hist = D.stockHistory && D.stockHistory.days ? { ...D.stockHistory } : { days: [] };
-      const last = {};
-      (hist.days || []).forEach(day => Object.assign(last, day.s));
+      const last = {};   // balances as of the latest EARLIER day (a re-sync today replaces today's entry)
+      (hist.days || []).filter(dd => dd.d !== today).forEach(day => Object.assign(last, day.s));
       const changes = {};
       Object.entries(nx.stock).forEach(([k, q]) => { if (last[k] !== q) changes[k] = q; });
       Object.keys(last).forEach(k => { if (!(k in nx.stock) && last[k] !== 0) changes[k] = 0; });
