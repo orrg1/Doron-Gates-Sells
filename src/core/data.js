@@ -314,7 +314,9 @@ export const SERVICE_LEVEL = { A:{ z:2.05, pct:98 }, B:{ z:1.65, pct:95 }, C:{ z
 // + buffer  = max(statistical safety stock, Priority minimum stock)
 // − stock on hand − quantity already on the way
 // then rounded up to the supplier's MOQ.
-export const calcOrderPlan = ({ avgMonthly, stdDev, abc, leadTime, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq, multiplier = 1 }) => {
+// leadTimeStd (months): how much the supplier's real delivery time varies — an
+// unreliable supplier needs more safety stock than a steady one with the same average.
+export const calcOrderPlan = ({ avgMonthly, stdDev, abc, leadTime, leadTimeStd = 0, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq, multiplier = 1 }) => {
   const base = avgMonthly * multiplier;
   const horizon = Math.max(0, leadTime + monthsToStock);
   let projectedDemand = 0;
@@ -326,7 +328,10 @@ export const calcOrderPlan = ({ avgMonthly, stdDev, abc, leadTime, monthsToStock
   }
   const flatDemand = base * horizon;
   const sl = SERVICE_LEVEL[abc] || SERVICE_LEVEL.B;
-  const safetyStock = Math.ceil(sl.z * (stdDev||0) * Math.sqrt(multiplier) * Math.sqrt(Math.max(leadTime, 0.5)));
+  // σ of demand over the lead time = √(LT·σd² + d²·σLT²)  (demand and supplier variability together)
+  const lt = Math.max(leadTime, 0.5);
+  const sigma = Math.sqrt(lt * Math.pow(stdDev || 0, 2) * multiplier + Math.pow(base, 2) * Math.pow(leadTimeStd || 0, 2));
+  const safetyStock = Math.ceil(sl.z * sigma);
   const buffer = Math.max(safetyStock, minStock || 0);
   const raw = Math.max(0, Math.ceil(projectedDemand + buffer - (effectiveStock || 0)));
   const rounded = (moq && moq > 0 && raw > 0) ? Math.ceil(raw / moq) * moq : raw;
@@ -636,4 +641,65 @@ export const applyOpenOrders = ({ prevOrders = [], parsed, receiptLog = [], draf
   let nextDraft = draftQty;
   if (Object.keys(draftQty).some(k => orderedKeys.has(k))) { nextDraft = { ...draftQty }; orderedKeys.forEach(k => delete nextDraft[k]); }
   return { orders: [...prevOrders.filter(o => !o.fromPriority), ...parsed], receiptLog: nextLog, draftQty: nextDraft, vanished: vanished.length };
+};
+
+// ─── Supplier lead time from real orders ───
+// One sample per PO delivery: supplier invoice date − the day the PO was SENT
+// (from Priority's status history; falls back to the PO date when unknown).
+const quantile = (sorted, q) => { if (!sorted.length) return null; const i = (sorted.length - 1) * q; const lo = Math.floor(i), hi = Math.ceil(i); return sorted[lo] + (sorted[hi] - sorted[lo]) * (i - lo); };
+export const supplierLeadTimes = ({ purchaseLines = [], poMeta = {}, transitBySupplier = {}, sinceIso = null }) => {
+  const by = {}; const seen = new Set();
+  purchaseLines.forEach(l => {
+    if (!l.po || !(l.q > 0) || (sinceIso && l.d < sinceIso)) return;
+    const k = l.po + '|' + l.inv; if (seen.has(k)) return; seen.add(k);
+    const m = poMeta[l.po];
+    const sent = (m && m.sent) || l.pos || '';
+    const start = sent || (m && m.created) || l.pod; if (!start) return;
+    const days = (Date.parse(l.d) - Date.parse(start)) / 86400000;
+    if (!(days >= 0 && days < 400)) return;
+    (by[l.s] ||= []).push({ days, fromSent: !!sent, d: l.d, po: l.po });
+  });
+  const out = {};
+  Object.entries(by).forEach(([sup, arr]) => {
+    const v = arr.map(x => x.days).sort((a, b) => a - b);
+    const mean = v.reduce((a, b) => a + b, 0) / v.length;
+    const std = Math.sqrt(v.reduce((a, b) => a + (b - mean) ** 2, 0) / v.length);
+    const tr = (transitBySupplier[sup] || []).slice().sort((a, b) => a - b);
+    const transit = tr.length ? Math.round(quantile(tr, 0.5)) : 0;
+    const median = Math.round(quantile(v, 0.5));
+    out[sup] = { n: v.length, median, p80: Math.round(quantile(v, 0.8)), std: Math.round(std), transit, total: median + transit,
+      sentShare: arr.filter(x => x.fromSent).length / arr.length, samples: arr.sort((a, b) => a.d < b.d ? 1 : -1).slice(0, 12) };
+  });
+  return out;
+};
+
+// ─── Unusually large deals (one-off projects) ───
+// Per product, a sale line counts as unusual when it is far above the product's
+// normal line size AND it alone is at least half of that month's sales — and the
+// customer doesn't buy that big regularly (3+ times = that IS their normal demand).
+// Nothing is changed automatically: the person decides per deal whether to cap it
+// to "large but normal" (cap) when averaging.
+export const saleLineId = (l) => `${l.inv}|${l.k}|${l.q}|${l.d}`;
+export const detectOutliers = (lines, { sinceIso = null, factor = 3, minQty = 3 } = {}) => {
+  const bySku = {};
+  lines.forEach(l => { if (!l.x && l.q > 0 && l.k) (bySku[l.k] ||= []).push(l); });
+  const out = {};
+  for (const [k, arr] of Object.entries(bySku)) {
+    if (arr.length < 6) continue;
+    const qs = arr.map(l => l.q).sort((a, b) => a - b);
+    const med = quantile(qs, 0.5);
+    const mad = quantile(qs.map(q => Math.abs(q - med)).sort((a, b) => a - b), 0.5);
+    const T = Math.max(factor * med, med + 5 * mad, minQty);
+    const monthQty = {};
+    arr.forEach(l => { const m = l.d.slice(0, 7); monthQty[m] = (monthQty[m] || 0) + l.q; });
+    const big = arr.filter(l => l.q > T);
+    if (!big.length) continue;
+    const bigByCust = {};
+    big.forEach(l => { bigByCust[l.c] = (bigByCust[l.c] || 0) + 1; });
+    const list = big.filter(l => bigByCust[l.c] < 3 && l.q >= 0.5 * monthQty[l.d.slice(0, 7)] && (!sinceIso || l.d >= sinceIso))
+      .map(l => ({ id: saleLineId(l), d: l.d, c: l.c, q: l.q, inv: l.inv, cap: Math.max(1, Math.round(T)), monthQty: monthQty[l.d.slice(0, 7)] }))
+      .sort((a, b) => a.d < b.d ? 1 : -1);
+    if (list.length) out[k] = { threshold: Math.round(T), median: med, lines: list };
+  }
+  return out;
 };

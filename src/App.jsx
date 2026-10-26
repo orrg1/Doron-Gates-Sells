@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import * as XLSXLib from 'xlsx';
 import { describeAll } from './priority.js';
 import { supabase, flushAll, queueDataset } from './cloud.js';
-import { applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
+import { supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
@@ -1891,6 +1891,46 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
       return { ...o, currency, valueILS, costCurrencyBlocked, costConverted: costUsable && isForeign ? currency : null, unitPriceOriginal, catalogCost, poPriceDiffPct, isOverdue, daysLate };
     });
   }, [openOrders, currencyMap, exchangeRates, costMap]);
+  const knownSuppliers = useMemo(() => {
+    const set = new Set();
+    purchaseLines.forEach(l => set.add(l.s));
+    Object.values(supplierMap).forEach(s => s && set.add(s));
+    openOrders.forEach(o => o.supplier && set.add(o.supplier));
+    return [...set].sort((a,b)=>a.localeCompare(b,'he'));
+  }, [purchaseLines, supplierMap, openOrders]);
+  const todayIso = new Date().toISOString().slice(0,10);
+  const shipmentsEnriched = useMemo(() => shipments.map(s => {
+    const override = shipSupOverride[s.sup];
+    const matched = override === '' ? null : (override ?? matchShipSupplier(s.sup, knownSuppliers));
+    const stage = shipmentStage(s, todayIso);
+    const delayDays = s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0;
+    const daysToArrival = s.arr ? Math.round(daysBetween(todayIso, s.arr)) : null;
+    return { ...s, matched, manual: override !== undefined, stage, delayDays, daysToArrival };
+  }).sort((a,b) => (a.stage.idx===2) - (b.stage.idx===2) || (a.arr||'9999').localeCompare(b.arr||'9999')), [shipments, shipSupOverride, knownSuppliers, todayIso]);
+
+  // ── Supplier lead time from real orders (PO sent → supplier invoice) ──
+  const [poMeta, setPoMeta] = useState({});
+  useEffect(() => { idbGet('procPoMeta').then(v => { if (v && typeof v === 'object') setPoMeta(v); }).catch(() => {}); }, []);
+  // Per supplier: add the forwarder's transit time (departure → arrival) on top — for importers whose invoice comes with the shipment.
+  const [leadAddTransit, setLeadAddTransit] = useState(() => { try { return JSON.parse(localStorage.getItem('procLeadAddTransit')||'{}'); } catch { return {}; } });
+  const toggleLeadTransit = (sup) => { const n = { ...leadAddTransit }; if (n[sup]) delete n[sup]; else n[sup] = true; setLeadAddTransit(n); try { localStorage.setItem('procLeadAddTransit', JSON.stringify(n)); } catch { /* best-effort */ } };
+  const transitBySupplier = useMemo(() => {
+    const m = {}; shipments.forEach(s => {
+      const sup = shipSupOverride[s.sup] === '' ? null : (shipSupOverride[s.sup] ?? matchShipSupplier(s.sup, knownSuppliers));
+      if (sup && s.dep && s.arr) { const d = daysBetween(s.dep, s.arr); if (d > 0 && d < 120) (m[sup] ||= []).push(d); }
+    }); return m;
+  }, [shipments, shipSupOverride, knownSuppliers]);
+  const leadStats = useMemo(() => supplierLeadTimes({ purchaseLines, poMeta, transitBySupplier,
+    sinceIso: new Date(Date.now() - 540*DAY_MS).toISOString().slice(0,10) }), [purchaseLines, poMeta, transitBySupplier]);
+  // Which lead time a supplier gets: your manual setting first, then the computed one (3+ deliveries), then the global slider.
+  const leadFor = (sup) => {
+    const st = sup ? leadStats[sup] : null;
+    const computedDays = st && st.n >= 3 ? st.median + (leadAddTransit[sup] ? st.transit : 0) : null;
+    const std = st && st.n >= 3 ? st.std / 30 : 0;
+    if (sup && leadTimeMap[sup] != null) return { months: leadTimeMap[sup], source: 'manual', std, computedDays, st };
+    if (computedDays != null) return { months: Math.max(0.25, Math.round(computedDays / 30 * 10) / 10), source: 'computed', std, computedDays, st };
+    return { months: leadTime, source: 'global', std: 0, computedDays: null, st };
+  };
   const overdueOrders = useMemo(() => ordersEnriched.filter(o=>o.isOverdue), [ordersEnriched]);
   const [showOverdueOnly, setShowOverdueOnly] = useState(false);
   // Per product: how much of what's "on the way" is actually late.
@@ -2452,8 +2492,10 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
       const abcXyz = (p.abc||'C') + xyz;
 
       // ── Effective lead time: per-supplier override if set, else the global slider ──
-      const effectiveLeadTime = (supplier && leadTimeMap[supplier]!=null) ? leadTimeMap[supplier] : leadTime;
-      const leadTimeOverridden = supplier && leadTimeMap[supplier]!=null;
+      const lf = leadFor(supplier);
+      const effectiveLeadTime = lf.months;
+      const leadTimeOverridden = lf.source === 'manual';
+      const leadTimeSource = lf.source;
 
       // ── Lifecycle: compare last 3 vs previous 3 months ──
       const lcTrend  = prev3>0 ? (last3-prev3)/prev3*100 : 0;
@@ -2468,7 +2510,7 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
 
       // ── Suggested order (shared with the what-if scenario) ──
       const moq = moqMap[key] ?? moqMap[p.sku] ?? moqMap[p.name] ?? null;
-      const plan = calcOrderPlan({ avgMonthly, stdDev, abc:p.abc, leadTime:effectiveLeadTime, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq });
+      const plan = calcOrderPlan({ avgMonthly, stdDev, abc:p.abc, leadTime:effectiveLeadTime, leadTimeStd: lf.std, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq });
       const { suggestedOrder, suggestedOrderRaw, suggestedOrderFlat, safetyStock, projectedDemand, serviceLevel, seasonalApplied } = plan;
       const orderCost = (suggestedOrder>0&&unitCost)?suggestedOrder*unitCost:null;
       const orderCostOriginal = (suggestedOrder>0&&unitCostOriginal)?suggestedOrder*unitCostOriginal:null;
@@ -2499,7 +2541,7 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
         coverageRiskScore*0.40 + volatilityRiskScore*0.20 + xyzRiskScore*0.15 + leadTimeRiskScore*0.15 + supplierRiskScore*0.10
       );
 
-      const out = { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, serviceLevel, projectedDemand, seasonalApplied, suggestedOrderFlat, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, priceChangePct, prevPrice, priceChangedAt, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, nextMonIdx, coverageMonths, coverageDays, incomingQty, overdue, effectiveStock, effectiveCoverDays, effectiveCoverMonths, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, risk, physicalRisk, shortNowCoveredByPO, riskScore };
+      const out = { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, serviceLevel, projectedDemand, seasonalApplied, suggestedOrderFlat, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, priceChangePct, prevPrice, priceChangedAt, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, leadTimeSource, leadTimeStd: lf.std, nextMonIdx, coverageMonths, coverageDays, incomingQty, overdue, effectiveStock, effectiveCoverDays, effectiveCoverMonths, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, risk, physicalRisk, shortNowCoveredByPO, riskScore };
       out.status = procStatus(out);
       out.statusRank = { now:0, soon:1, watch:2, unknown:3, ok:4 }[out.status];
       out.chip = procChip(out);
@@ -2508,7 +2550,7 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
       out.lastSalePriority = ex?.lastSale || ''; out.lastBuyPriority = ex?.lastBuy || '';
       return out;
     });
-  }, [salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku, itemsExtra]);
+  }, [salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, leadStats, leadAddTransit, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku, itemsExtra]);
 
   const filtered = useMemo(() => {
     let data = products;
@@ -2682,7 +2724,7 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
     if (!whatIfActive && viewMode!=='whatif') return [];
     return products.map(p => {
       const adjAvg = p.avgMonthly * whatIfMultiplier;
-      const plan = calcOrderPlan({ avgMonthly:p.avgMonthly, stdDev:p.stdDev, abc:p.abc, leadTime:p.effectiveLeadTime, monthsToStock, seasonalityIdx:p.seasonalityIdx, seasonalityReliable:p.seasonalityReliable, nextMonIdx:p.nextMonIdx, effectiveStock:p.effectiveStock, minStock:p.minStock, moq:p.moq, multiplier:whatIfMultiplier });
+      const plan = calcOrderPlan({ avgMonthly:p.avgMonthly, stdDev:p.stdDev, abc:p.abc, leadTime:p.effectiveLeadTime, leadTimeStd:p.leadTimeStd, monthsToStock, seasonalityIdx:p.seasonalityIdx, seasonalityReliable:p.seasonalityReliable, nextMonIdx:p.nextMonIdx, effectiveStock:p.effectiveStock, minStock:p.minStock, moq:p.moq, multiplier:whatIfMultiplier });
       const adjOrder = plan.suggestedOrder;
       const adjCovDays = (p.currentStock!==null && adjAvg>0) ? Math.round(p.effectiveStock/(adjAvg/30)) : null;
       return { ...p, adjAvg, adjOrder, adjCovDays, orderDelta: adjOrder - p.suggestedOrder };
@@ -2747,22 +2789,7 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
   }, [supplierGroups]);
 
   // ── Shipments ↔ Priority suppliers ──────────────────────────────
-  const knownSuppliers = useMemo(() => {
-    const set = new Set();
-    purchaseLines.forEach(l => set.add(l.s));
-    Object.values(supplierMap).forEach(s => s && set.add(s));
-    openOrders.forEach(o => o.supplier && set.add(o.supplier));
-    return [...set].sort((a,b)=>a.localeCompare(b,'he'));
-  }, [purchaseLines, supplierMap, openOrders]);
-  const todayIso = new Date().toISOString().slice(0,10);
-  const shipmentsEnriched = useMemo(() => shipments.map(s => {
-    const override = shipSupOverride[s.sup];
-    const matched = override === '' ? null : (override ?? matchShipSupplier(s.sup, knownSuppliers));
-    const stage = shipmentStage(s, todayIso);
-    const delayDays = s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0;
-    const daysToArrival = s.arr ? Math.round(daysBetween(todayIso, s.arr)) : null;
-    return { ...s, matched, manual: override !== undefined, stage, delayDays, daysToArrival };
-  }).sort((a,b) => (a.stage.idx===2) - (b.stage.idx===2) || (a.arr||'9999').localeCompare(b.arr||'9999')), [shipments, shipSupOverride, knownSuppliers, todayIso]);
+
   const setShipSupplier = (fwdName, prioName) => {
     const next = { ...shipSupOverride };
     if (prioName === '__auto') delete next[fwdName]; else next[fwdName] = prioName;
@@ -2803,7 +2830,8 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
       const nextShip = ships.find(s => s.arr) || null;
       const pb = purchBySupplier[name] || null;
       const rel = supplierReliability[name] || null;
-      const lead = leadTimeMap[name] != null ? leadTimeMap[name] : leadTime;
+      const leadInfo = leadFor(name);
+      const lead = leadInfo.months;
       const lastPo = [pb?.lastPoDate, ...orders.map(o => o.orderDate ? toIsoDate(parseFlexDate(o.orderDate)) : '')].filter(Boolean).sort().pop() || '';
       return {
         name, items, toOrder, value, worstRank,
@@ -2811,11 +2839,11 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
         draftCount: items.filter(p => draftQty[p.key] != null).length,
         ordersCount: orders.length, ordersLate: orders.filter(o => o.isOverdue).length,
         ships, nextShip, shipDelayed: ships.some(s => s.delayDays > 0),
-        pb, rel, lead, lastPo,
-        actualLeadDays: rel?.avgLeadDays ?? pb?.avgLeadDays ?? null,
+        pb, rel, lead, leadInfo, lastPo,
+        actualLeadDays: leadInfo.st?.median ?? rel?.avgLeadDays ?? null,
       };
     }).sort((a,b) => a.worstRank - b.worstRank || b.value - a.value || (b.pb?.spend12||0) - (a.pb?.spend12||0));
-  }, [products, draftQty, ordersEnriched, activeShipsBySupplier, purchBySupplier, supplierReliability, leadTimeMap, leadTime]);
+  }, [products, draftQty, ordersEnriched, activeShipsBySupplier, purchBySupplier, supplierReliability, leadTimeMap, leadTime, leadStats, leadAddTransit]);
   const vendorObj = vendor ? vendors.find(v => v.name === vendor) : null;
   const setDraftFor = (p, val) => {
     const next = { ...draftQty };
@@ -3468,7 +3496,7 @@ const renderProductRow = (p) => {
             <section>
               <h3 className={`text-sm font-bold mb-2 ${strong}`}>רכש</h3>
               <dl className="grid grid-cols-2 gap-x-4 gap-y-2 text-sm">
-                <dt className={muted}>זמן אספקה</dt><dd className={`font-semibold ${strong}`}>{p.effectiveLeadTime} ח׳{p.leadTimeOverridden?' (לפי ספק)':' (כללי)'}</dd>
+                <dt className={muted}>זמן אספקה</dt><dd className={`font-semibold ${strong}`}>{p.effectiveLeadTime} ח׳{({manual:' (ידני)',computed:' (מחושב מההזמנות)',global:' (כללי)'})[p.leadTimeSource]||''}</dd>
                 <dt className={muted}>מחיר קניה</dt>
                 <dd className={`font-semibold ${strong}`}>
                   {p.unitCostOriginal!=null ? formatUnitCost(p.unitCostOriginal, p.currency) : '—'}
@@ -3873,6 +3901,55 @@ const renderProductRow = (p) => {
   };
 
   // ══ SUPPLIERS: list → supplier page ══
+  // Lead time on the supplier page: what is used, what the orders say, and the manual setting.
+  const [leadDraft, setLeadDraft] = useState('');
+  const renderLeadPanel = (v) => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const li = v.leadInfo, st = li.st;
+    const srcLabel = { manual:'הגדרה ידנית שלך', computed:'מחושב מההזמנות', global:'ברירת המחדל הכללית (אין מספיק הזמנות)' }[li.source];
+    return (
+      <div className={`rounded-2xl border px-5 py-4 space-y-3 text-sm ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+        <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
+          <b className={strong}>זמן אספקה בתכנון: {v.lead} ח׳</b>
+          <span className={muted}>{srcLabel}</span>
+        </div>
+        {st ? (
+          <div className={`grid grid-cols-2 md:grid-cols-5 gap-3 rounded-xl p-3 ${isDarkMode?'bg-slate-900/50':'bg-slate-50'}`}>
+            <div><p className={`text-xs ${muted}`}>בדרך כלל (חציון)</p><b className={strong}>{st.median} יום</b></div>
+            <div><p className={`text-xs ${muted}`}>ב-80% מהמקרים עד</p><b className={strong}>{st.p80} יום</b></div>
+            <div><p className={`text-xs ${muted}`}>פיזור</p><b className={strong}>± {st.std} יום</b></div>
+            <div><p className={`text-xs ${muted}`}>מבוסס על</p><b className={strong}>{st.n} משלוחים</b><p className={`text-[11px] ${muted}`}>{Math.round(st.sentShare*100)}% מתאריך שליחה</p></div>
+            <div>
+              <p className={`text-xs ${muted}`}>שילוח לפי דוח המשלח</p>
+              {st.transit ? (
+                <label className="inline-flex items-center gap-2 cursor-pointer">
+                  <input type="checkbox" checked={!!leadAddTransit[v.name]} onChange={()=>toggleLeadTransit(v.name)}/>
+                  <span className={strong}>+{st.transit} יום</span>
+                </label>
+              ) : <b className={muted}>—</b>}
+            </div>
+          </div>
+        ) : <p className={muted}>עוד אין מספיק הזמנות עם חשבונית ספק כדי לחשב (צריך לפחות 3).</p>}
+        {st && <p className={`text-xs ${muted}`}>הזמן נמדד מהיום שבו ההזמנה עברה ב-Priority לסטטוס "נשלחה" ועד חשבונית הספק. {st.transit ? 'אם הספק מוציא חשבונית כשהסחורה יוצאת אליך (יבוא), סמן "+ שילוח" כדי להוסיף את זמן ההפלגה.' : ''}</p>}
+        <div className="flex flex-wrap items-center gap-2">
+          <label htmlFor="lead-manual" className={`text-xs font-semibold ${strong}`}>הגדרה ידנית (חודשים):</label>
+          <input id="lead-manual" type="number" min="0" step="0.5" inputMode="decimal" value={leadDraft} placeholder={leadTimeMap[v.name]!=null ? String(leadTimeMap[v.name]) : '—'}
+            onChange={e=>setLeadDraft(e.target.value)}
+            style={isDarkMode?{background:'#0f172a',color:'#f1f5f9'}:{}}
+            className={`w-24 px-2 py-1.5 rounded-lg border text-sm ${isDarkMode?'border-slate-600':'border-slate-300'}`}/>
+          <button type="button" disabled={leadDraft===''} onClick={()=>{ saveLeadTime(v.name, leadDraft); setLeadDraft(''); }}
+            className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold disabled:opacity-40">שמור</button>
+          {leadTimeMap[v.name]!=null && (
+            <button type="button" onClick={()=>saveLeadTime(v.name, '')}
+              className={`px-3 py-1.5 rounded-lg border text-xs font-semibold ${isDarkMode?'border-slate-600 text-red-300':'border-slate-300 text-red-700'}`}>
+              מחק הגדרה ידנית{li.computedDays!=null ? ` (יעבור למחושב: ${Math.round(li.computedDays/30*10)/10} ח׳)` : ''}
+            </button>
+          )}
+        </div>
+      </div>
+    );
+  };
   const renderVendors = () => {
     const muted = isDarkMode?'text-slate-400':'text-slate-500';
     const strong = isDarkMode?'text-slate-100':'text-slate-800';
@@ -3928,8 +4005,8 @@ const renderProductRow = (p) => {
                     <div className={`text-sm ${strong}`}>{v.lastPo ? isoToDisplay(v.lastPo) : '—'}</div>
                     <div className={`text-sm ${strong}`}>{v.pb?.spend12 ? formatShort(v.pb.spend12) : '—'}</div>
                     <div>
-                      <p className={`text-sm ${strong}`}>מוגדר {v.lead} ח׳</p>
-                      <p className={`text-xs ${v.actualLeadDays!=null && v.actualLeadDays > v.lead*30*1.2+3 ?(isDarkMode?'text-orange-300':'text-orange-700'):muted}`}>{v.actualLeadDays!=null?`בפועל ~${v.actualLeadDays} יום`:'אין נתון בפועל'}</p>
+                      <p className={`text-sm ${strong}`}>{v.lead} ח׳ <span className={`text-xs font-normal ${muted}`}>{{manual:'ידני',computed:'מחושב',global:'כללי'}[v.leadInfo.source]}</span></p>
+                      <p className={`text-xs ${v.leadInfo.source==='manual' && v.leadInfo.computedDays!=null && v.leadInfo.computedDays > v.lead*30*1.2+3 ?(isDarkMode?'text-orange-300':'text-orange-700'):muted}`}>{v.leadInfo.st ? `בפועל ~${v.leadInfo.st.median} יום (${v.leadInfo.st.n})` : 'אין נתון בפועל'}</p>
                     </div>
                     <ChevronLeft className={`w-4 h-4 ${muted}`}/>
                   </button>
@@ -3958,7 +4035,7 @@ const renderProductRow = (p) => {
               <ChevronRight className="w-4 h-4"/> כל הספקים
             </button>
             <h3 className={`text-2xl font-bold ${strong}`}>{v.name}</h3>
-            <p className={`text-sm ${muted}`}>{v.items.length} מוצרים · זמן אספקה מוגדר {v.lead} ח׳{v.pb?.mainCur && v.pb.mainCur!=='ILS' ? ` · מטבע ${v.pb.mainCur}` : ''}</p>
+            <p className={`text-sm ${muted}`}>{v.items.length} מוצרים · זמן אספקה {v.lead} ח׳ ({{manual:'ידני',computed:'מחושב מההזמנות',global:'כללי'}[v.leadInfo.source]}){v.pb?.mainCur && v.pb.mainCur!=='ILS' ? ` · מטבע ${v.pb.mainCur}` : ''}</p>
           </div>
           <div className="flex-1"/>
           <div className={`flex flex-wrap gap-5 rounded-xl border px-4 py-2.5 text-sm ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
@@ -3966,12 +4043,13 @@ const renderProductRow = (p) => {
               ['קניות 12 ח׳', v.pb?.spend12 ? formatShort(v.pb.spend12) : '—'],
               ['הזמנה אחרונה', v.lastPo ? isoToDisplay(v.lastPo) : '—'],
               ['חשבונית אחרונה', v.pb?.lastInv ? isoToDisplay(v.pb.lastInv) : '—'],
-              ['מהזמנה עד חשבונית', v.pb?.avgLeadDays!=null ? `~${v.pb.avgLeadDays} יום` : '—'],
+              ['משליחה עד חשבונית', v.leadInfo.st ? `~${v.leadInfo.st.median} יום` : '—'],
               ['הגיעו בזמן', v.rel?.onTimePct!=null ? `${v.rel.onTimePct}%` : '—'],
             ].map(([l,val]) => <div key={l} className="flex flex-col"><span className={`text-xs ${muted}`}>{l}</span><b className={strong}>{val}</b></div>)}
           </div>
         </div>
 
+        {renderLeadPanel(v)}
         {(v.ships.length>0 || v.ordersCount>0) && (
           <div className={`rounded-2xl border px-5 py-3 flex flex-wrap items-center gap-x-6 gap-y-2 text-sm ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
             <b className={strong}>בדרך מהספק:</b>
@@ -4936,7 +5014,7 @@ const renderProductRow = (p) => {
                             <div className="flex items-center gap-4 mt-1 text-xs flex-wrap">
                               <span className={isDarkMode?'text-slate-400':'text-slate-500'}>מלאי: <strong>{p.currentStock?.toLocaleString()}</strong> יח'</span>
                               <span className={isDarkMode?'text-slate-400':'text-slate-500'}>כיסוי: <strong>{p.effectiveCoverDays}</strong> יום{p.incomingQty>0?' (כולל בדרך)':''}</span>
-                              <span className={isDarkMode?'text-slate-400':'text-slate-500'}>זמן אספקה: <strong>{p.effectiveLeadTime}</strong> ח'{p.leadTimeOverridden?' (לפי ספק)':''}</span>
+                              <span className={isDarkMode?'text-slate-400':'text-slate-500'}>זמן אספקה: <strong>{p.effectiveLeadTime}</strong> ח'{({manual:' (ידני)',computed:' (מחושב)'})[p.leadTimeSource]||''}</span>
                               <span className={isDarkMode?'text-slate-400':'text-slate-500'}>ממוצע: <strong>{p.avgMonthly.toFixed(0)}</strong>/חודש</span>
                             </div>
                           </div>
