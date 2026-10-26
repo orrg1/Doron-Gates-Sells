@@ -3530,6 +3530,18 @@ const renderProductRow = (p) => {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [syncRequest]);
 
+  // Weekly summary email: preview it, or send it now (it also goes out by itself every Sunday 07:00).
+  const [digestMsg, setDigestMsg] = useState('');
+  const digestAction = async (send) => {
+    setDigestMsg(send ? 'שולח…' : 'מכין תצוגה מקדימה…');
+    const win = send ? null : window.open('', '_blank');
+    try {
+      const { data, error } = await supabase.functions.invoke('priority-sync', { body: { action: 'digest', send } });
+      if (error) { let msg = error.message; try { const j = await error.context?.json?.(); if (j?.error) msg = j.error; } catch { /* generic */ } throw new Error(msg); }
+      if (send) setDigestMsg(`נשלח אל ${(data.to||[]).join(', ')}`);
+      else { if (win) { win.document.open(); win.document.write(data.html); win.document.close(); } setDigestMsg(''); }
+    } catch (e) { if (win) win.close(); setDigestMsg(`לא הצליח: ${e.message || e}`); }
+  };
   const showPriorityFields = async () => {
     setPrioFields({ loading:true });
     try { setPrioFields({ data: await describeAll() }); } catch (e) { setPrioFields({ error: e.message || String(e) }); }
@@ -3553,6 +3565,12 @@ const renderProductRow = (p) => {
           </button>
           <button type="button" onClick={()=>{ if (window.confirm('סנכרון מלא מושך מחדש 24 חודשי חשבוניות ולוקח כמה דקות. להמשיך?')) syncFromPriority(true); }} disabled={prioSync.busy} className={`text-xs font-semibold underline ${muted}`}>סנכרון מלא</button>
           <button type="button" onClick={showPriorityFields} className={`text-xs font-semibold underline ${muted}`}>בדיקת שדות</button>
+        </div>
+        <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${muted}`}>
+          <span>סיכום שבועי במייל — כל יום ראשון ב-07:00:</span>
+          <button type="button" onClick={()=>digestAction(false)} className={`font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>תצוגה מקדימה</button>
+          <button type="button" onClick={()=>{ if (window.confirm('לשלוח את הסיכום השבועי עכשיו?')) digestAction(true); }} className={`font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>שלח עכשיו</button>
+          {digestMsg && <span role="status">{digestMsg}</span>}
         </div>
         {prioSync.busy && prioSync.progress && (
           <div className={`h-2 rounded-full overflow-hidden ${isDarkMode?'bg-slate-700':'bg-blue-100'}`} role="progressbar" aria-valuemin={0} aria-valuemax={prioSync.progress.total} aria-valuenow={prioSync.progress.done}>

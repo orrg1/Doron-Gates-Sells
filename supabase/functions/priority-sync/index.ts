@@ -9,10 +9,12 @@
 // Who calls it:
 //   • the website (signed-in, allowed user): { action:'start', kind:'incremental'|'full' } and { action:'tick' }
 //   • pg_cron with the shared secret: { action:'tick' } every minute while a job is open,
-//     { action:'nightly' } at 19:00 and 20:00 UTC — it only starts a job when it is 22:00 in Israel.
+//     { action:'nightly' } at 19:00 and 20:00 UTC — it only starts a job when it is 22:00 in Israel,
+//     { action:'weekly' } Sundays at 04:00 and 05:00 UTC — sends the summary email when it is 07:00 in Israel.
+//   • the website: { action:'digest', send?:true } — preview the weekly email (or send it now).
 // Priority is only ever read (GET).
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
-import { SYNC_FORMS, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/e7b3fb72b9d8c12a703407be86360f12e19554b8/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
+import { SYNC_FORMS, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/e7b3fb72b9d8c12a703407be86360f12e19554b8/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
 
 const ROOT = (Deno.env.get('PRIORITY_ROOT') || 'https://p.priority-connect.online/odata/Priority/tabA974E.ini/gate').replace(/\/+$/, '');
 const PAT = Deno.env.get('PRIORITY_PAT') || '';
@@ -221,6 +223,33 @@ async function tick() {
   }
 }
 
+// ── weekly summary email (Resend) ──
+const SITE_URL = 'https://orrg1.github.io/Doron-Gates-Sells/';
+async function digestData() {
+  const app = await readState(['procurementStock', 'procurementSupplier', 'procurementCost', 'procurementCurrency', 'exchangeRates', 'openOrders', 'procShipSupplierMap',
+    'procOutlierDecisions', 'procurementLeadTime', 'procLeadAddTransit', 'excludeCurrentMonth', 'procSkipStockoutMonths', 'procurementMinStock', 'procurementCostHistory',
+    'procurementMOQ', 'procurementNames', 'prioritySyncAt']);
+  const sets: Record<string, unknown> = {};
+  for (const k of ['procSalesLines', 'procPurchaseLines', 'procShipments', 'stockHistory', 'procPoMeta', 'procItemsExtra', 'dashboardSalesData']) sets[k] = await readDataset(k);
+  return buildDigest({ app, sets });
+}
+async function sendDigest(by: string) {
+  const key = Deno.env.get('RESEND_API_KEY');
+  if (!key) throw new Error('RESEND_API_KEY secret is not set on the server');
+  const to = (Deno.env.get('DIGEST_TO') || 'or@doron-gates.com').split(',').map(x => x.trim()).filter(Boolean);
+  const d = await digestData();
+  const html = renderDigestHtml(d, { siteUrl: SITE_URL });
+  const subject = `סיכום שבועי — ${d.toOrderNow} מוצרים להזמין${d.latePOLines ? ` · ${d.latePOLines} שורות באיחור` : ''}`;
+  const res = await fetch('https://api.resend.com/emails', {
+    method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
+    body: JSON.stringify({ from: Deno.env.get('DIGEST_FROM') || 'BizData <onboarding@resend.dev>', to, subject, html }),
+  });
+  const out = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(out?.message || `Resend HTTP ${res.status}`);
+  await writeState({ digestSentAt: { at: new Date().toISOString(), by, id: out?.id || null, to } });
+  return { sent: true, id: out?.id, to };
+}
+
 Deno.serve(async (req) => {
   if (req.method === 'OPTIONS') return new Response('ok', { headers: cors });
   if (req.method !== 'POST') return json({ error: 'method not allowed' }, 405);
@@ -260,6 +289,19 @@ Deno.serve(async (req) => {
       return json({ id: r.job.id, existing: r.existing, tick: await tick() });
     }
     if (action === 'tick') return json(await tick());
+    if (action === 'digest') {
+      if (body.send) return json(await sendDigest(caller));
+      const d = await digestData();
+      return json({ html: renderDigestHtml(d, { siteUrl: SITE_URL }) });
+    }
+    if (action === 'weekly') {
+      const parts = new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Jerusalem', weekday: 'short', hour: '2-digit', hour12: false }).formatToParts(new Date());
+      const wd = parts.find(p => p.type === 'weekday')?.value, hour = Number(parts.find(p => p.type === 'hour')?.value);
+      if ((wd !== 'Sun' || hour !== 7) && !body.force) return json({ skipped: `not Sunday 07:00 in Israel (${wd} ${hour}:00)` });
+      const last = (await readState(['digestSentAt'])).digestSentAt;
+      if (last?.at && Date.now() - new Date(last.at).getTime() < 20 * 3600_000 && !body.force) return json({ skipped: 'already sent' });
+      return json(await sendDigest('scheduler'));
+    }
     return json({ error: 'unknown action' }, 400);
   } catch (e) {
     return json({ error: String((e as Error).message || e) }, 500);
