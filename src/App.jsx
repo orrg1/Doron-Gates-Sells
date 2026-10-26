@@ -1,8 +1,8 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSXLib from 'xlsx';
-import { queueDataset } from './cloud.js';
-import { pullAllFromPriority, describeAll } from './priority.js';
+import { describeAll } from './priority.js';
+import { supabase, flushAll, queueDataset } from './cloud.js';
 import { applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
@@ -3557,65 +3557,63 @@ const renderProductRow = (p) => {
 
 
 
-  // ══ PRIORITY SYNC — pulls the same data straight from Priority (read-only) ══
-  // The pulled data is turned into the same sheets the uploads expect and fed
-  // to the same handlers, so nothing downstream behaves differently.
+  // ══ PRIORITY SYNC — runs on the server (Edge Function "priority-sync") ══
+  // The website only starts a job and follows it. The server pulls in small
+  // parts (so even a full 24-month sync fits the time limits), merges into the
+  // stored data, and the page reloads to show it. The same job also runs by
+  // itself every night at 22:00.
   const [prioSync, setPrioSync] = useState({ busy:false, log:[], errors:{}, at: (() => { try { return Number(localStorage.getItem('prioritySyncAt'))||null; } catch { return null; } })() });
   const [prioFields, setPrioFields] = useState(null);
-  // Incremental by default: invoices are re-pulled only from (last sync − 45 days),
-  // which also catches late edits/credits, and merged into what's stored.
-  // The first sync — or "סנכרון מלא" — pulls the full 24 months.
-  const SYNC_OVERLAP_DAYS = 45; // also re-reads invoices cancelled a few weeks after they were issued
-  const syncFromPriority = async (full = false) => {
-    const log = [];
+  const followJob = async (id) => {
+    const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const t0 = Date.now();
-    const report = (t) => { log.push(t); setPrioSync(s => ({ ...s, log:[...log] })); };
-    setPrioSync(s => ({ ...s, busy:true, log:[], errors:{} }));
-    const asEvent = (file) => ({ target:{ files:[file], value:'' } });
-    let through = {};
-    try { through = JSON.parse(localStorage.getItem('prioritySyncThrough')||'{}'); } catch { /* full */ }
-    const sinceFor = (slot, has) => {
-      if (full || !has || !through[slot]) return null;
-      const d = new Date(through[slot] + 'T00:00:00Z'); d.setUTCDate(d.getUTCDate() - SYNC_OVERLAP_DAYS);
-      return d.toISOString().slice(0,10);
-    };
-    const salesSince = sinceFor('salesLines', salesLinesAll.length > 0);
-    const purchaseSince = sinceFor('purchaseLines', purchaseLines.length > 0);
-    report(salesSince || purchaseSince ? `סנכרון מהיר — חשבוניות מ-${isoToDisplay(salesSince || purchaseSince)} ואילך` : 'סנכרון מלא — 24 חודשים (פעם ראשונה לוקח כמה דקות)');
-    try {
-      const r = await pullAllFromPriority({ report, salesSince, purchaseSince });
-      if (r.files.items) {
-        handleInvUpload(asEvent(r.files.items), 'product', { replaceStock: r.itemsInfo.hasBalances });
-        // The same pull also carries the item-card data (supplier, price, currency, minimum).
-        setInvSlots(prev => {
-          const next = { ...prev, masterCard: { name:r.files.items.name, total:r.itemsInfo.count, withQty:0, withCost:0, withMinStock:0, withSupplier:0, importedAt:Date.now() } };
-          try { localStorage.setItem('procurementInvSlots', JSON.stringify(next)); } catch { /* best-effort */ }
-          return next;
-        });
-        report(`פריטים: ${r.itemsInfo.count.toLocaleString()} פריטים פעילים${r.itemsInfo.hasBalances ? '' : ' (בלי יתרות מלאי)'}`);
-      }
-      if (r.itemsExtra) { setItemsExtra(r.itemsExtra); try { await idbSet('procItemsExtra', r.itemsExtra); } catch { /* best-effort */ } }
-      if (r.customers) {
-        try { await idbSet('priorityCustomers', r.customers); } catch { /* best-effort */ }
-        onCustomersChange?.(r.customers);
-        report(`כרטיסי לקוחות: ${Object.keys(r.customers).length.toLocaleString()}`);
-      }
-      if (r.files.openOrders) { handlePriorityOrdersUpload(asEvent(r.files.openOrders), { silent:true }); }
-      const today = new Date().toISOString().slice(0,10);
-      const nextThrough = { ...through };
-      if (r.files.salesLines) { await handleProcFile(asEvent(r.files.salesLines), 'salesLines', { mergeFrom: salesSince }); nextThrough.salesLines = today; report(`חשבוניות מכירה: ${(r.counts?.salesLines||0).toLocaleString()} שורות ${salesSince?'חדשות/מעודכנות':''}`); }
-      if (r.files.purchaseLines) { await handleProcFile(asEvent(r.files.purchaseLines), 'purchaseLines', { mergeFrom: purchaseSince }); nextThrough.purchaseLines = today; }
-      try { localStorage.setItem('prioritySyncThrough', JSON.stringify(nextThrough)); } catch { /* best-effort */ }
-      const okCount = Object.keys(r.files).filter(k => r.files[k]).length;
-      if (okCount) { const at = Date.now(); try { localStorage.setItem('prioritySyncAt', String(at)); } catch { /* best-effort */ } setPrioSync(s => ({ ...s, at })); onSyncDone?.(at); }
-      const secs = Math.round((Date.now()-t0)/1000);
-      report(Object.keys(r.errors).length ? `הסתיים עם ${Object.keys(r.errors).length} בעיות (${secs} שנ׳) — פרטים למעלה. מה שנכשל לא עודכן; הנתונים הקודמים נשמרו.` : `הסנכרון הסתיים בהצלחה (${secs} שנ׳)`);
-      setPrioSync(s => ({ ...s, busy:false, errors:r.errors }));
-    } catch (err) {
-      report(`הסנכרון נכשל: ${err.message || err}`);
-      setPrioSync(s => ({ ...s, busy:false, errors:{ all: err.message || String(err) } }));
+    for (;;) {
+      const { data: job, error } = await supabase.from('sync_jobs').select('id,status,log,steps,lease_until,error,finished_at').eq('id', id).maybeSingle();
+      if (error || !job) throw new Error(error?.message || 'הסנכרון לא נמצא בשרת');
+      const done = (job.steps||[]).filter(s => s.done).length, total = (job.steps||[]).length;
+      setPrioSync(s => ({ ...s, busy:true, jobId:id, log: (job.log||[]).slice(-14), progress: total ? { done, total } : null }));
+      if (job.status === 'done' || job.status === 'error') return job;
+      // Drive the job while the page is open (the scheduler also does, once a minute).
+      const leased = job.lease_until && new Date(job.lease_until) > new Date();
+      if (!leased) {
+        const { error: e2 } = await supabase.functions.invoke('priority-sync', { body: { action: 'tick' } });
+        if (e2 && Date.now() - t0 > 20 * 60000) throw new Error(e2.message);
+      } else await sleep(3000);
     }
   };
+  const syncFromPriority = async (full = false) => {
+    if (prioSync.busy) return;
+    setPrioSync(s => ({ ...s, busy:true, log:['מתחיל סנכרון בשרת…'], errors:{}, progress:null }));
+    try {
+      const { data: sess } = await supabase.auth.getSession();
+      if (!sess?.session) throw new Error('הסנכרון מ-Priority דורש התחברות עם Google (במצב מקומי אין גישה לשרת).');
+      const { data, error } = await supabase.functions.invoke('priority-sync', { body: { action: 'start', kind: full ? 'full' : 'incremental' } });
+      if (error) { let msg = error.message; try { const j = await error.context?.json?.(); if (j?.error) msg = j.error; } catch { /* generic */ } throw new Error(msg); }
+      const job = await followJob(data.id);
+      if (job.status === 'error') throw new Error(job.error || 'הסנכרון נכשל');
+      const at = new Date(job.finished_at || Date.now()).getTime();
+      setPrioSync(s => ({ ...s, log:[...s.log, 'טוען את הנתונים החדשים…'], at }));
+      onSyncDone?.(at);
+      await flushAll();
+      window.location.reload();
+    } catch (err) {
+      setPrioSync(s => ({ ...s, busy:false, log:[...(s.log||[]), `הסנכרון נכשל: ${err.message || err}`], errors:{ all: err.message || String(err) } }));
+    }
+  };
+  // A job that is already running (nightly, or started on another computer) — show it.
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      try {
+        const { data } = await supabase.from('sync_jobs').select('id,status').in('status', ['queued','running']).order('id', { ascending:false }).limit(1);
+        if (cancelled || !data?.length) return;
+        const job = await followJob(data[0].id);
+        if (!cancelled && job.status === 'done') { await flushAll(); window.location.reload(); }
+      } catch { /* not signed in / offline — nothing to show */ }
+    })();
+    return () => { cancelled = true; };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
   // A sync asked for from another tab (sales / customers): open the files panel so the progress is visible, and run it.
   useEffect(() => {
     if (!syncRequest || prioSync.busy) return;
@@ -3638,7 +3636,7 @@ const renderProductRow = (p) => {
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex-1 min-w-[220px]">
             <p className={`font-bold text-sm ${strong}`}>סנכרון ישיר מ-Priority</p>
-            <p className={`text-xs mt-0.5 ${muted}`}>מושך פריטים, יתרות מלאי, הזמנות רכש פתוחות, חשבוניות מכירה וחשבוניות ספק — במקום להעלות קבצים. חשבוניות המכירה מעדכנות גם את לשוניות מכירות ולקוחות. רק חשבוניות סופיות נספרות (בלי טיוטות ובלי מבוטלות). אחרי הפעם הראשונה נמשכים רק החודש וחצי האחרונים, אז זה מהיר. קריאה בלבד, שום דבר לא משתנה ב-Priority. דוח המשלוחים מהמשלח עדיין נטען כקובץ.</p>
+            <p className={`text-xs mt-0.5 ${muted}`}>מושך פריטים, יתרות מלאי, הזמנות רכש, לקוחות, חשבוניות מכירה וחשבוניות ספק — במקום להעלות קבצים. הסנכרון רץ בשרת, וגם לבד כל ערב ב-22:00. רק חשבוניות סופיות נספרות (בלי טיוטות ובלי מבוטלות). קריאה בלבד, שום דבר לא משתנה ב-Priority. דוח המשלוחים מהמשלח עדיין נטען כקובץ.</p>
             {prioSync.at && <p className={`text-xs mt-1 ${muted}`}>סנכרון אחרון: {new Date(prioSync.at).toLocaleString('he-IL', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</p>}
           </div>
           <button type="button" onClick={()=>syncFromPriority(false)} disabled={prioSync.busy}
@@ -3649,6 +3647,11 @@ const renderProductRow = (p) => {
           <button type="button" onClick={()=>{ if (window.confirm('סנכרון מלא מושך מחדש 24 חודשי חשבוניות ולוקח כמה דקות. להמשיך?')) syncFromPriority(true); }} disabled={prioSync.busy} className={`text-xs font-semibold underline ${muted}`}>סנכרון מלא</button>
           <button type="button" onClick={showPriorityFields} className={`text-xs font-semibold underline ${muted}`}>בדיקת שדות</button>
         </div>
+        {prioSync.busy && prioSync.progress && (
+          <div className={`h-2 rounded-full overflow-hidden ${isDarkMode?'bg-slate-700':'bg-blue-100'}`} role="progressbar" aria-valuemin={0} aria-valuemax={prioSync.progress.total} aria-valuenow={prioSync.progress.done}>
+            <div className="h-full bg-blue-600 transition-all" style={{ width: `${Math.round(prioSync.progress.done / prioSync.progress.total * 100)}%` }}/>
+          </div>
+        )}
         {prioSync.log.length > 0 && (
           <ul role="status" aria-live="polite" className={`text-xs space-y-0.5 ${hasErr?(isDarkMode?'text-amber-200':'text-amber-800'):muted}`}>
             {prioSync.log.map((t,i) => <li key={i}>• {t}</li>)}

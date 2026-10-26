@@ -85,6 +85,34 @@ function CloudBadge({ email, isAdmin, onSignOut }) {
   );
 }
 
+// The server sync (nightly, or started on another computer) finished after this
+// page loaded: offer a refresh — or just refresh when the person comes back to the tab.
+function NewDataNotice() {
+  const [fresh, setFresh] = useState(false);
+  useEffect(() => {
+    const loadedAt = Date.now();
+    let pendingReload = false;
+    const check = async () => {
+      const { data } = await supabase.from('sync_jobs').select('finished_at').eq('status', 'done').order('finished_at', { ascending: false }).limit(1);
+      const t = data?.[0]?.finished_at ? new Date(data[0].finished_at).getTime() : 0;
+      if (t > loadedAt + 5000) {
+        if (document.visibilityState === 'hidden') pendingReload = true; else setFresh(true);
+      }
+    };
+    const onVis = async () => { if (document.visibilityState === 'visible' && pendingReload) { await flushAll(); window.location.reload(); } };
+    const id = setInterval(() => { check().catch(() => {}); }, 180000);
+    document.addEventListener('visibilitychange', onVis);
+    return () => { clearInterval(id); document.removeEventListener('visibilitychange', onVis); };
+  }, []);
+  if (!fresh) return null;
+  return (
+    <div dir="rtl" role="status" className="fixed top-3 left-1/2 -translate-x-1/2 z-50 flex items-center gap-3 px-4 py-2.5 rounded-xl shadow-lg bg-blue-600 text-white text-sm">
+      <span>יש נתונים חדשים מ-Priority</span>
+      <button type="button" onClick={async () => { await flushAll(); window.location.reload(); }} className="px-3 py-1 rounded-lg bg-white text-blue-700 font-semibold">רענן</button>
+    </div>
+  );
+}
+
 export default function AuthGate() {
   const [phase, setPhase] = useState('checking'); // checking | login | denied | hydrating | ready | local | error
   const [email, setEmail] = useState('');
@@ -131,7 +159,7 @@ export default function AuthGate() {
   };
   const useLocal = () => { localStorage.setItem('cloudLocalMode', '1'); setPhase('local'); };
 
-  if (phase === 'ready' || phase === 'local') return (<><App /><CloudBadge email={phase === 'ready' ? email : ''} isAdmin={isAdmin} onSignOut={signOut} /></>);
+  if (phase === 'ready' || phase === 'local') return (<><App /><CloudBadge email={phase === 'ready' ? email : ''} isAdmin={isAdmin} onSignOut={signOut} />{phase === 'ready' && <NewDataNotice />}</>);
 
   if (phase === 'checking' || phase === 'hydrating') return (
     <Shell>

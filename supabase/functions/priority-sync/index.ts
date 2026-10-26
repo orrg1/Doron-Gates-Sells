@@ -12,7 +12,7 @@
 //     { action:'nightly' } at 19:00 and 20:00 UTC — it only starts a job when it is 22:00 in Israel.
 // Priority is only ever read (GET).
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
-import { SYNC_FORMS, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS } from './core.js';
+import { SYNC_FORMS, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/e7b3fb72b9d8c12a703407be86360f12e19554b8/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
 
 const ROOT = (Deno.env.get('PRIORITY_ROOT') || 'https://p.priority-connect.online/odata/Priority/tabA974E.ini/gate').replace(/\/+$/, '');
 const PAT = Deno.env.get('PRIORITY_PAT') || '';
