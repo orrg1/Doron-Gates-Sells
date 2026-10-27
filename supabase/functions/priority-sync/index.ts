@@ -14,7 +14,7 @@
 //   • the website: { action:'digest', send?:true } — preview the weekly email (or send it now).
 // Priority is only ever read (GET).
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
-import { SYNC_FORMS, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/43b1f875f775f5d2b05f407de211c346f7a84397/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
+import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/43b1f875f775f5d2b05f407de211c346f7a84397/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
 
 const ROOT = (Deno.env.get('PRIORITY_ROOT') || 'https://p.priority-connect.online/odata/Priority/tabA974E.ini/gate').replace(/\/+$/, '');
 const PAT = Deno.env.get('PRIORITY_PAT') || '';
@@ -131,11 +131,14 @@ async function saveJob(job: any, extra: Record<string, unknown> = {}) {
   if (error) throw error;
 }
 
-async function createJob(kind: 'incremental' | 'full', trigger: string, by: string) {
+async function createJob(kind: 'incremental' | 'full', trigger: string, by: string, wantMonths?: number) {
   const { data: open } = await sb.from('sync_jobs').select('*').in('status', ['queued', 'running']).order('id').limit(1);
   if (open && open.length) return { job: open[0], existing: true };
   // what to pull: incremental re-reads the last OVERLAP_DAYS; a slot with no data yet is pulled in full
-  const st = await readState(['prioritySyncThrough', 'procPoDues']);
+  const st = await readState(['prioritySyncThrough', 'procPoDues', 'prioritySyncMonths', 'prioritySyncMonthsDone']);
+  // how far back: the person's choice (24–60 months). Asking for more history than is stored → pull it all once.
+  const months = syncMonthsOf(wantMonths ?? st.prioritySyncMonths);
+  if (months > syncMonthsOf(st.prioritySyncMonthsDone)) kind = 'full';
   const { data: sets } = await sb.from('datasets').select('key,rows').in('key', ['procSalesLines', 'procPurchaseLines', 'procPoMeta']);
   const has = (k: string) => (sets || []).some((s: any) => s.key === k && (s.rows ?? 1) > 0);
   const through = st.prioritySyncThrough || {};
@@ -145,8 +148,8 @@ async function createJob(kind: 'incremental' | 'full', trigger: string, by: stri
     return d.toISOString().slice(0, 10);
   };
   const since = { salesLines: sinceFor('salesLines', 'procSalesLines'), purchaseLines: sinceFor('purchaseLines', 'procPurchaseLines') };
-  const { steps, sSince, pSince } = planSteps({ since, poFull: kind === 'full' || !st.procPoDues || !(sets || []).some((x: any) => x.key === 'procPoMeta') });
-  const job: any = { kind, trigger, requested_by: by, steps: steps.map((s: any) => ({ ...s, done: false, attempts: 0 })), plan: { since, sSince, pSince }, log: [] };
+  const { steps, sSince, pSince } = planSteps({ months, since, poFull: kind === 'full' || !st.procPoDues || !(sets || []).some((x: any) => x.key === 'procPoMeta') });
+  const job: any = { kind, trigger, requested_by: by, steps: steps.map((s: any) => ({ ...s, done: false, attempts: 0 })), plan: { since, sSince, pSince, months }, log: [] };
   addLog(job, since.salesLines ? `סנכרון מהיר — חשבוניות מ-${since.salesLines} ואילך (${steps.length} חלקים)` : `סנכרון מלא — ${sSince} עד היום (${steps.length} חלקים)`);
   const { data, error } = await sb.from('sync_jobs').insert(job).select('*').single();
   if (error) throw error;
@@ -201,7 +204,7 @@ async function tick() {
         'procurementNames', 'procurementCostHistory', 'procurementInvSlots', 'openOrders', 'procurementReceiptLog', 'procurementDraftQty', 'procFilesMeta', 'prioritySyncThrough']);
       const prevSets: Record<string, unknown> = {};
       for (const k of ['procSalesLines', 'procPurchaseLines', 'procPoMeta', 'stockHistory']) prevSets[k] = await readDataset(k);
-      const res = finalizeSync({ prev: { appState: prevState, datasets: prevSets }, payloads, failed, since: job.plan.since, sSince: job.plan.sSince, pSince: job.plan.pSince });
+      const res = finalizeSync({ prev: { appState: prevState, datasets: prevSets }, payloads, failed, since: job.plan.since, sSince: job.plan.sSince, pSince: job.plan.pSince, months: job.plan.months });
       for (const [k, v] of Object.entries(res.datasets)) await writeDataset(k, v);
       await writeState(res.appState);
       res.log.forEach((l: string) => addLog(job, l));
@@ -277,7 +280,7 @@ Deno.serve(async (req) => {
   try {
     if (action === 'start') {
       if (caller === 'scheduler') return json({ error: 'not allowed' }, 403);
-      const r = await createJob(body.kind === 'full' ? 'full' : 'incremental', 'manual', caller);
+      const r = await createJob(body.kind === 'full' ? 'full' : 'incremental', 'manual', caller, body.months != null ? Number(body.months) : undefined);
       return json({ id: r.job.id, existing: r.existing });
     }
     if (action === 'nightly') {

@@ -3370,7 +3370,11 @@ const renderProductRow = (p) => {
   // stored data, and the page reloads to show it. The same job also runs by
   // itself every night at 22:00.
   const [prioSync, setPrioSync] = useState({ busy:false, log:[], errors:{}, at: (() => { try { return Number(localStorage.getItem('prioritySyncAt'))||null; } catch { return null; } })() });
-  const [lastSyncJob, setLastSyncJob] = useState(null); // latest finished server sync: { status, finished_at, error }
+  const [lastSyncJob, setLastSyncJob] = useState(null);
+  // How far back a sync reaches (24–60 months). More than what is already stored → the next sync pulls the whole range once.
+  const [syncMonths, setSyncMonthsState] = useState(() => { try { return Number(localStorage.getItem('prioritySyncMonths')) || 24; } catch { return 24; } });
+  const syncMonthsDone = (() => { try { return Number(localStorage.getItem('prioritySyncMonthsDone')) || 24; } catch { return 24; } })();
+  const setSyncMonths = (m) => { setSyncMonthsState(m); try { localStorage.setItem('prioritySyncMonths', String(m)); } catch { /* sent with the sync request anyway */ } }; // latest finished server sync: { status, finished_at, error }
   const followJob = async (id) => {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const t0 = Date.now();
@@ -3394,7 +3398,7 @@ const renderProductRow = (p) => {
     try {
       const { data: sess } = await supabase.auth.getSession();
       if (!sess?.session) throw new Error('הסנכרון מ-Priority דורש התחברות עם Google.');
-      const { data, error } = await supabase.functions.invoke('priority-sync', { body: { action: 'start', kind: full ? 'full' : 'incremental' } });
+      const { data, error } = await supabase.functions.invoke('priority-sync', { body: { action: 'start', kind: full ? 'full' : 'incremental', months: syncMonths } });
       if (error) { let msg = error.message; try { const j = await error.context?.json?.(); if (j?.error) msg = j.error; } catch { /* generic */ } throw new Error(msg); }
       const job = await followJob(data.id);
       if (job.status === 'error') throw new Error(job.error || 'הסנכרון נכשל');
@@ -3463,7 +3467,17 @@ const renderProductRow = (p) => {
             {prioSync.busy ? <Loader2 className="w-4 h-4 animate-spin"/> : <Activity className="w-4 h-4"/>}
             {prioSync.busy ? 'מסנכרן…' : 'סנכרן עכשיו'}
           </button>
-          <button type="button" onClick={()=>{ if (window.confirm('סנכרון מלא מושך מחדש 24 חודשי חשבוניות ולוקח כמה דקות. להמשיך?')) syncFromPriority(true); }} disabled={prioSync.busy} className={`text-xs font-semibold underline ${muted}`}>סנכרון מלא</button>
+          <button type="button" onClick={()=>{ if (window.confirm(`סנכרון מלא מושך מחדש ${syncMonths} חודשי חשבוניות ולוקח כמה דקות. להמשיך?`)) syncFromPriority(true); }} disabled={prioSync.busy} className={`text-xs font-semibold underline ${muted}`}>סנכרון מלא</button>
+        </div>
+        <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${muted}`}>
+          <label htmlFor="sync-months" className="font-semibold">כמה זמן אחורה למשוך מ-Priority:</label>
+          <select id="sync-months" value={syncMonths} onChange={e=>setSyncMonths(Number(e.target.value))} disabled={prioSync.busy}
+            className={`px-2 py-1 rounded-lg border text-xs font-semibold ${isDarkMode?'bg-slate-900 border-slate-700 text-slate-200':'bg-white border-slate-300 text-slate-700'}`}>
+            {[24,36,48,60].map(m => <option key={m} value={m}>{m} חודשים{m===24?' (ברירת מחדל)':''}</option>)}
+          </select>
+          {syncMonths > syncMonthsDone
+            ? <span className={isDarkMode?'text-amber-300':'text-amber-700'}>הסנכרון הבא ימשוך את כל {syncMonths} החודשים — לוקח כמה דקות יותר, פעם אחת</span>
+            : <span>"סנכרן עכשיו" מעדכן רק מה שהשתנה (45 הימים האחרונים) · "סנכרון מלא" מושך הכל מחדש</span>}
         </div>
         <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${muted}`}>
           <span>סיכום שבועי במייל — כל יום ראשון ב-07:00:</span>
@@ -4229,7 +4243,7 @@ const renderProductRow = (p) => {
     <div className="space-y-5 animate-in fade-in duration-500">
       <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
         <h3 className={`text-lg font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>כדי להתחיל, סנכרן מ-Priority</h3>
-        <p className={`text-sm mt-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>לחץ "סנכרן עכשיו" — הסנכרון הראשון מושך 24 חודשים ולוקח כמה דקות. אפשר גם להעלות את דוח המשלוחים מהמשלח.</p>
+        <p className={`text-sm mt-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>לחץ "סנכרן עכשיו" — הסנכרון הראשון מושך 24 חודשים (אפשר לבחור עד 60) ולוקח כמה דקות. אפשר גם להעלות את דוח המשלוחים מהמשלח.</p>
       </div>
       {renderFilesPanel()}
     </div>
@@ -4372,7 +4386,7 @@ const renderProductRow = (p) => {
                 </span>
               </div>
               <div className={`flex rounded-xl p-1 ${isDarkMode?'bg-slate-900':'bg-slate-100'}`}>
-                {[[6,'6 ח׳'],[12,'12 ח׳'],[18,'18 ח׳'],[24,'24 ח׳'],[0,'הכל']].map(([v,label])=>(
+                {[[6,'6 ח׳'],[12,'12 ח׳'],[18,'18 ח׳'],[24,'24 ח׳'],[36,'36 ח׳'],[0,'הכל']].map(([v,label])=>(
                   <button key={v} onClick={()=>setAvgWindowMonths(v)}
                     className={`flex-1 py-1.5 rounded-lg text-xs font-medium transition-all ${avgWindowMonths===v
                       ?(isDarkMode?'bg-blue-600 text-white shadow-md':'bg-blue-600 text-white shadow-md')

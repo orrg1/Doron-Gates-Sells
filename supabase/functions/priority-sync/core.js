@@ -753,6 +753,8 @@ var SYNC_FORMS = ["LOGPART", "PORDERS", "AINVOICES", "CINVOICES", "EINVOICES", "
 var SALES_FORMS = ["AINVOICES", "CINVOICES", "EINVOICES"];
 var OPTIONAL_SALES = { CINVOICES: "\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05D5\u05EA \u05DE\u05E8\u05DB\u05D6\u05D5\u05EA", EINVOICES: "\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05D5\u05EA \u05DE\u05E1 \u05E7\u05D1\u05DC\u05D4" };
 var FULL_MONTHS = 24;
+var SYNC_MONTH_OPTIONS = [24, 36, 48, 60];
+var syncMonthsOf = (v) => SYNC_MONTH_OPTIONS.includes(Number(v)) ? Number(v) : FULL_MONTHS;
 var OVERLAP_DAYS = 45;
 var entityFields = (xml, type) => {
   const m = xml.match(new RegExp(`<EntityType Name="${type}"[^>]*>([\\s\\S]*?)</EntityType>`));
@@ -1070,8 +1072,8 @@ async function pullPurchaseWindow(forms, query, [a, b]) {
   }
   return { rows: out };
 }
-var planSteps = ({ since = {}, poFull = false, now = Date.now() }) => {
-  const full = isoDaysAgo(Math.round(FULL_MONTHS * 30.5), now);
+var planSteps = ({ since = {}, poFull = false, now = Date.now(), months = FULL_MONTHS }) => {
+  const full = isoDaysAgo(Math.round(syncMonthsOf(months) * 30.5), now);
   const sSince = since.salesLines || full, pSince = since.purchaseLines || full;
   const steps = [{ id: "items" }, { id: "customers" }, { id: "po-open" }];
   for (const w of monthWindows(poFull ? full : pSince, now)) steps.push({ id: `po:${w[0].slice(0, 10)}`, w });
@@ -1096,7 +1098,7 @@ async function runStep(step, { forms, query }) {
   }
   throw new Error(`unknown step ${step.id}`);
 }
-function finalizeSync({ prev, payloads, failed = {}, since = {}, sSince, pSince, now = Date.now() }) {
+function finalizeSync({ prev, payloads, failed = {}, since = {}, sSince, pSince, now = Date.now(), months = FULL_MONTHS }) {
   const A = prev.appState || {}, D = prev.datasets || {};
   const today = new Date(now).toISOString().slice(0, 10);
   const stamp = today.split("-").reverse().join("-");
@@ -1192,7 +1194,8 @@ function finalizeSync({ prev, payloads, failed = {}, since = {}, sSince, pSince,
     outSets.procSalesLines = merged;
     if (merged.length) filesMeta.salesLines = { name: `Priority \u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05D5\u05EA \u05DE\u05DB\u05D9\u05E8\u05D4 ${stamp}.xlsx`, rows: merged.length, from: merged[merged.length - 1].d, to: merged[0].d, at: now };
     through.salesLines = today;
-    log.push(`\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05D5\u05EA \u05DE\u05DB\u05D9\u05E8\u05D4: ${parsed.length.toLocaleString()} \u05E9\u05D5\u05E8\u05D5\u05EA ${since.salesLines ? "\u05D7\u05D3\u05E9\u05D5\u05EA/\u05DE\u05E2\u05D5\u05D3\u05DB\u05E0\u05D5\u05EA" : "(24 \u05D7\u05D5\u05D3\u05E9\u05D9\u05DD)"}`);
+    log.push(`\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05D5\u05EA \u05DE\u05DB\u05D9\u05E8\u05D4: ${parsed.length.toLocaleString()} \u05E9\u05D5\u05E8\u05D5\u05EA ${since.salesLines ? "\u05D7\u05D3\u05E9\u05D5\u05EA/\u05DE\u05E2\u05D5\u05D3\u05DB\u05E0\u05D5\u05EA" : `(${syncMonthsOf(months)} \u05D7\u05D5\u05D3\u05E9\u05D9\u05DD)`}`);
+    if (!since.salesLines) outState.prioritySyncMonthsDone = syncMonthsOf(months);
   } else if (anyFailed("sales:")) log.push("\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05D5\u05EA \u05DE\u05DB\u05D9\u05E8\u05D4 \u05DC\u05D0 \u05E2\u05D5\u05D3\u05DB\u05E0\u05D5 \u2014 \u05D7\u05DC\u05E7 \u05DE\u05D4\u05D7\u05D5\u05D3\u05E9\u05D9\u05DD \u05E0\u05DB\u05E9\u05DC\u05D5. \u05D4\u05E0\u05EA\u05D5\u05E0\u05D9\u05DD \u05D4\u05E7\u05D5\u05D3\u05DE\u05D9\u05DD \u05E0\u05E9\u05DE\u05E8\u05D5.");
   const purchIds = ids.filter((k) => k.startsWith("purch:"));
   if (purchIds.length && !anyFailed("purch:")) {
@@ -1681,6 +1684,7 @@ export {
   SALES_FORMS,
   SALES_HEADERS,
   SYNC_FORMS,
+  SYNC_MONTH_OPTIONS,
   buildDigest,
   describeFromMetadata,
   finalizeSync,
@@ -1688,5 +1692,6 @@ export {
   monthWindows,
   planSteps,
   renderDigestHtml,
-  runStep
+  runStep,
+  syncMonthsOf
 };

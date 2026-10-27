@@ -12,6 +12,9 @@ export const SYNC_FORMS = ['LOGPART', 'PORDERS', 'AINVOICES', 'CINVOICES', 'EINV
 export const SALES_FORMS = ['AINVOICES', 'CINVOICES', 'EINVOICES'];
 const OPTIONAL_SALES = { CINVOICES: 'חשבוניות מרכזות', EINVOICES: 'חשבוניות מס קבלה' };
 export const FULL_MONTHS = 24;
+// How far back a full sync reaches — the person picks one of these in the app (app_state prioritySyncMonths).
+export const SYNC_MONTH_OPTIONS = [24, 36, 48, 60];
+export const syncMonthsOf = (v) => SYNC_MONTH_OPTIONS.includes(Number(v)) ? Number(v) : FULL_MONTHS;
 export const OVERLAP_DAYS = 45; // incremental syncs re-read this far back (late edits, credits, cancellations)
 
 // ── $metadata (XML) → field lists ──
@@ -271,8 +274,8 @@ async function pullPurchaseWindow(forms, query, [a, b]) {
 // ── plan: which steps a sync needs ──
 // since: { salesLines: 'YYYY-MM-DD' | null, purchaseLines: … }  (null = full window)
 // poFull: no PO dates stored yet → read PO history for the whole window once.
-export const planSteps = ({ since = {}, poFull = false, now = Date.now() }) => {
-  const full = isoDaysAgo(Math.round(FULL_MONTHS * 30.5), now);
+export const planSteps = ({ since = {}, poFull = false, now = Date.now(), months = FULL_MONTHS }) => {
+  const full = isoDaysAgo(Math.round(syncMonthsOf(months) * 30.5), now);
   const sSince = since.salesLines || full, pSince = since.purchaseLines || full;
   const steps = [{ id: 'items' }, { id: 'customers' }, { id: 'po-open' }];
   for (const w of monthWindows(poFull ? full : pSince, now)) steps.push({ id: `po:${w[0].slice(0, 10)}`, w });
@@ -303,7 +306,7 @@ export async function runStep(step, { forms, query }) {
 // prev: { appState: { key: parsed value }, datasets: { key: value } }
 // payloads: { stepId: payload }, failed: { stepId: message }
 // Returns { appState: {key: value}, datasets: {key: value}, log: [] } with only what changed.
-export function finalizeSync({ prev, payloads, failed = {}, since = {}, sSince, pSince, now = Date.now() }) {
+export function finalizeSync({ prev, payloads, failed = {}, since = {}, sSince, pSince, now = Date.now(), months = FULL_MONTHS }) {
   const A = prev.appState || {}, D = prev.datasets || {};
   const today = new Date(now).toISOString().slice(0, 10);
   const stamp = today.split('-').reverse().join('-');
@@ -381,7 +384,8 @@ export function finalizeSync({ prev, payloads, failed = {}, since = {}, sSince, 
     outSets.procSalesLines = merged;
     if (merged.length) filesMeta.salesLines = { name: `Priority חשבוניות מכירה ${stamp}.xlsx`, rows: merged.length, from: merged[merged.length - 1].d, to: merged[0].d, at: now };
     through.salesLines = today;
-    log.push(`חשבוניות מכירה: ${parsed.length.toLocaleString()} שורות ${since.salesLines ? 'חדשות/מעודכנות' : '(24 חודשים)'}`);
+    log.push(`חשבוניות מכירה: ${parsed.length.toLocaleString()} שורות ${since.salesLines ? 'חדשות/מעודכנות' : `(${syncMonthsOf(months)} חודשים)`}`);
+    if (!since.salesLines) outState.prioritySyncMonthsDone = syncMonthsOf(months);
   } else if (anyFailed('sales:')) log.push('חשבוניות מכירה לא עודכנו — חלק מהחודשים נכשלו. הנתונים הקודמים נשמרו.');
 
   // supplier invoice lines (PO created / sent dates from the PO map)
