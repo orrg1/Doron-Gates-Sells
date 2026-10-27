@@ -2,7 +2,7 @@
 // Uses the same model as the procurement page (procModel.js), so the numbers
 // in the email match the website.
 import { mergeLinesIntoMonthly, detectOutliers, saleLineId, supplierLeadTimes, matchShipSupplier, shipmentStage, daysBetween, stockTimelines, stockoutSummary,
-  purchasePriceHistory, priceIncreases, returnsAnalysis, DAY_MS, isoToDisplay } from './data.js';
+  purchasePriceHistory, priceIncreases, returnsAnalysis, productStartDates, DAY_MS, isoToDisplay } from './data.js';
 import { computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './procModel.js';
 
 // Items that sell but whose stock + incoming is well beyond the plan's need.
@@ -72,7 +72,7 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
   // stock history → stockouts
   const from = iso(now - 364 * DAY_MS);
   const skus = [...new Set(salesLines.filter(l => l.d >= from).map(l => l.k))].filter(k => k && stockMap[k] != null);
-  const stockouts = stockoutSummary(stockTimelines({ stockHistory: sets.stockHistory, currentStock: stockMap, salesLines, purchaseLines, skus, fromIso: from, toIso: today }));
+  const stockouts = stockoutSummary(stockTimelines({ stockHistory: sets.stockHistory, currentStock: stockMap, salesLines, purchaseLines, skus, fromIso: from, toIso: today, startBy: productStartDates({ itemsExtra: sets.procItemsExtra || {}, purchaseLines }) }));
 
   // lead times
   const knownSuppliers = [...new Set([...purchaseLines.map(l => l.s), ...Object.values(supplierMap).filter(Boolean), ...openOrders.map(o => o.supplier).filter(Boolean)])];
@@ -80,15 +80,15 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
   const transitBySupplier = {};
   shipments.forEach(s => { const sup = supOf(s); if (sup && s.dep && s.arr) { const d = daysBetween(s.dep, s.arr); if (d > 0 && d < 120) (transitBySupplier[sup] ||= []).push(d); } });
   const leadStats = supplierLeadTimes({ purchaseLines, poMeta: sets.procPoMeta || {}, transitBySupplier, sinceIso: iso(now - 540 * DAY_MS) });
-  const leadFor = makeLeadFor({ leadStats, leadTimeMap: app.procurementLeadTime || {}, leadAddTransit: app.procLeadAddTransit || {}, leadTime: 1 });
+  const leadFor = makeLeadFor({ leadStats, leadTimeMap: app.procurementLeadTime || {}, leadAddTransit: app.procLeadAddTransit || {}, leadTime: app.procDefaultLeadTime != null && Number.isFinite(Number(app.procDefaultLeadTime)) ? Number(app.procDefaultLeadTime) : 1 });
 
   const ordersEnriched = enrichOrders({ openOrders, currencyMap, exchangeRates, costMap });
   const purchBySku = {}, lastSupBySku = {};
   purchaseLines.forEach(l => { if (l.junk) return; (purchBySku[l.k] ||= []).push(l); if (!lastSupBySku[l.k]) lastSupBySku[l.k] = l; });
-  const products = computeProducts({ salesData, excludeCurrentMonth: app.excludeCurrentMonth !== false, avgWindowMonths: 12, stockouts, skipStockoutMonths: app.procSkipStockoutMonths !== '0' && app.procSkipStockoutMonths !== 0,
+  const products = computeProducts({ salesData, excludeCurrentMonth: app.excludeCurrentMonth !== false, avgWindowMonths: Number.isFinite(Number(app.procAvgWindow)) && app.procAvgWindow != null ? Number(app.procAvgWindow) : 12, stockouts, skipStockoutMonths: app.procSkipStockoutMonths !== '0' && app.procSkipStockoutMonths !== 0,
     stockMap, minStockMap: app.procurementMinStock || {}, lastSupBySku, supplierMap, costMap, itemsExtra: sets.procItemsExtra || {}, currencyMap, exchangeRates,
     costHistory: app.procurementCostHistory || {}, purchBySku, leadFor, incomingMap: incomingMapOf(openOrders), overdueByProduct: overdueByProductOf(ordersEnriched),
-    moqMap: app.procurementMOQ || {}, monthsToStock: 2, supplierConcentration: supplierConcentrationOf(supplierMap), outliers, outlierDecisions: decisions });
+    moqMap: app.procurementMOQ || {}, monthsToStock: Number(app.procMonthsToStock) || 2, supplierConcentration: supplierConcentrationOf(supplierMap), outliers, outlierDecisions: decisions });
 
   // 1. what to order, by supplier
   const bySup = {};
@@ -131,6 +131,12 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
     latePOs: Object.values(lateBySup).map(s => ({ ...s, pos: [...s.pos] })).sort((a, b) => b.maxDays - a.maxDays), latePOLines: latePOs.length,
     delayed: delayed.slice(0, 10).map(s => ({ cont: s.cont, sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays })),
     priceUps: priceUps.slice(0, 15), excessValue, excessPOs: excessPOs.slice(0, 10).map(p => ({ name: p.name, sku: p.sku, supplier: p.supplier, poExcess: p.poExcess, value: p.poExcessValue })), excessPOCount: excessPOs.length,
+    alertSource: {
+      stock: products.filter(p => p.status === 'now' && /^[AB]/.test(p.abc || '') && p.avgMonthly > 0)
+        .map(p => ({ k: p.sku || p.key, name: p.name, supplier: p.supplier || '', ownMade: !!p.ownMade, stock: p.currentStock, incoming: p.incomingQty || 0,
+          coverDays: p.effectiveCoverDays != null ? Math.round(p.effectiveCoverDays) : null, leadMonths: p.effectiveLeadTime, qty: p.suggestedOrder, abc: p.abc })),
+      ships: delayed.map(s => ({ id: s.id, cont: s.cont, sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays })),
+    },
     week, productsUp: productMoves.up.slice(0, 10), productsDown: productMoves.down.slice(0, 6), returnSpikes,
   };
 };
@@ -169,5 +175,37 @@ export const renderDigestHtml = (d, { siteUrl }) => {
         table(['מוצר', '30 יום', 'קצב קודם לחודש', 'שינוי'], d.productsDown.map(x => [`${esc(x.name)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}</span>`, x.q.toLocaleString('en-US'), x.prevQ.toLocaleString('en-US'), `<b style="color:#C8322B">${pctS(x.pct)}</b>`])) : '') +
       (d.returnSpikes.length ? '<div style="height:6px"></div>' + p('<b>מוצרים עם הרבה החזרות ב-30 הימים האחרונים:</b>') + table(['מוצר', 'נמכרו', 'חזרו', 'אחוז'], d.returnSpikes.map(x => [esc(x.n), x.soldQ, x.retQ, `<b style="color:#C8322B">${x.rate.toFixed(0)}%</b>`])) : ''), proc)}
     <tr><td style="padding:14px 22px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:11px">נשלח אוטומטית כל יום ראשון מהאתר BizData · הנתונים מ-Priority (קריאה בלבד)</td></tr>
+  </table></td></tr></table></body></html>`;
+};
+
+
+// ─── Instant alerts ───
+// From the same numbers as the weekly email: key products (A/B) that will run out before a new
+// order can arrive, and shipments whose arrival date was pushed back. `sent` = { key: ISO date } of
+// alerts already sent — an item is sent again only after `repeatDays` (stock) or when the date moves again (ships).
+export const pickAlerts = (d, sent = {}, { now = Date.now(), repeatDays = 14 } = {}) => {
+  const fresh = (key) => !sent[key] || (now - Date.parse(sent[key])) > repeatDays * 86400000;
+  const stock = (d.alertSource?.stock || []).filter(x => fresh(`stock:${x.k}`))
+    .sort((x, y) => String(x.abc).localeCompare(String(y.abc)) || (x.coverDays ?? 999) - (y.coverDays ?? 999));
+  const ships = (d.alertSource?.ships || []).filter(x => !sent[`ship:${x.id}:${x.arr}`]);
+  return { stock, ships, keys: [...stock.map(x => `stock:${x.k}`), ...ships.map(x => `ship:${x.id}:${x.arr}`)] };
+};
+export const renderAlertsHtml = (a, { siteUrl }) => {
+  const row = (cells) => `<tr>${cells.map(c => `<td align="right" style="padding:6px;border-bottom:1px solid #f1f5f9;font-size:13px">${c}</td>`).join('')}</tr>`;
+  const head = (cells) => `<tr style="background:#f1f5f9;color:#475569">${cells.map(c => `<th align="right" style="padding:6px;font-size:12px;font-weight:600">${esc(c)}</th>`).join('')}</tr>`;
+  const stockRows = a.stock.slice(0, 25).map(x => row([`<b>${esc(x.name)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)} · ${esc(x.ownMade ? 'ייצור עצמי' : x.supplier || 'ספק לא ידוע')}</span>`,
+    x.stock ?? '—', x.incoming || '—', x.coverDays == null ? '—' : `<b style="color:#C8322B">${x.coverDays} ימים</b>`, `${x.leadMonths} ח׳`, `<b>${(x.qty || 0).toLocaleString('en-US')}</b> ${x.ownMade ? 'לייצר' : 'להזמין'}`]));
+  const shipRows = a.ships.map(x => row([esc(x.cont || '—'), esc(x.sup), esc(isoToDisplay(x.from || '')), `<b>${esc(isoToDisplay(x.arr || ''))}</b>`, `<b style="color:#C8322B">+${x.delayDays} ימים</b>`]));
+  return `<!doctype html><html dir="rtl" lang="he"><body style="margin:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:16px 8px">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#fff;border-radius:12px;overflow:hidden" dir="rtl">
+  <tr><td style="background:#C8322B;color:#fff;padding:14px 18px;font-size:17px;font-weight:bold">התראה — דורש טיפול עכשיו</td></tr>
+  ${a.stock.length ? `<tr><td style="padding:14px 18px"><h2 style="margin:0 0 8px;font-size:15px;color:#0f172a">מוצרים מרכזיים שעומדים להיגמר (${a.stock.length})</h2>
+    <p style="margin:0 0 8px;font-size:13px;color:#475569">המלאי + מה שבדרך לא יחזיק עד שהזמנה חדשה תגיע.</p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(['מוצר', 'מלאי', 'בדרך', 'מספיק ל', 'זמן אספקה', 'מומלץ'])}${stockRows.join('')}</table>${a.stock.length > 25 ? `<p style="margin:8px 0 0;font-size:12px;color:#64748b">ועוד ${a.stock.length - 25} — הרשימה המלאה באתר</p>` : ''}</td></tr>` : ''}
+  ${a.ships.length ? `<tr><td style="padding:14px 18px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 8px;font-size:15px;color:#0f172a">משלוחים שנדחו (${a.ships.length})</h2>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(['מכולה', 'ספק', 'היה', 'עכשיו', 'דחייה'])}${shipRows.join('')}</table></td></tr>` : ''}
+  <tr><td style="padding:12px 18px;border-top:1px solid #e2e8f0"><a href="${esc(siteUrl)}" style="color:#1F5FBF;font-size:13px">פתח באתר ←</a>
+    <span style="color:#94a3b8;font-size:11px"> · כל פריט נשלח פעם אחת (מוצר — שוב רק אחרי שבועיים אם עדיין חסר)</span></td></tr>
   </table></td></tr></table></body></html>`;
 };

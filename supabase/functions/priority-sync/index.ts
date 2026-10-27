@@ -12,9 +12,10 @@
 //     { action:'nightly' } at 19:00 and 20:00 UTC — it only starts a job when it is 22:00 in Israel,
 //     { action:'weekly' } Sundays at 04:00 and 05:00 UTC — sends the summary email when it is 07:00 in Israel.
 //   • the website: { action:'digest', send?:true } — preview the weekly email (or send it now).
+//   • the website: { action:'alerts' } — check for new alerts now (also runs after every finished sync).
 // Priority is only ever read (GET).
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
-import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/1e16d7a6f26b86455b1257045549c451fdd6299e/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
+import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml, pickAlerts, renderAlertsHtml } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/1e16d7a6f26b86455b1257045549c451fdd6299e/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
 
 const ROOT = (Deno.env.get('PRIORITY_ROOT') || 'https://p.priority-connect.online/odata/Priority/tabA974E.ini/gate').replace(/\/+$/, '');
 const PAT = Deno.env.get('PRIORITY_PAT') || '';
@@ -212,7 +213,10 @@ async function tick() {
       addLog(job, hadFailures ? `הסתיים עם ${Object.keys(failed).length} חלקים שנכשלו — מה שנכשל לא עודכן` : `הסתיים בהצלחה (${Math.round((Date.now() - new Date(job.started_at).getTime()) / 1000)} שנ׳)`);
       await saveJob(job, { status: 'done', finished_at: new Date().toISOString(), lease_until: null, error: hadFailures ? 'partial' : null });
       await clearStage(job.id, job.steps.map((s: any) => s.id)).catch(() => {});
-      return { done: true, id: job.id };
+      // fresh data → check for new alerts (never fails the sync)
+      let alerts: unknown = null;
+      try { alerts = await runAlerts(`sync ${job.trigger}`); } catch (e) { alerts = { error: String((e as Error).message || e) }; }
+      return { done: true, id: job.id, alerts };
     }
     await saveJob(job, { lease_until: null });
     return { progress: true, id: job.id, left };
@@ -231,26 +235,52 @@ const SITE_URL = 'https://orrg1.github.io/Doron-Gates-Sells/';
 async function digestData() {
   const app = await readState(['procurementStock', 'procurementSupplier', 'procurementCost', 'procurementCurrency', 'exchangeRates', 'openOrders', 'procShipSupplierMap',
     'procOutlierDecisions', 'procurementLeadTime', 'procLeadAddTransit', 'excludeCurrentMonth', 'procSkipStockoutMonths', 'procurementMinStock', 'procurementCostHistory',
-    'procurementMOQ', 'procurementNames', 'prioritySyncAt']);
+    'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime']);
   const sets: Record<string, unknown> = {};
   for (const k of ['procSalesLines', 'procPurchaseLines', 'procShipments', 'stockHistory', 'procPoMeta', 'procItemsExtra', 'dashboardSalesData']) sets[k] = await readDataset(k);
   return buildDigest({ app, sets });
 }
-async function sendDigest(by: string) {
+async function sendMail(subject: string, html: string) {
   const key = Deno.env.get('RESEND_API_KEY');
   if (!key) throw new Error('RESEND_API_KEY secret is not set on the server');
   const to = (Deno.env.get('DIGEST_TO') || 'or@doron-gates.com').split(',').map(x => x.trim()).filter(Boolean);
-  const d = await digestData();
-  const html = renderDigestHtml(d, { siteUrl: SITE_URL });
-  const subject = `סיכום שבועי — ${d.toOrderNow} מוצרים להזמין${d.latePOLines ? ` · ${d.latePOLines} שורות באיחור` : ''}`;
   const res = await fetch('https://api.resend.com/emails', {
     method: 'POST', headers: { Authorization: `Bearer ${key}`, 'Content-Type': 'application/json' },
     body: JSON.stringify({ from: Deno.env.get('DIGEST_FROM') || 'BizData <onboarding@resend.dev>', to, subject, html }),
   });
   const out = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error(out?.message || `Resend HTTP ${res.status}`);
-  await writeState({ digestSentAt: { at: new Date().toISOString(), by, id: out?.id || null, to } });
-  return { sent: true, id: out?.id, to };
+  return { id: out?.id || null, to };
+}
+async function sendDigest(by: string) {
+  const d = await digestData();
+  const html = renderDigestHtml(d, { siteUrl: SITE_URL });
+  const subject = `סיכום שבועי — ${d.toOrderNow} מוצרים להזמין${d.latePOLines ? ` · ${d.latePOLines} שורות באיחור` : ''}`;
+  const m = await sendMail(subject, html);
+  await writeState({ digestSentAt: { at: new Date().toISOString(), by, id: m.id, to: m.to } });
+  return { sent: true, id: m.id, to: m.to };
+}
+// Instant alerts: only what is NEW since the last check is emailed. The very first run only records
+// what is already known (otherwise the first email would list every item that is short today).
+async function runAlerts(by: string) {
+  const st = await readState(['alertsEnabled', 'alertsSent', 'alertsBaselineAt']);
+  if (st.alertsEnabled === false) return { skipped: 'alerts are off' };
+  const d = await digestData();
+  const nowIso = new Date().toISOString();
+  const sent: Record<string, string> = st.alertsSent || {};
+  const a = pickAlerts(d, sent);
+  const keep: Record<string, string> = {};
+  Object.entries(sent).forEach(([k, v]) => { if (Date.now() - Date.parse(v) < 60 * 86400000) keep[k] = v; });
+  a.keys.forEach((k: string) => { keep[k] = nowIso; });
+  if (!st.alertsBaselineAt) {
+    await writeState({ alertsSent: keep, alertsBaselineAt: nowIso, alertsLast: { at: nowIso, by, baseline: a.keys.length } });
+    return { baseline: true, known: a.keys.length };
+  }
+  if (!a.keys.length) { await writeState({ alertsLast: { at: nowIso, by, sent: 0 } }); return { sent: 0 }; }
+  const parts = [a.stock.length ? `${a.stock.length} מוצרים עומדים להיגמר` : '', a.ships.length ? `${a.ships.length} משלוחים נדחו` : ''].filter(Boolean);
+  const m = await sendMail(`התראה: ${parts.join(' · ')}`, renderAlertsHtml(a, { siteUrl: SITE_URL }));
+  await writeState({ alertsSent: keep, alertsLast: { at: nowIso, by, sent: a.keys.length, stock: a.stock.length, ships: a.ships.length, id: m.id } });
+  return { sent: a.keys.length, stock: a.stock.length, ships: a.ships.length, to: m.to };
 }
 
 Deno.serve(async (req) => {
@@ -292,6 +322,7 @@ Deno.serve(async (req) => {
       return json({ id: r.job.id, existing: r.existing, tick: await tick() });
     }
     if (action === 'tick') return json(await tick());
+    if (action === 'alerts') return json(await runAlerts(caller));
     if (action === 'digest') {
       if (body.send) return json(await sendDigest(caller));
       const d = await digestData();

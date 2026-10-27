@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import * as XLSXLib from 'xlsx';
 import { supabase, flushAll, queueDataset } from './cloud.js';
 import { OWN_MADE, procStatus, PROC_STATUS_LABEL, procChip, computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './core/procModel.js';
-import { supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
+import { stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
@@ -360,11 +360,81 @@ const KPICard = ({ title, value, formatted, subtext, icon: Icon, color, trend, s
 
 // Overview Dashboard Page
 // ─── CUSTOMERS PAGE ─────────────────────────────────────
-const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, excludeCurrentMonth, priorityRange = null, fileCounts = {}, customerCards = {}, onSyncPriority = null, lastSyncAt = null }) => {
+const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, excludeCurrentMonth, priorityRange = null, fileCounts = {}, customerCards = {}, onSyncPriority = null, lastSyncAt = null, stoppedPairs = [] }) => {
   const [search, setSearch] = useState('');
   const [cityFilter, setCityFilter] = useState('');
   const [sortConfig, setSortConfig] = useState({ key:'totalRevenue', direction:'desc' });
   const { sortRows, sortTh } = useTableSort();
+  const [stoppedActiveOnly, setStoppedActiveOnly] = useState(true);
+  const [stoppedShowAll, setStoppedShowAll] = useState(false);
+  const isNarrow = useIsNarrow();
+  // Customers who used to buy a product regularly and stopped — a list to call.
+  const renderStopped = () => {
+    if (!stoppedPairs.length) return null;
+    const muted = isDarkMode?'text-slate-400':'text-slate-500', strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const list = sortRows('stopped', stoppedPairs.filter(x => !stoppedActiveOnly || x.customerActive));
+    const shown = stoppedShowAll ? list : list.slice(0, 15);
+    return (
+      <section aria-label="לקוחות שהפסיקו לקנות מוצר" className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
+        <div className="px-5 py-4 flex flex-wrap items-center gap-3">
+          <div className="flex-1 min-w-[240px]">
+            <h3 className={`font-bold ${strong}`}>לקוחות שהפסיקו לקנות מוצר ({list.length})</h3>
+            <p className={`text-xs mt-0.5 ${muted}`}>לקוח שקנה מוצר באופן קבוע (ב-4 חודשים שונים לפחות בשנה) ועבר הרבה יותר מהרגיל מאז הפעם האחרונה. ממוין לפי שווי שנתי.</p>
+          </div>
+          <label className={`inline-flex items-center gap-2 text-xs cursor-pointer ${muted}`}>
+            <input type="checkbox" checked={stoppedActiveOnly} onChange={e=>setStoppedActiveOnly(e.target.checked)} className="w-4 h-4 accent-pink-600"/>
+            רק לקוחות שעדיין קונים מאיתנו דברים אחרים
+          </label>
+        </div>
+        {isNarrow ? (
+          <ul className={`divide-y border-t ${isDarkMode?'divide-slate-700/60 border-slate-700':'divide-slate-100 border-slate-100'}`}>
+            {shown.map(x => (
+              <li key={(x.cid||x.c)+'|'+x.k} className="px-4 py-3 space-y-0.5">
+                <div className="flex items-start gap-2">
+                  <p className={`flex-1 font-semibold text-sm ${strong}`}>{x.c}</p>
+                  <b className={`text-sm tabular-nums ${strong}`}>{formatShort(x.yearlyValue)}<span className={`text-[10px] font-normal ${muted}`}> לשנה</span></b>
+                </div>
+                <p className={`text-sm ${strong}`}>{x.n} <span className={`text-[11px] font-mono ${muted}`}>{x.k}</span></p>
+                <p className={`text-xs ${muted}`}>קנה כל ~{x.everyDays} ימים · אחרון {isoToDisplay(x.last)} · <b className={isDarkMode?'text-red-300':'text-red-700'}>לפני {x.silence} ימים</b>{!x.customerActive && x.customerLast ? ` · לא קנה כלום מאז ${isoToDisplay(x.customerLast)}` : ''}</p>
+              </li>
+            ))}
+          </ul>
+        ) : (
+        <div className="overflow-x-auto">
+          <table className={`w-full text-sm text-right min-w-[760px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+            <thead className={`text-[11px] font-semibold ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-50 text-slate-500'}`}>
+              <tr>
+                {sortTh('stopped','c','לקוח',{className:'px-4 py-2.5'})}
+                {sortTh('stopped','n','מוצר',{className:'px-4 py-2.5'})}
+                {sortTh('stopped','everyDays','קנה בדרך כלל',{className:'px-4 py-2.5'})}
+                {sortTh('stopped','last','קנייה אחרונה',{className:'px-4 py-2.5',firstDir:'desc'})}
+                {sortTh('stopped','silence','מאז',{className:'px-4 py-2.5',firstDir:'desc'})}
+                {sortTh('stopped','yearlyValue','שווי לשנה',{className:'px-4 py-2.5',firstDir:'desc'})}
+              </tr>
+            </thead>
+            <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+              {shown.map(x => (
+                <tr key={(x.cid||x.c)+'|'+x.k} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
+                  <td className="px-4 py-2.5"><p className={`font-semibold ${strong}`}>{x.c}</p>{!x.customerActive && x.customerLast && <p className={`text-[11px] ${isDarkMode?'text-orange-300':'text-orange-700'}`}>לא קנה כלום מאז {isoToDisplay(x.customerLast)}</p>}</td>
+                  <td className="px-4 py-2.5"><p className={strong}>{x.n}</p><p className={`text-[11px] font-mono ${muted}`}>{x.k}</p></td>
+                  <td className="px-4 py-2.5 text-xs">כל ~{x.everyDays} ימים · ~{x.monthlyQty} יח׳ לחודש</td>
+                  <td className="px-4 py-2.5 text-xs">{isoToDisplay(x.last)}</td>
+                  <td className={`px-4 py-2.5 text-xs font-bold ${isDarkMode?'text-red-300':'text-red-700'}`}>{x.silence} ימים</td>
+                  <td className={`px-4 py-2.5 text-xs font-bold tabular-nums ${strong}`}>{formatShort(x.yearlyValue)}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        )}
+        {list.length > 15 && (
+          <button type="button" onClick={()=>setStoppedShowAll(v=>!v)} className={`w-full py-2.5 text-xs font-semibold border-t ${isDarkMode?'border-slate-700 text-pink-300':'border-slate-100 text-pink-700'} hover:underline`}>
+            {stoppedShowAll ? 'הצג פחות' : `הצג את כל ${list.length}`}
+          </button>
+        )}
+      </section>
+    );
+  };
   const [expandedCustomer, setExpandedCustomer] = useState(null);
   const [customerPage, setCustomerPage] = useState(1);
   const customerItemsPerPage = 50;
@@ -666,6 +736,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, exclud
   return (
     <div className="space-y-6 animate-in fade-in duration-400">
       {uploadCards}
+      {renderStopped()}
 
       {monthlyData.length>0 && (
         <>
@@ -1484,6 +1555,17 @@ const readSheetAsRows = (file) => new Promise((resolve, reject) => {
 
 
 // ─── PROCUREMENT PAGE ──────────────────────────────────
+// Phone-width screens get card lists instead of wide tables.
+const useIsNarrow = () => {
+  const q = '(max-width: 639px)';
+  const [n, setN] = useState(() => { try { return window.matchMedia(q).matches; } catch { return false; } });
+  useEffect(() => {
+    let m; try { m = window.matchMedia(q); } catch { return undefined; }
+    const on = () => setN(m.matches); m.addEventListener?.('change', on); return () => m.removeEventListener?.('change', on);
+  }, []);
+  return n;
+};
+
 const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone, onSalesLinesChange, onCustomersChange, salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
   // SKU → product name, captured from the inventory file. Needed so items
@@ -1521,6 +1603,9 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
   const [filesMeta, setFilesMeta] = useState(() => { try { return JSON.parse(localStorage.getItem('procFilesMeta')||'{}'); } catch { return {}; } });
   const [fileBusy, setFileBusy] = useState(null);   // slot key being loaded
   const [fileMsg, setFileMsg] = useState(null);     // {slot, kind:'ok'|'error', text}
+  // Shipment → POs it carries, as the person set it ({ shipId: [poNumber, …] }).
+  const [shipPoManual, setShipPoManual] = useState(() => { try { return JSON.parse(localStorage.getItem('procShipPoLinks')||'{}'); } catch { return {}; } });
+  const saveShipPo = (next) => { setShipPoManual(next); try { localStorage.setItem('procShipPoLinks', JSON.stringify(next)); } catch { /* best-effort */ } };
   const [shipSupOverride, setShipSupOverride] = useState(() => { try { return JSON.parse(localStorage.getItem('procShipSupplierMap')||'{}'); } catch { return {}; } });
   // Order quantities the user typed (SKU → qty), kept until the PO shows up in Priority's open-orders file.
   const [draftQty, setDraftQty] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementDraftQty')||'{}'); } catch { return {}; } });
@@ -1597,6 +1682,10 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
         const changed = merged.filter(s => s.change && s.change.at === today).length;
         saveFileMeta(slot, { name:file.name, rows:merged.length });
         setFileMsg({ slot, kind:'ok', text:`נטענו ${merged.length} משלוחים${changed?` · ${changed} שינו תאריך הגעה`:''}` });
+        // a pushed-back arrival date → let the server email an alert (after the file reached the server)
+        if (merged.some(s => s.change && s.change.at === today && s.change.to > s.change.from)) {
+          flushAll().then(() => supabase.functions.invoke('priority-sync', { body: { action: 'alerts' } })).catch(() => { /* alerts are best-effort */ });
+        }
       }
     } catch (err) {
       setFileMsg({ slot, kind:'error', text: err.message || 'טעינת הקובץ נכשלה.' });
@@ -1610,8 +1699,8 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
   const stockWindow = useMemo(() => { const to = new Date().toISOString().slice(0,10); return { from: new Date(Date.now() - 364*DAY_MS).toISOString().slice(0,10), to }; }, []);
   const stockTl = useMemo(() => {
     const skus = [...new Set(salesLines.filter(l => l.d >= stockWindow.from).map(l => l.k))].filter(k => k && (stockMap[k] != null));
-    return stockTimelines({ stockHistory, currentStock: stockMap, salesLines, purchaseLines, skus, fromIso: stockWindow.from, toIso: stockWindow.to });
-  }, [stockHistory, stockMap, salesLines, purchaseLines, stockWindow]);
+    return stockTimelines({ stockHistory, currentStock: stockMap, salesLines, purchaseLines, skus, fromIso: stockWindow.from, toIso: stockWindow.to, startBy: productStartDates({ itemsExtra, purchaseLines }) });
+  }, [stockHistory, stockMap, salesLines, purchaseLines, stockWindow, itemsExtra]);
   const stockouts = useMemo(() => stockoutSummary(stockTl), [stockTl]);
   const firstSnapshot = stockHistory.days?.length ? stockHistory.days.map(d => d.d).sort()[0] : null;
   // ── Purchase prices over time (supplier invoices) ──
@@ -1722,8 +1811,11 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
     const min = PROC_COL_MIN[key]||50;
     setColWidths(prev => ({ ...prev, [key]: Math.max(min, Math.ceil(maxTextWidth + padding)) }));
   }, []);
-  const [monthsToStock, setMonthsToStock] = useState(2);
-  const [leadTime, setLeadTime] = useState(1);
+  // Planning settings are remembered (and shared with the server, so the weekly email uses the same ones).
+  const [monthsToStock, setMonthsToStockState] = useState((() => { try { const v = Number(localStorage.getItem('procMonthsToStock')); return Number.isFinite(v) && localStorage.getItem('procMonthsToStock') !== null ? v : 2; } catch { return 2; } })());
+  const [leadTime, setLeadTimeState] = useState((() => { try { const v = Number(localStorage.getItem('procDefaultLeadTime')); return Number.isFinite(v) && localStorage.getItem('procDefaultLeadTime') !== null ? v : 1; } catch { return 1; } })());
+  const setMonthsToStock = (v) => { setMonthsToStockState(v); try { localStorage.setItem('procMonthsToStock', String(v)); } catch { /* not remembered */ } };
+  const setLeadTime = (v) => { setLeadTimeState(v); try { localStorage.setItem('procDefaultLeadTime', String(v)); } catch { /* not remembered */ } };
   const [abcFilter, setAbcFilter] = useState('all');
   const [riskFilter, setRiskFilter] = useState('all'); // 'all'|'critical'|'low'|'ok'|'unknown'
   // Set by the action cards at the top: 'all' | 'order' | 'late'
@@ -1760,8 +1852,10 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
   const [importBanner, setImportBanner] = useState(null); // {count, skipped}
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [showLegend, setShowLegend] = useState(false);
-  const [deadStockDays, setDeadStockDays] = useState(90);
-  const [avgWindowMonths, setAvgWindowMonths] = useState(12); // lookback window for avg calc // threshold in days
+  const [deadStockDays, setDeadStockDaysState] = useState((() => { try { const v = Number(localStorage.getItem('procDeadStockDays')); return Number.isFinite(v) && localStorage.getItem('procDeadStockDays') !== null ? v : 90; } catch { return 90; } })());
+  const setDeadStockDays = (v) => { setDeadStockDaysState(v); try { localStorage.setItem('procDeadStockDays', String(v)); } catch { /* not remembered */ } };
+  const [avgWindowMonths, setAvgWindowMonthsState] = useState((() => { try { const v = Number(localStorage.getItem('procAvgWindow')); return Number.isFinite(v) && localStorage.getItem('procAvgWindow') !== null ? v : 12; } catch { return 12; } })()); // lookback window for the averages (0 = all)
+  const setAvgWindowMonths = (v) => { setAvgWindowMonthsState(v); try { localStorage.setItem('procAvgWindow', String(v)); } catch { /* not remembered */ } };
   // Free period comparison — same concept as the one in "מכירות", but scoped
   // here to inform purchasing decisions: did demand for products actually
   // shift between two custom periods, beyond what the fixed trend window shows.
@@ -2243,6 +2337,38 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
   // bottom, via an IntersectionObserver sentinel row.
   const PROC_BATCH_SIZE = 150;
   const [visibleCount, setVisibleCount] = useState(PROC_BATCH_SIZE);
+  const isNarrow = useIsNarrow();
+  const renderProductCards = () => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500', strong = isDarkMode?'text-slate-100':'text-slate-800';
+    if (!filtered.length) return <p className={`px-4 py-16 text-center text-sm ${muted}`}>לא נמצאו מוצרים</p>;
+    return (
+      <ul className={`divide-y ${isDarkMode?'divide-slate-700/60':'divide-slate-100'}`}>
+        {visibleProducts.map(p => (
+          <li key={p.key}>
+            <button type="button" onClick={()=>setDrawerKey(p.key)} className={`w-full text-right px-4 py-3 space-y-1.5 ${isDarkMode?'active:bg-slate-700/40':'active:bg-slate-50'}`}>
+              <div className="flex items-start gap-2">
+                <div className="flex-1 min-w-0">
+                  <p className={`font-semibold text-sm leading-snug ${strong}`}>{p.name}</p>
+                  <p className={`text-[11px] font-mono ${muted}`}>{p.sku}{p.supplier ? <span className="font-sans"> · {p.supplier}</span> : null}</p>
+                </div>
+                <span className={`shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${procStatusCls(p.status, isDarkMode)}`}><span className="w-1.5 h-1.5 rounded-full" style={{background:procDotColor[p.status]}}/>{PROC_STATUS_LABEL[p.status]}</span>
+              </div>
+              {p.chip && <p className={`inline-block text-[11px] font-semibold px-1.5 py-0.5 rounded ${procChipCls(p.chip.k, isDarkMode)}`}>{p.chip.t}</p>}
+              <div className="grid grid-cols-4 gap-2 text-center">
+                {[['מלאי', p.currentStock==null?'—':p.currentStock.toLocaleString()], ['ממוצע לח׳', p.avgMonthly? (Math.round(p.avgMonthly*10)/10).toLocaleString() : '0'],
+                  ['מספיק ל', p.effectiveCoverDays==null?'—':`${Math.round(p.effectiveCoverDays)} י׳`], [p.ownMade?'לייצר':'להזמין', p.currentStock!=null && p.suggestedOrder>0 ? p.suggestedOrder.toLocaleString() : '—']].map(([l,v]) => (
+                  <div key={l} className={`rounded-lg py-1 ${isDarkMode?'bg-slate-900/50':'bg-slate-50'}`}><p className={`text-[10px] ${muted}`}>{l}</p><p className={`text-sm font-bold tabular-nums ${strong}`}>{v}</p></div>
+                ))}
+              </div>
+            </button>
+          </li>
+        ))}
+        {visibleCount < filtered.length && (
+          <li><button type="button" onClick={()=>setVisibleCount(c=>c+PROC_BATCH_SIZE)} className={`w-full py-3 text-sm font-semibold ${isDarkMode?'text-blue-300':'text-blue-700'}`}>הצג עוד ({(filtered.length-visibleCount).toLocaleString()})</button></li>
+        )}
+      </ul>
+    );
+  };
   useEffect(() => { setVisibleCount(PROC_BATCH_SIZE); }, [filtered]);
   const loadMoreSentinelRef = useRef(null);
   useEffect(() => {
@@ -2492,17 +2618,22 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
   }, [shipmentsEnriched]);
   // When will what's on order for a product arrive: the supplier's next shipment
   // from the forwarder file if there is one, otherwise the PO's expected date.
+  const shipLinks = useMemo(() => linkShipmentsToPOs({ shipments: shipmentsEnriched, orders: ordersEnriched, manual: shipPoManual }), [shipmentsEnriched, ordersEnriched, shipPoManual]);
   const productEta = useMemo(() => {
     const m = {};
+    // suppliers where at least one PO is tied to a shipment: their other POs are NOT guessed onto a shipment
+    const supWithLinks = new Set(Object.keys(shipLinks.shipByPo).map(po => shipLinks.shipByPo[po].matched));
     ordersEnriched.forEach(o => {
       const k = o.productKey || o.productName;
-      const ship = (activeShipsBySupplier[o.supplier] || []).find(s => s.arr);
-      const cand = ship ? { iso: ship.arr, cont: ship.cont, delayed: ship.delayDays > 0, src:'ship' }
+      const linked = o.poNumber ? shipLinks.shipByPo[o.poNumber] : null;
+      const guess = !linked && !supWithLinks.has(o.supplier) ? (activeShipsBySupplier[o.supplier] || []).find(s => s.arr) : null;
+      const ship = (linked && linked.stage.idx < 2 && linked.arr) ? linked : guess;
+      const cand = ship ? { iso: ship.arr, cont: ship.cont, delayed: ship.delayDays > 0, src: linked ? 'ship' : 'shipGuess' }
         : (parseFlexDate(o.expectedDate) ? { iso: toIsoDate(parseFlexDate(o.expectedDate)), cont:'', delayed: o.isOverdue, src:'po' } : null);
       if (cand && (!m[k] || cand.iso < m[k].iso)) m[k] = cand;
     });
     return m;
-  }, [ordersEnriched, activeShipsBySupplier]);
+  }, [ordersEnriched, activeShipsBySupplier, shipLinks]);
   const etaFor = (p) => productEta[p.key] ?? productEta[p.sku] ?? productEta[p.name] ?? null;
 
   // ── Supplier list ───────────────────────────────────────────────
@@ -3440,20 +3571,63 @@ const renderProductRow = (p) => {
 
   // Weekly summary email: preview it, or send it now (it also goes out by itself every Sunday 07:00).
   const [digestMsg, setDigestMsg] = useState('');
-  const [digestPreview, setDigestPreview] = useState(null); // html of the weekly email, shown in a dialog
+  const [docPreview, setDocPreview] = useState(null); // { kind:'digest'|'print', title, html } shown in a dialog
   useEffect(() => {
-    if (!digestPreview) return;
-    const onKey = (e) => { if (e.key === 'Escape') setDigestPreview(null); };
+    if (!docPreview) return;
+    const onKey = (e) => { if (e.key === 'Escape') setDocPreview(null); };
     window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
-  }, [digestPreview]);
+  }, [docPreview]);
   const digestAction = async (send) => {
     setDigestMsg(send ? 'שולח…' : 'מכין תצוגה מקדימה…');
     try {
       const { data, error } = await supabase.functions.invoke('priority-sync', { body: { action: 'digest', send } });
       if (error) { let msg = error.message; try { const j = await error.context?.json?.(); if (j?.error) msg = j.error; } catch { /* generic */ } throw new Error(msg); }
       if (send) setDigestMsg(`נשלח אל ${(data.to||[]).join(', ')}`);
-      else { setDigestPreview(data.html); setDigestMsg(''); }
+      else { setDocPreview({ kind:'digest', title:'תצוגה מקדימה — סיכום שבועי', html: data.html }); setDigestMsg(''); }
     } catch (e) { setDigestMsg(`לא הצליח: ${e.message || e}`); }
+  };
+  const [alertsOn, setAlertsOnState] = useState(() => { try { return localStorage.getItem('alertsEnabled') !== 'false'; } catch { return true; } });
+  const setAlertsOn = (v) => { setAlertsOnState(v); try { localStorage.setItem('alertsEnabled', v ? 'true' : 'false'); } catch { /* sent to the server with the next save */ } };
+  const [alertsMsg, setAlertsMsg] = useState('');
+  const checkAlertsNow = async () => {
+    setAlertsMsg('בודק…');
+    try {
+      await flushAll();
+      const { data, error } = await supabase.functions.invoke('priority-sync', { body: { action: 'alerts' } });
+      if (error) { let msg = error.message; try { const j = await error.context?.json?.(); if (j?.error) msg = j.error; } catch { /* generic */ } throw new Error(msg); }
+      setAlertsMsg(data.skipped ? 'ההתראות כבויות' : data.baseline ? `נקבעה נקודת התחלה: ${data.known} פריטים שכבר ידועים לא יישלחו. מעכשיו יישלח רק מה שחדש.` : data.sent ? `נשלחה התראה (${data.sent} פריטים)` : 'אין התראות חדשות');
+    } catch (e) { setAlertsMsg(`לא הצליח: ${e.message || e}`); }
+  };
+  const docFrameRef = useRef(null);
+  const renderDocPreview = () => {
+    if (!docPreview) return null;
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const close = () => setDocPreview(null);
+    return (
+      <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/60" role="dialog" aria-modal="true" aria-label={docPreview.title}
+        onClick={e=>{ if (e.target===e.currentTarget) close(); }}>
+        <div className={`w-full max-w-3xl h-[calc(100dvh-1rem)] sm:h-[calc(100dvh-2rem)] flex flex-col rounded-2xl overflow-hidden shadow-2xl ${isDarkMode?'bg-slate-800':'bg-white'}`}>
+          <div className={`shrink-0 flex items-center gap-3 px-4 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-200'}`}>
+            <b className={`flex-1 ${strong}`}>{docPreview.title}</b>
+            {docPreview.kind==='digest' && (
+              <button type="button" onClick={()=>{ close(); if (window.confirm('לשלוח את הסיכום השבועי עכשיו?')) digestAction(true); }}
+                className="px-3 py-1.5 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">שלח עכשיו</button>
+            )}
+            {docPreview.kind==='print' && (
+              <>
+                {docPreview.onExcel && <button type="button" onClick={docPreview.onExcel} className={`px-3 py-1.5 rounded-lg text-sm font-semibold border ${isDarkMode?'border-slate-600 text-slate-200':'border-slate-300 text-slate-700'}`}>Excel</button>}
+                <button type="button" onClick={()=>{ try { docFrameRef.current?.contentWindow?.print(); } catch { window.print(); } }}
+                  className="px-3 py-1.5 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">הדפס / PDF</button>
+              </>
+            )}
+            <button type="button" onClick={close} aria-label="סגור" autoFocus
+              className={`p-2 rounded-full ${isDarkMode?'text-slate-300 hover:bg-slate-700':'text-slate-500 hover:bg-slate-100'}`}><X className="w-5 h-5"/></button>
+          </div>
+          <iframe ref={docFrameRef} title={docPreview.title} srcDoc={docPreview.html}
+            sandbox={docPreview.kind==='print' ? 'allow-same-origin allow-modals' : 'allow-popups allow-popups-to-escape-sandbox'} className="flex-1 w-full bg-slate-100 border-0"/>
+        </div>
+      </div>
+    );
   };
   const renderPriorityCard = () => {
     const muted = isDarkMode?'text-slate-400':'text-slate-500';
@@ -3461,21 +3635,6 @@ const renderProductRow = (p) => {
     const hasErr = Object.keys(prioSync.errors||{}).length > 0;
     return (
       <div className={`rounded-xl border p-4 space-y-3 ${isDarkMode?'bg-blue-500/5 border-blue-500/30':'bg-blue-50/60 border-blue-200'}`}>
-        {digestPreview && (
-          <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/60" role="dialog" aria-modal="true" aria-label="תצוגה מקדימה של הסיכום השבועי"
-            onClick={e=>{ if (e.target===e.currentTarget) setDigestPreview(null); }}>
-            <div className={`w-full max-w-3xl h-[calc(100dvh-1rem)] sm:h-[calc(100dvh-2rem)] flex flex-col rounded-2xl overflow-hidden shadow-2xl ${isDarkMode?'bg-slate-800':'bg-white'}`}>
-              <div className={`shrink-0 flex items-center gap-3 px-4 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-200'}`}>
-                <b className={`flex-1 ${strong}`}>תצוגה מקדימה — סיכום שבועי</b>
-                <button type="button" onClick={()=>{ setDigestPreview(null); if (window.confirm('לשלוח את הסיכום השבועי עכשיו?')) digestAction(true); }}
-                  className="px-3 py-1.5 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">שלח עכשיו</button>
-                <button type="button" onClick={()=>setDigestPreview(null)} aria-label="סגור" autoFocus
-                  className={`p-2 rounded-full ${isDarkMode?'text-slate-300 hover:bg-slate-700':'text-slate-500 hover:bg-slate-100'}`}><X className="w-5 h-5"/></button>
-              </div>
-              <iframe title="הסיכום השבועי" srcDoc={digestPreview} sandbox="allow-popups allow-popups-to-escape-sandbox" className="flex-1 w-full bg-slate-100 border-0"/>
-            </div>
-          </div>
-        )}
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex-1 min-w-[220px]">
             <p className={`font-bold text-sm ${strong}`}>סנכרון ישיר מ-Priority</p>
@@ -3504,6 +3663,14 @@ const renderProductRow = (p) => {
           <button type="button" onClick={()=>digestAction(false)} className={`font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>תצוגה מקדימה</button>
           <button type="button" onClick={()=>{ if (window.confirm('לשלוח את הסיכום השבועי עכשיו?')) digestAction(true); }} className={`font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>שלח עכשיו</button>
           {digestMsg && <span role="status">{digestMsg}</span>}
+        </div>
+        <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${muted}`}>
+          <label className="inline-flex items-center gap-2 cursor-pointer">
+            <input type="checkbox" checked={alertsOn} onChange={e=>setAlertsOn(e.target.checked)} className="w-4 h-4 accent-blue-600"/>
+            <span>התראות מיידיות במייל — מוצר מרכזי (A/B) שעומד להיגמר, או משלוח שתאריך ההגעה שלו נדחה</span>
+          </label>
+          {alertsOn && <button type="button" onClick={checkAlertsNow} className={`font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>בדוק עכשיו</button>}
+          {alertsMsg && <span role="status">{alertsMsg}</span>}
         </div>
         {prioSync.busy && prioSync.progress && (
           <div className={`h-2 rounded-full overflow-hidden ${isDarkMode?'bg-slate-700':'bg-blue-100'}`} role="progressbar" aria-valuemin={0} aria-valuemax={prioSync.progress.total} aria-valuenow={prioSync.progress.done}>
@@ -3970,6 +4137,36 @@ const renderProductRow = (p) => {
       </div>
     );
   };
+  // Production list for the in-house items: printable (or PDF) and Excel.
+  const openProductionList = (v) => {
+    const today = new Date();
+    const rows = v.items.filter(p => orderQtyFor(p) > 0)
+      .sort((a,b) => (a.statusRank??4)-(b.statusRank??4) || (a.effectiveCoverDays??9999)-(b.effectiveCoverDays??9999))
+      .map(p => {
+        const cover = p.effectiveCoverDays != null ? Math.max(0, Math.round(p.effectiveCoverDays)) : null;
+        const due = cover != null ? new Date(today.getTime() + cover*DAY_MS) : null;
+        return { sku: p.sku, name: p.name, stock: p.currentStock ?? '', avg: Math.round(p.avgMonthly||0), cover, due: due ? due.toLocaleDateString('he-IL') : '', qty: orderQtyFor(p), urgent: p.status==='now' };
+      });
+    const esc = (t) => String(t ?? '').replace(/[&<>"]/g, c => ({ '&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;' }[c]));
+    const html = `<!doctype html><html dir="rtl" lang="he"><head><meta charset="utf-8"><title>רשימת ייצור</title>
+<style>body{font-family:Arial,Helvetica,sans-serif;color:#0f172a;margin:24px}h1{font-size:20px;margin:0 0 4px}p{margin:0 0 14px;color:#475569;font-size:13px}
+table{width:100%;border-collapse:collapse;font-size:13px}th,td{border:1px solid #cbd5e1;padding:7px 8px;text-align:right}th{background:#f1f5f9}
+td.n{text-align:center;font-variant-numeric:tabular-nums}tr.u td{background:#fef2f2}.ok{width:44px}@media print{body{margin:10mm}}</style></head><body>
+<h1>רשימת ייצור — ${esc(today.toLocaleDateString('he-IL'))}</h1>
+<p>${rows.length} מוצרים · שורות באדום = דחוף (המלאי ייגמר לפני הזמן שנקבע לייצור) · "נדרש עד" = התאריך שבו המלאי צפוי להיגמר</p>
+<table><thead><tr><th>מק"ט</th><th>מוצר</th><th>מלאי</th><th>ממוצע לחודש</th><th>מספיק ל (ימים)</th><th>נדרש עד</th><th>כמות לייצור</th><th class="ok">בוצע</th></tr></thead><tbody>
+${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(x.name)}</td><td class="n">${esc(x.stock)}</td><td class="n">${x.avg}</td><td class="n">${x.cover ?? '—'}</td><td class="n">${esc(x.due)||'—'}</td><td class="n"><b>${x.qty.toLocaleString()}</b></td><td></td></tr>`).join('')}
+</tbody></table></body></html>`;
+    const onExcel = () => {
+      if (!window.XLSX) return;
+      const aoa = [['מק"ט','מוצר','מלאי','ממוצע לחודש','מספיק ל (ימים)','נדרש עד','כמות לייצור','דחוף'], ...rows.map(x => [x.sku, x.name, x.stock, x.avg, x.cover ?? '', x.due, x.qty, x.urgent ? 'כן' : ''])];
+      const wb = window.XLSX.utils.book_new(); const ws = window.XLSX.utils.aoa_to_sheet(aoa); ws['!cols'] = [{wch:14},{wch:40},{wch:8},{wch:12},{wch:12},{wch:12},{wch:12},{wch:6}];
+      if (!wb.Workbook) wb.Workbook = {}; wb.Workbook.Views = [{ RTL: true }];
+      window.XLSX.utils.book_append_sheet(wb, ws, 'רשימת ייצור');
+      window.XLSX.writeFile(wb, `רשימת_ייצור_${today.toISOString().slice(0,10)}.xlsx`);
+    };
+    setDocPreview({ kind:'print', title:`רשימת ייצור (${rows.length})`, html, onExcel });
+  };
   const renderVendors = () => {
     const muted = isDarkMode?'text-slate-400':'text-slate-500';
     const strong = isDarkMode?'text-slate-100':'text-slate-800';
@@ -4114,7 +4311,7 @@ const renderProductRow = (p) => {
                       <div className={`text-sm font-semibold tabular-nums ${p.currentStock!=null&&p.currentStock<=0?(isDarkMode?'text-red-300':'text-red-700'):strong}`}>{p.currentStock!=null?p.currentStock.toLocaleString():'—'}</div>
                       <div className="min-w-0">
                         <p className={`text-sm font-semibold ${strong}`}>{p.incomingQty>0?`${p.incomingQty.toLocaleString()} יח׳`:'—'}</p>
-                        {p.incomingQty>0 && eta && <p className={`text-xs truncate ${eta.delayed?(isDarkMode?'text-red-300':'text-red-700'):muted}`} title={eta.src==='ship'?'לפי דוח המשלח':'לפי תאריך האספקה בהזמנה'}>{eta.cont?`${eta.cont} · `:''}{isoToDisplay(eta.iso)}{eta.delayed?' · באיחור':''}</p>}
+                        {p.incomingQty>0 && eta && <p className={`text-xs truncate ${eta.delayed?(isDarkMode?'text-red-300':'text-red-700'):muted}`} title={eta.src==='ship'?'לפי דוח המשלח — משלוח שמשויך להזמנה':eta.src==='shipGuess'?'לפי המשלוח הקרוב של הספק — לא משויך להזמנה מסוימת':'לפי תאריך האספקה בהזמנה'}>{eta.cont?`${eta.cont} · `:''}{isoToDisplay(eta.iso)}{eta.delayed?' · באיחור':''}</p>}
                       </div>
                       <div className={`text-sm tabular-nums ${muted}`}>{p.currentStock!=null && p.suggestedOrder>0 ? p.suggestedOrder.toLocaleString() : '—'}</div>
                       <div className="flex items-center gap-1">
@@ -4149,6 +4346,10 @@ const renderProductRow = (p) => {
             {Object.keys(totalByCur).length>0 && (
               <div className="flex justify-between text-sm"><span className={muted}>סה״כ משוער</span><b className={strong}>{Object.entries(totalByCur).map(([c,a])=>formatUnitCost(Math.round(a), c==='ILS'?null:c)).join(' + ')}</b></div>
             )}
+            {v.ownMade && (
+              <button type="button" disabled={!toOrder.length} onClick={()=>openProductionList(v)}
+                className="w-full py-2.5 rounded-xl bg-violet-600 text-white text-sm font-bold disabled:opacity-40 hover:bg-violet-700">רשימת ייצור — הדפסה / Excel</button>
+            )}
             <button type="button" disabled={!toOrder.length} onClick={()=>copyVendorList(v)}
               className="w-full py-2.5 rounded-xl bg-slate-900 text-white text-sm font-bold disabled:opacity-40 hover:bg-slate-800">
               {copiedVendor===v.name ? 'הועתק ✓' : copiedVendor==='error' ? 'ההעתקה נחסמה בדפדפן' : 'העתק רשימה (מק״ט · כמות · שם)'}
@@ -4172,7 +4373,7 @@ const renderProductRow = (p) => {
           <Truck className="w-5 h-5 text-blue-500"/>
           <div className="flex-1 min-w-[240px]">
             <p className={`font-bold ${strong}`}>{meta ? `קובץ המשלח נטען ${new Date(meta.at).toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}` : 'עוד לא נטען קובץ מהמשלח'}</p>
-            <p className={`text-sm ${muted}`}>מעלים כל יום את האקסל שמגיע מהמשלח ("דוח הזמנות ללקוחות"). שינוי בתאריך ההגעה מסומן. הקובץ לא מפרט מוצרים — לכן מוצג מה שפתוח בהזמנות מאותו ספק.</p>
+            <p className={`text-sm ${muted}`}>מעלים כל יום את האקסל שמגיע מהמשלח ("דוח הזמנות ללקוחות"). שינוי בתאריך ההגעה מסומן. הקובץ לא מפרט מוצרים ולא מספר הזמנה — לכן בכל משלוח מסמנים איזו הזמנה בו (פעם אחת). אם המשלח או הספק רושמים את מספר ההזמנה בשדה האסמכתא, השיוך נעשה לבד.</p>
           </div>
           <label className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold cursor-pointer ${meta?(isDarkMode?'border border-slate-600 text-slate-200 hover:bg-slate-700':'border border-slate-300 text-slate-700 bg-white hover:bg-slate-50'):'bg-blue-600 text-white hover:bg-blue-700'}`}>
             {fileBusy==='shipments'?<Loader2 className="w-4 h-4 animate-spin"/>:<Upload className="w-4 h-4"/>} {meta?'החלף בקובץ של היום':'העלה את קובץ המשלח'}
@@ -4198,6 +4399,10 @@ const renderProductRow = (p) => {
         </div>
         {sortRows('ships', shipmentsEnriched, { stage: s => s.stage.idx, delayDays: s => s.delayDays || null }).map(s => {
           const orders = s.matched ? ordersEnriched.filter(o => o.supplier === s.matched) : [];
+          const supPos = [...new Set(orders.map(o => o.poNumber).filter(Boolean))].sort();
+          const linkedPos = shipLinks.byShip[s.id] || [];
+          const how = shipLinks.howByShip[s.id];
+          const shownOrders = linkedPos.length ? orders.filter(o => linkedPos.includes(o.poNumber)) : orders;
           return (
             <section key={s.id} className={`rounded-2xl border p-5 space-y-4 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'} ${s.stage.idx===2?'opacity-75':''}`}>
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
@@ -4238,16 +4443,38 @@ const renderProductRow = (p) => {
                   </select>
                 </div>
               </div>
-              <div>
-                <p className={`text-xs font-semibold mb-1.5 ${muted}`}>{s.matched ? `פתוח בהזמנות מ"${s.matched}" (${orders.length} שורות)` : 'שייך ספק כדי לראות מה כנראה במשלוח'}</p>
-                {orders.length>0 && (
+              <div className="space-y-2">
+                {s.matched && supPos.length > 0 && (
+                  <div>
+                    <p className={`text-xs font-semibold mb-1.5 ${muted}`}>
+                      איזו הזמנה במשלוח הזה? {how==='manual'?'(שייכת ידנית)':how==='ref'?'(זוהה מהאסמכתא)':how==='only'?'(הזמנה פתוחה יחידה של הספק)':'(לא שויך — סמן את ההזמנות שבמשלוח)'}
+                    </p>
+                    <div className="flex flex-wrap gap-1.5">
+                      {supPos.map(po => {
+                        const on = linkedPos.includes(po);
+                        const elsewhere = !on && shipLinks.shipByPo[po] && shipLinks.shipByPo[po].id !== s.id;
+                        return (
+                          <button key={po} type="button" aria-pressed={on}
+                            onClick={() => { const next = { ...shipPoManual }; const cur = new Set(linkedPos); if (on) cur.delete(po); else cur.add(po); next[s.id] = [...cur]; saveShipPo(next); }}
+                            title={elsewhere ? `משויכת גם למשלוח ${shipLinks.shipByPo[po].cont || shipLinks.shipByPo[po].id}` : undefined}
+                            className={`px-2.5 py-1 rounded-lg text-xs font-mono font-semibold border ${on ? 'bg-blue-600 border-blue-600 text-white' : (isDarkMode?'border-slate-600 text-slate-300 hover:bg-slate-700':'border-slate-300 text-slate-600 hover:bg-slate-50')}`}>
+                            {on ? '✓ ' : ''}{po}{elsewhere ? ' ·' : ''}
+                          </button>
+                        );
+                      })}
+                      {how==='manual' && <button type="button" onClick={() => { const next = { ...shipPoManual }; delete next[s.id]; saveShipPo(next); }} className={`text-xs underline ${muted}`}>חזור לזיהוי אוטומטי</button>}
+                    </div>
+                  </div>
+                )}
+                <p className={`text-xs font-semibold mb-1.5 ${muted}`}>{!s.matched ? 'שייך ספק כדי לראות מה כנראה במשלוח' : linkedPos.length ? `במשלוח: ${shownOrders.length} שורות מ-${linkedPos.length} הזמנות` : `לא שויכה הזמנה — אלה כל השורות הפתוחות של "${s.matched}" (${orders.length})`}</p>
+                {shownOrders.length>0 && (
                   <div className="flex flex-wrap gap-1.5">
-                    {orders.slice(0,24).map(o => (
+                    {shownOrders.slice(0,24).map(o => (
                       <span key={o.id} className={`inline-flex items-center gap-1.5 px-2 py-1 rounded-lg text-xs ${isDarkMode?'bg-slate-900/60 text-slate-200':'bg-slate-50 text-slate-700'}`}>
                         <span className={`font-mono ${muted}`}>{o.productKey!==o.productName?o.productKey:''}</span>{o.productName}<b>{o.orderedQty.toLocaleString()}</b>{o.poNumber && <span className={muted}>{o.poNumber}</span>}
                       </span>
                     ))}
-                    {orders.length>24 && <span className={`text-xs ${muted}`}>ועוד {orders.length-24}</span>}
+                    {shownOrders.length>24 && <span className={`text-xs ${muted}`}>ועוד {shownOrders.length-24}</span>}
                   </div>
                 )}
               </div>
@@ -4297,6 +4524,7 @@ const renderProductRow = (p) => {
       </div>
     )}
     {renderProductDrawer()}
+    {renderDocPreview()}
     <div className="space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-500">
 
 
@@ -4792,6 +5020,24 @@ const renderProductRow = (p) => {
                   כשאין תאריך אספקה צפוי בפועל, המשבצת מוערכת מתאריך ההזמנה + זמן האספקה (ספציפי לספק אם הוגדר, אחרת הסליידר הגלובלי) · תחזית תכנונית, לא כולל תנאי תשלום/אשראי ספק
                 </p>
               </div>
+              {isNarrow ? (
+                <ul className={`divide-y ${isDarkMode?'divide-slate-700/60':'divide-slate-100'}`}>
+                  {sortRows('orders', sortedOpenOrders).map(o => (
+                    <li key={o.id} className={`px-4 py-3 space-y-1 ${o.isOverdue?(isDarkMode?'bg-red-900/10':'bg-red-50/50'):''}`}>
+                      <div className="flex items-start gap-2">
+                        <div className="flex-1 min-w-0">
+                          <p className={`font-semibold text-sm leading-snug ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{o.productName}</p>
+                          <p className={`text-[11px] ${isDarkMode?'text-slate-400':'text-slate-500'}`}><span className="font-mono">{o.productKey!==o.productName?o.productKey:''}</span>{o.supplier?` · ${o.supplier}`:''}</p>
+                        </div>
+                        <b className={`shrink-0 text-sm tabular-nums ${isDarkMode?'text-blue-300':'text-blue-700'}`}>{o.orderedQty.toLocaleString()} יח׳</b>
+                      </div>
+                      <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+                        <span className="font-mono font-semibold">{o.poNumber||'—'}</span>{o.poStatus?` · ${o.poStatus}`:''} · הוזמן {o.orderDate||'—'} · אספקה <span className={o.isOverdue?'text-red-500 font-bold':''}>{o.expectedDate||'—'}{o.isOverdue?` (באיחור ${o.daysLate} ימים)`:''}</span>{o.valueILS!=null?` · ${formatCurrency(o.valueILS)}`:''}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              ) : (
               <div className="overflow-x-auto">
                 <table className={`w-full text-sm text-right min-w-[780px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
                   <thead className={`text-[11px] font-semibold uppercase tracking-widest ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
@@ -4873,6 +5119,7 @@ const renderProductRow = (p) => {
                   </tbody>
                 </table>
               </div>
+              )}
               <div className={`px-5 py-3 border-t text-xs flex items-center gap-2 ${isDarkMode?'border-slate-700 text-slate-500':'border-slate-100 text-slate-400'}`}>
                 <Info className="w-3.5 h-3.5 shrink-0"/>
                 הרשימה מתעדכנת מ-Priority בכל סנכרון (נשלחה / אושרה) — הזמנה שהתקבלה יוצאת מהרשימה לבד | כמויות בדרך מחושבות אוטומטית בהמלצות הרכש
@@ -5426,6 +5673,7 @@ const renderProductRow = (p) => {
           </div>
         </div>
 
+        {isNarrow ? renderProductCards() : (
         <div className="overflow-x-auto -mx-1 px-1">
           <table data-proctable className={`text-sm text-right ${isDarkMode?'text-slate-300':'text-slate-600'}`} style={{tableLayout:'fixed', width: PROC_COL_KEYS.reduce((s,k)=>s+(colWidths[k]||PROC_COL_DEFAULTS[k]),0)}}>
             <colgroup>{PROC_COL_KEYS.map(k=><col key={k} data-colkey={k} style={{width: colWidths[k]||PROC_COL_DEFAULTS[k]}}/>)}</colgroup>
@@ -5441,7 +5689,8 @@ const renderProductRow = (p) => {
             </tbody>
           </table>
         </div>
-        {visibleCount < filtered.length && (
+        )}
+        {!isNarrow && visibleCount < filtered.length && (
           <div className={`px-5 py-2 text-xs text-center border-t ${isDarkMode?'border-slate-700 text-slate-500':'border-slate-100 text-slate-400'}`}>
             מציג {visibleCount.toLocaleString()} מתוך {filtered.length.toLocaleString()} מוצרים — גלול למטה לעוד
           </div>
@@ -5798,6 +6047,7 @@ const App = () => {
   const [salesFileData, setSalesData] = useState([]); // rows from uploaded monthly files only
   // Sales-invoice lines saved by the procurement page (Priority sync or uploaded lines file).
   const [procSalesLines, setProcSalesLines] = useState([]);
+  const stoppedPairs = useMemo(() => stoppedBuying(procSalesLines), [procSalesLines]);
   useEffect(() => { idbGet('procSalesLines').then(v => { if (Array.isArray(v)) setProcSalesLines(v); }).catch(() => {}); }, []);
   // What every tab shows: months covered by the invoice lines come from them, older months from the files.
   const salesData = useMemo(() => mergeLinesIntoMonthly(salesFileData, procSalesLines, { includeExtra: true }), [salesFileData, procSalesLines]);
@@ -7248,6 +7498,7 @@ const App = () => {
               productData={customerProductEff}
               priorityRange={salesLinesRange}
               customerCards={priorityCustomers}
+              stoppedPairs={stoppedPairs}
               onSyncPriority={requestPrioritySync}
               lastSyncAt={lastSyncAt}
               fileCounts={{ monthly: customerMonthlyData.length, product: customerProductData.length }}

@@ -565,7 +565,24 @@ var priceIncreases = (hist, { sinceIso, minPct = 5 } = {}) => {
   });
   return out.sort((x, y) => x.d < y.d ? 1 : -1);
 };
-var stockTimelines = ({ stockHistory, currentStock = {}, salesLines = [], purchaseLines = [], skus, fromIso, toIso }) => {
+var productStartDates = ({ itemsExtra = {}, purchaseLines = [] } = {}) => {
+  const out = {};
+  let firstAny = null;
+  const firstBuy = {};
+  purchaseLines.forEach((l) => {
+    if (!l.d) return;
+    if (!firstAny || l.d < firstAny) firstAny = l.d;
+    if (l.k && l.q > 0 && (!firstBuy[l.k] || l.d < firstBuy[l.k])) firstBuy[l.k] = l.d;
+  });
+  Object.entries(itemsExtra).forEach(([k, ex]) => {
+    if (ex?.created) out[k] = ex.created;
+  });
+  if (firstAny) Object.entries(firstBuy).forEach(([k, d]) => {
+    if (!out[k] && Date.parse(d) - Date.parse(firstAny) > 60 * 864e5) out[k] = d;
+  });
+  return out;
+};
+var stockTimelines = ({ stockHistory, currentStock = {}, salesLines = [], purchaseLines = [], skus, fromIso, toIso, startBy = {} }) => {
   const want = new Set(skus);
   const mv = {};
   salesLines.forEach((l) => {
@@ -597,7 +614,9 @@ var stockTimelines = ({ stockHistory, currentStock = {}, salesLines = [], purcha
     if (q == null && !Object.keys(sn).length) return;
     const series = [];
     let src = "calc";
+    const start = startBy[k] || "";
     for (const d of days) {
+      if (start && d < start) break;
       if (sn[d] != null) {
         q = sn[d];
         src = "snap";
@@ -1525,7 +1544,7 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
   const salesData = mergeLinesIntoMonthly(sets.dashboardSalesData || [], linesForPlan);
   const from = iso2(now - 364 * DAY_MS);
   const skus = [...new Set(salesLines.filter((l) => l.d >= from).map((l) => l.k))].filter((k) => k && stockMap[k] != null);
-  const stockouts = stockoutSummary(stockTimelines({ stockHistory: sets.stockHistory, currentStock: stockMap, salesLines, purchaseLines, skus, fromIso: from, toIso: today }));
+  const stockouts = stockoutSummary(stockTimelines({ stockHistory: sets.stockHistory, currentStock: stockMap, salesLines, purchaseLines, skus, fromIso: from, toIso: today, startBy: productStartDates({ itemsExtra: sets.procItemsExtra || {}, purchaseLines }) }));
   const knownSuppliers = [.../* @__PURE__ */ new Set([...purchaseLines.map((l) => l.s), ...Object.values(supplierMap).filter(Boolean), ...openOrders.map((o) => o.supplier).filter(Boolean)])];
   const supOf = (s) => shipSupOverride[s.sup] === "" ? null : shipSupOverride[s.sup] ?? matchShipSupplier(s.sup, knownSuppliers);
   const transitBySupplier = {};
@@ -1537,7 +1556,7 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
     }
   });
   const leadStats = supplierLeadTimes({ purchaseLines, poMeta: sets.procPoMeta || {}, transitBySupplier, sinceIso: iso2(now - 540 * DAY_MS) });
-  const leadFor = makeLeadFor({ leadStats, leadTimeMap: app.procurementLeadTime || {}, leadAddTransit: app.procLeadAddTransit || {}, leadTime: 1 });
+  const leadFor = makeLeadFor({ leadStats, leadTimeMap: app.procurementLeadTime || {}, leadAddTransit: app.procLeadAddTransit || {}, leadTime: app.procDefaultLeadTime != null && Number.isFinite(Number(app.procDefaultLeadTime)) ? Number(app.procDefaultLeadTime) : 1 });
   const ordersEnriched = enrichOrders({ openOrders, currencyMap, exchangeRates, costMap });
   const purchBySku = {}, lastSupBySku = {};
   purchaseLines.forEach((l) => {
@@ -1548,7 +1567,7 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
   const products = computeProducts({
     salesData,
     excludeCurrentMonth: app.excludeCurrentMonth !== false,
-    avgWindowMonths: 12,
+    avgWindowMonths: Number.isFinite(Number(app.procAvgWindow)) && app.procAvgWindow != null ? Number(app.procAvgWindow) : 12,
     stockouts,
     skipStockoutMonths: app.procSkipStockoutMonths !== "0" && app.procSkipStockoutMonths !== 0,
     stockMap,
@@ -1565,7 +1584,7 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
     incomingMap: incomingMapOf(openOrders),
     overdueByProduct: overdueByProductOf(ordersEnriched),
     moqMap: app.procurementMOQ || {},
-    monthsToStock: 2,
+    monthsToStock: Number(app.procMonthsToStock) || 2,
     supplierConcentration: supplierConcentrationOf(supplierMap),
     outliers,
     outlierDecisions: decisions
@@ -1615,6 +1634,21 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
     excessValue,
     excessPOs: excessPOs.slice(0, 10).map((p) => ({ name: p.name, sku: p.sku, supplier: p.supplier, poExcess: p.poExcess, value: p.poExcessValue })),
     excessPOCount: excessPOs.length,
+    alertSource: {
+      stock: products.filter((p) => p.status === "now" && /^[AB]/.test(p.abc || "") && p.avgMonthly > 0).map((p) => ({
+        k: p.sku || p.key,
+        name: p.name,
+        supplier: p.supplier || "",
+        ownMade: !!p.ownMade,
+        stock: p.currentStock,
+        incoming: p.incomingQty || 0,
+        coverDays: p.effectiveCoverDays != null ? Math.round(p.effectiveCoverDays) : null,
+        leadMonths: p.effectiveLeadTime,
+        qty: p.suggestedOrder,
+        abc: p.abc
+      })),
+      ships: delayed.map((s) => ({ id: s.id, cont: s.cont, sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays }))
+    },
     week,
     productsUp: productMoves.up.slice(0, 10),
     productsDown: productMoves.down.slice(0, 6),
@@ -1646,6 +1680,37 @@ var renderDigestHtml = (d, { siteUrl }) => {
     <tr><td style="padding:14px 22px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:11px">\u05E0\u05E9\u05DC\u05D7 \u05D0\u05D5\u05D8\u05D5\u05DE\u05D8\u05D9\u05EA \u05DB\u05DC \u05D9\u05D5\u05DD \u05E8\u05D0\u05E9\u05D5\u05DF \u05DE\u05D4\u05D0\u05EA\u05E8 BizData \xB7 \u05D4\u05E0\u05EA\u05D5\u05E0\u05D9\u05DD \u05DE-Priority (\u05E7\u05E8\u05D9\u05D0\u05D4 \u05D1\u05DC\u05D1\u05D3)</td></tr>
   </table></td></tr></table></body></html>`;
 };
+var pickAlerts = (d, sent = {}, { now = Date.now(), repeatDays = 14 } = {}) => {
+  const fresh = (key) => !sent[key] || now - Date.parse(sent[key]) > repeatDays * 864e5;
+  const stock = (d.alertSource?.stock || []).filter((x) => fresh(`stock:${x.k}`)).sort((x, y) => String(x.abc).localeCompare(String(y.abc)) || (x.coverDays ?? 999) - (y.coverDays ?? 999));
+  const ships = (d.alertSource?.ships || []).filter((x) => !sent[`ship:${x.id}:${x.arr}`]);
+  return { stock, ships, keys: [...stock.map((x) => `stock:${x.k}`), ...ships.map((x) => `ship:${x.id}:${x.arr}`)] };
+};
+var renderAlertsHtml = (a, { siteUrl }) => {
+  const row = (cells) => `<tr>${cells.map((c) => `<td align="right" style="padding:6px;border-bottom:1px solid #f1f5f9;font-size:13px">${c}</td>`).join("")}</tr>`;
+  const head = (cells) => `<tr style="background:#f1f5f9;color:#475569">${cells.map((c) => `<th align="right" style="padding:6px;font-size:12px;font-weight:600">${esc(c)}</th>`).join("")}</tr>`;
+  const stockRows = a.stock.slice(0, 25).map((x) => row([
+    `<b>${esc(x.name)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)} \xB7 ${esc(x.ownMade ? "\u05D9\u05D9\u05E6\u05D5\u05E8 \u05E2\u05E6\u05DE\u05D9" : x.supplier || "\u05E1\u05E4\u05E7 \u05DC\u05D0 \u05D9\u05D3\u05D5\u05E2")}</span>`,
+    x.stock ?? "\u2014",
+    x.incoming || "\u2014",
+    x.coverDays == null ? "\u2014" : `<b style="color:#C8322B">${x.coverDays} \u05D9\u05DE\u05D9\u05DD</b>`,
+    `${x.leadMonths} \u05D7\u05F3`,
+    `<b>${(x.qty || 0).toLocaleString("en-US")}</b> ${x.ownMade ? "\u05DC\u05D9\u05D9\u05E6\u05E8" : "\u05DC\u05D4\u05D6\u05DE\u05D9\u05DF"}`
+  ]));
+  const shipRows = a.ships.map((x) => row([esc(x.cont || "\u2014"), esc(x.sup), esc(isoToDisplay(x.from || "")), `<b>${esc(isoToDisplay(x.arr || ""))}</b>`, `<b style="color:#C8322B">+${x.delayDays} \u05D9\u05DE\u05D9\u05DD</b>`]));
+  return `<!doctype html><html dir="rtl" lang="he"><body style="margin:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:16px 8px">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#fff;border-radius:12px;overflow:hidden" dir="rtl">
+  <tr><td style="background:#C8322B;color:#fff;padding:14px 18px;font-size:17px;font-weight:bold">\u05D4\u05EA\u05E8\u05D0\u05D4 \u2014 \u05D3\u05D5\u05E8\u05E9 \u05D8\u05D9\u05E4\u05D5\u05DC \u05E2\u05DB\u05E9\u05D9\u05D5</td></tr>
+  ${a.stock.length ? `<tr><td style="padding:14px 18px"><h2 style="margin:0 0 8px;font-size:15px;color:#0f172a">\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DE\u05E8\u05DB\u05D6\u05D9\u05D9\u05DD \u05E9\u05E2\u05D5\u05DE\u05D3\u05D9\u05DD \u05DC\u05D4\u05D9\u05D2\u05DE\u05E8 (${a.stock.length})</h2>
+    <p style="margin:0 0 8px;font-size:13px;color:#475569">\u05D4\u05DE\u05DC\u05D0\u05D9 + \u05DE\u05D4 \u05E9\u05D1\u05D3\u05E8\u05DA \u05DC\u05D0 \u05D9\u05D7\u05D6\u05D9\u05E7 \u05E2\u05D3 \u05E9\u05D4\u05D6\u05DE\u05E0\u05D4 \u05D7\u05D3\u05E9\u05D4 \u05EA\u05D2\u05D9\u05E2.</p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(["\u05DE\u05D5\u05E6\u05E8", "\u05DE\u05DC\u05D0\u05D9", "\u05D1\u05D3\u05E8\u05DA", "\u05DE\u05E1\u05E4\u05D9\u05E7 \u05DC", "\u05D6\u05DE\u05DF \u05D0\u05E1\u05E4\u05E7\u05D4", "\u05DE\u05D5\u05DE\u05DC\u05E5"])}${stockRows.join("")}</table>${a.stock.length > 25 ? `<p style="margin:8px 0 0;font-size:12px;color:#64748b">\u05D5\u05E2\u05D5\u05D3 ${a.stock.length - 25} \u2014 \u05D4\u05E8\u05E9\u05D9\u05DE\u05D4 \u05D4\u05DE\u05DC\u05D0\u05D4 \u05D1\u05D0\u05EA\u05E8</p>` : ""}</td></tr>` : ""}
+  ${a.ships.length ? `<tr><td style="padding:14px 18px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 8px;font-size:15px;color:#0f172a">\u05DE\u05E9\u05DC\u05D5\u05D7\u05D9\u05DD \u05E9\u05E0\u05D3\u05D7\u05D5 (${a.ships.length})</h2>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(["\u05DE\u05DB\u05D5\u05DC\u05D4", "\u05E1\u05E4\u05E7", "\u05D4\u05D9\u05D4", "\u05E2\u05DB\u05E9\u05D9\u05D5", "\u05D3\u05D7\u05D9\u05D9\u05D4"])}${shipRows.join("")}</table></td></tr>` : ""}
+  <tr><td style="padding:12px 18px;border-top:1px solid #e2e8f0"><a href="${esc(siteUrl)}" style="color:#1F5FBF;font-size:13px">\u05E4\u05EA\u05D7 \u05D1\u05D0\u05EA\u05E8 \u2190</a>
+    <span style="color:#94a3b8;font-size:11px"> \xB7 \u05DB\u05DC \u05E4\u05E8\u05D9\u05D8 \u05E0\u05E9\u05DC\u05D7 \u05E4\u05E2\u05DD \u05D0\u05D7\u05EA (\u05DE\u05D5\u05E6\u05E8 \u2014 \u05E9\u05D5\u05D1 \u05E8\u05E7 \u05D0\u05D7\u05E8\u05D9 \u05E9\u05D1\u05D5\u05E2\u05D9\u05D9\u05DD \u05D0\u05DD \u05E2\u05D3\u05D9\u05D9\u05DF \u05D7\u05E1\u05E8)</span></td></tr>
+  </table></td></tr></table></body></html>`;
+};
 export {
   FULL_MONTHS,
   MissingFieldError,
@@ -1660,7 +1725,9 @@ export {
   finalizeSync,
   isoDaysAgo,
   monthWindows,
+  pickAlerts,
   planSteps,
+  renderAlertsHtml,
   renderDigestHtml,
   runStep,
   syncMonthsOf

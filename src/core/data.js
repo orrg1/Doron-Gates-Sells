@@ -587,6 +587,31 @@ export const matchShipSupplier = (fwdName, candidates) => {
   return bestScore >= 5 ? best : null;
 };
 
+// Which open POs travel in which shipment. The forwarder file has no PO number, so:
+// 1) the person's own choice (manual: { shipId: [po, …] }) wins;
+// 2) a PO number written in the shipment's reference field;
+// 3) a supplier with exactly one open PO and one active shipment → that PO.
+// Anything else stays unlinked — the app then says "by supplier, not by order".
+export const linkShipmentsToPOs = ({ shipments = [], orders = [], manual = {} }) => {
+  const posBySup = {};
+  orders.forEach(o => { if (o.poNumber && o.supplier) (posBySup[o.supplier] ||= new Set()).add(o.poNumber); });
+  const active = shipments.filter(s => s.matched && s.stage?.idx < 2);
+  const activeBySup = {}; active.forEach(s => { (activeBySup[s.matched] ||= []).push(s); });
+  const byShip = {}, howByShip = {};
+  shipments.forEach(s => {
+    if (manual[s.id]) { byShip[s.id] = manual[s.id].slice(); howByShip[s.id] = 'manual'; return; }
+    const pos = [...(posBySup[s.matched] || [])];
+    const ref = String(s.ref || '').toUpperCase();
+    const inRef = pos.filter(po => ref && ref.includes(String(po).toUpperCase()));
+    if (inRef.length) { byShip[s.id] = inRef; howByShip[s.id] = 'ref'; return; }
+    if (s.stage?.idx < 2 && pos.length === 1 && (activeBySup[s.matched] || []).length === 1) { byShip[s.id] = pos; howByShip[s.id] = 'only'; return; }
+    byShip[s.id] = []; howByShip[s.id] = null;
+  });
+  const shipByPo = {};
+  shipments.forEach(s => (byShip[s.id] || []).forEach(po => { const cur = shipByPo[po]; if (!cur || (s.arr && (!cur.arr || s.arr < cur.arr))) shipByPo[po] = s; }));
+  return { byShip, howByShip, shipByPo };
+};
+
 // ─── Applying an import to the stored state (used by file uploads AND the server sync) ───
 
 const byDateDesc = (a, b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0;
@@ -789,7 +814,17 @@ export const supplierPriceIndex = (hist, { now = Date.now(), recentDays = 180 } 
 // only changes stored), and for the time before the first snapshot an estimate worked
 // backwards from the first known balance: earlier stock = later stock + sales − purchases.
 // The estimate ignores counts/adjustments/own production, so it is marked as such.
-export const stockTimelines = ({ stockHistory, currentStock = {}, salesLines = [], purchaseLines = [], skus, fromIso, toIso }) => {
+// When each product started to exist: the item's creation date in Priority. Without one, the first
+// supplier invoice — but only when the invoice history clearly starts earlier (so it is a real first buy).
+export const productStartDates = ({ itemsExtra = {}, purchaseLines = [] } = {}) => {
+  const out = {}; let firstAny = null; const firstBuy = {};
+  purchaseLines.forEach(l => { if (!l.d) return; if (!firstAny || l.d < firstAny) firstAny = l.d; if (l.k && l.q > 0 && (!firstBuy[l.k] || l.d < firstBuy[l.k])) firstBuy[l.k] = l.d; });
+  Object.entries(itemsExtra).forEach(([k, ex]) => { if (ex?.created) out[k] = ex.created; });
+  if (firstAny) Object.entries(firstBuy).forEach(([k, d]) => { if (!out[k] && Date.parse(d) - Date.parse(firstAny) > 60 * 86400000) out[k] = d; });
+  return out;
+};
+// startBy: { sku: 'YYYY-MM-DD' } — days before the product existed are left out (not counted as "out of stock").
+export const stockTimelines = ({ stockHistory, currentStock = {}, salesLines = [], purchaseLines = [], skus, fromIso, toIso, startBy = {} }) => {
   const want = new Set(skus);
   const mv = {}; // sku → { day → net change that day (+in, −out) }
   salesLines.forEach(l => { if (!l.x && want.has(l.k) && l.d >= fromIso && l.d <= toIso) { const m = (mv[l.k] ||= {}); m[l.d] = (m[l.d] || 0) - l.q; } });
@@ -807,7 +842,9 @@ export const stockTimelines = ({ stockHistory, currentStock = {}, salesLines = [
     let q = currentStock[k] ?? null;
     if (q == null && !Object.keys(sn).length) return;
     const series = []; let src = 'calc';
+    const start = startBy[k] || '';
     for (const d of days) {             // newest → oldest; value = balance at END of day d
+      if (start && d < start) break;    // before the item was created
       if (sn[d] != null) { q = sn[d]; src = 'snap'; }
       else if (q == null) continue;
       series.push({ d, q: Math.max(0, Math.round(q * 100) / 100), src, neg: q < 0 });
@@ -829,6 +866,47 @@ export const stockoutSummary = (timelines) => {
     out[k] = { outDays, days: s.length, monthsOut, estimated: s.some(x => x.src === 'calc') };
   });
   return out;
+};
+
+// ─── Customers who stopped buying a product they used to buy regularly ───
+// A pair (customer, product) counts as regular when it was bought on 4+ different months in the
+// year before the last purchase. It has stopped when the silence since the last purchase is well
+// beyond the usual gap: more than max(60 days, 2.5 × the median gap) — and less than a year
+// (older than that is a lost customer, a different conversation).
+export const stoppedBuying = (lines = [], { now = Date.now(), minMonths = 4 } = {}) => {
+  const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const today = iso(now), yearAgo = iso(now - 365 * 86400000), lookFrom = iso(now - 730 * 86400000);
+  const pairs = {}, custLast = {};
+  lines.forEach(l => {
+    if (l.x || !l.k || !(l.q > 0) || l.d < lookFrom || l.d > today) return;
+    const ck = l.cid || l.c; if (!ck) return;
+    if (!custLast[ck] || l.d > custLast[ck]) custLast[ck] = l.d;
+    const p = (pairs[ck + '|' + l.k] ||= { cid: l.cid, c: l.c, k: l.k, n: l.n, days: new Set(), q: 0, v: 0, lines: [] });
+    p.days.add(l.d); p.lines.push(l);
+  });
+  const DAY = 86400000, out = [];
+  Object.values(pairs).forEach(p => {
+    const days = [...p.days].sort();
+    const last = days[days.length - 1];
+    if (last < yearAgo) return;
+    const fromIso = iso(Date.parse(last) - 365 * DAY);
+    const recent = days.filter(d => d >= fromIso);
+    const months = new Set(recent.map(d => d.slice(0, 7)));
+    if (months.size < minMonths) return;
+    const gaps = []; for (let i = 1; i < recent.length; i++) gaps.push((Date.parse(recent[i]) - Date.parse(recent[i - 1])) / DAY);
+    gaps.sort((a, b) => a - b);
+    const medGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 30;
+    const silence = Math.round((now - Date.parse(last)) / DAY);
+    const limit = Math.max(60, medGap * 2.5);
+    if (silence <= limit) return;
+    let q = 0, v = 0; p.lines.forEach(l => { if (l.d >= fromIso) { q += l.q; v += l.v || 0; } });
+    const spanMonths = Math.max(1, (Date.parse(last) - Date.parse(recent[0])) / DAY / 30.4);
+    const ck = p.cid || p.c;
+    out.push({ cid: p.cid, c: p.c, k: p.k, n: p.n, last, silence, everyDays: Math.round(medGap), timesBought: recent.length, months: months.size,
+      monthlyQty: Math.round(q / spanMonths * 10) / 10, yearlyValue: Math.round(v / spanMonths * 12),
+      customerLast: custLast[ck], customerActive: custLast[ck] && (now - Date.parse(custLast[ck])) / DAY <= 60 });
+  });
+  return out.sort((a, b) => b.yearlyValue - a.yearlyValue);
 };
 
 // ─── Returns & credits (sales invoice lines) ───
