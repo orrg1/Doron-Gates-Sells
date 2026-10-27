@@ -135,7 +135,7 @@ async function createJob(kind: 'incremental' | 'full', trigger: string, by: stri
   const { data: open } = await sb.from('sync_jobs').select('*').in('status', ['queued', 'running']).order('id').limit(1);
   if (open && open.length) return { job: open[0], existing: true };
   // what to pull: incremental re-reads the last OVERLAP_DAYS; a slot with no data yet is pulled in full
-  const st = await readState(['prioritySyncThrough']);
+  const st = await readState(['prioritySyncThrough', 'procPoDues']);
   const { data: sets } = await sb.from('datasets').select('key,rows').in('key', ['procSalesLines', 'procPurchaseLines', 'procPoMeta']);
   const has = (k: string) => (sets || []).some((s: any) => s.key === k && (s.rows ?? 1) > 0);
   const through = st.prioritySyncThrough || {};
@@ -145,7 +145,7 @@ async function createJob(kind: 'incremental' | 'full', trigger: string, by: stri
     return d.toISOString().slice(0, 10);
   };
   const since = { salesLines: sinceFor('salesLines', 'procSalesLines'), purchaseLines: sinceFor('purchaseLines', 'procPurchaseLines') };
-  const { steps, sSince, pSince } = planSteps({ since, poFull: kind === 'full' || !(sets || []).some((x: any) => x.key === 'procPoMeta') });
+  const { steps, sSince, pSince } = planSteps({ since, poFull: kind === 'full' || !st.procPoDues || !(sets || []).some((x: any) => x.key === 'procPoMeta') });
   const job: any = { kind, trigger, requested_by: by, steps: steps.map((s: any) => ({ ...s, done: false, attempts: 0 })), plan: { since, sSince, pSince }, log: [] };
   addLog(job, since.salesLines ? `סנכרון מהיר — חשבוניות מ-${since.salesLines} ואילך (${steps.length} חלקים)` : `סנכרון מלא — ${sSince} עד היום (${steps.length} חלקים)`);
   const { data, error } = await sb.from('sync_jobs').insert(job).select('*').single();

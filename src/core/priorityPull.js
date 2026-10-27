@@ -169,7 +169,12 @@ const poShape = (forms) => {
 const poMetaOf = (r, s) => {
   const hist = s.log ? (r[s.log] || []).filter(x => x.UDATE).sort((a, b) => a.UDATE < b.UDATE ? -1 : 1) : [];
   const sentEntry = hist.find(x => x.STATDES === 'נשלחה') || hist.find(x => x.STATDES && !/טיוטא|מבוטל|מחכה/.test(x.STATDES));
-  return { created: iso(r[s.date]), sent: sentEntry ? iso(sentEntry.UDATE) : '', status: s.st ? r[s.st] || '' : '', sup: s.sup ? r[s.sup] || '' : '' };
+  // Promised delivery date per item line (REQDATE) — used to check whether the supplier delivered on time.
+  const dues = {};
+  if (s.due) for (const l of r[s.it.name] || []) { const d = iso(l[s.due]); if (l[s.sku] && d && (!dues[l[s.sku]] || d > dues[l[s.sku]])) dues[l[s.sku]] = d; }
+  const m = { created: iso(r[s.date]), sent: sentEntry ? iso(sentEntry.UDATE) : '', status: s.st ? r[s.st] || '' : '', sup: s.sup ? r[s.sup] || '' : '' };
+  if (s.due) m.dues = dues;
+  return m;
 };
 async function pullOpenPOs(forms, query) {
   const s = poShape(forms);
@@ -196,7 +201,7 @@ async function pullPoWindow(forms, query, [a, b]) {
   const s = poShape(forms);
   const rows = await query('PORDERS', {
     select: sel(s.ord, s.date, s.sup, s.st), filter: `${s.date} ge ${a} and ${s.date} lt ${b}`, orderby: s.ord,
-    expand: s.log ? `${s.log}($select=UDATE,STATDES)` : '',
+    expand: [s.due ? `${s.it.name}($select=${sel(s.sku, s.due)})` : '', s.log ? `${s.log}($select=UDATE,STATDES)` : ''].filter(Boolean).join(','),
   });
   const meta = {};
   for (const r of rows) meta[r[s.ord]] = poMetaOf(r, s);
@@ -313,6 +318,9 @@ export function finalizeSync({ prev, payloads, failed = {}, since = {}, sSince, 
   ids.filter(k => k.startsWith('po:')).forEach(k => Object.assign(poMeta, payloads[k].meta || {}));
   if (payloads['po-open']) Object.assign(poMeta, payloads['po-open'].meta || {});
   outSets.procPoMeta = poMeta;
+  // PO history now carries promised dates; a store without them gets one full PO pull (see planSteps poFull).
+  const poSteps = ids.filter(k => k.startsWith('po:'));
+  if (poSteps.length && !anyFailed('po:') && poSteps.some(k => Object.values(payloads[k].meta || {}).some(m => m.dues))) outState.procPoDues = 1;
 
   // items
   const it = payloads.items;

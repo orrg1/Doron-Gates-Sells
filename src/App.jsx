@@ -1,10 +1,9 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import * as XLSXLib from 'xlsx';
-import { describeAll } from './priority.js';
 import { supabase, flushAll, queueDataset } from './cloud.js';
 import { procStatus, PROC_STATUS_LABEL, procChip, computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './core/procModel.js';
-import { returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
+import { supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
@@ -360,7 +359,7 @@ const KPICard = ({ title, value, formatted, subtext, icon: Icon, color, trend, s
 
 // Overview Dashboard Page
 // ─── CUSTOMERS PAGE ─────────────────────────────────────
-const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUploadMonthly, onUploadProduct, onClearMonthly, onClearProduct, loading, uploadError, uploadSuccess, onDismissError, excludeCurrentMonth, priorityRange = null, fileCounts = {}, customerCards = {}, onSyncPriority = null, lastSyncAt = null }) => {
+const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, excludeCurrentMonth, priorityRange = null, fileCounts = {}, customerCards = {}, onSyncPriority = null, lastSyncAt = null }) => {
   const [search, setSearch] = useState('');
   const [cityFilter, setCityFilter] = useState('');
   const [sortConfig, setSortConfig] = useState({ key:'totalRevenue', direction:'desc' });
@@ -640,56 +639,12 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
 
   const uploadCards = (
     <div className="space-y-3">
-      {uploadError && (
-        <div className={`flex items-start gap-2 px-4 py-3 rounded-xl text-xs font-medium ${isDarkMode?'bg-red-500/10 text-red-300 border border-red-500/20':'bg-red-50 text-red-700 border border-red-200'}`}>
-          <TriangleAlert className="w-4 h-4 shrink-0 mt-0.5"/>
-          <span className="flex-1">{uploadError.text}</span>
-          {onDismissError && <button onClick={onDismissError} className="shrink-0 opacity-60 hover:opacity-100"><X className="w-3.5 h-3.5"/></button>}
-        </div>
-      )}
-      {uploadSuccess && !uploadError && (
-        <div className={`flex items-center gap-2 px-4 py-3 rounded-xl text-xs font-medium animate-in fade-in duration-200 ${isDarkMode?'bg-emerald-500/10 text-emerald-300 border border-emerald-500/20':'bg-emerald-50 text-emerald-700 border border-emerald-200'}`}>
-          <Check className="w-4 h-4 shrink-0"/>
-          <span>הקובץ נשמר בהצלחה</span>
-        </div>
-      )}
       <PrioritySyncBar isDarkMode={isDarkMode} range={priorityRange} lastSyncAt={lastSyncAt} onSync={onSyncPriority} what="נתוני הלקוחות"/>
-      {priorityRange && !fileNames.monthly && !fileNames.product ? (
-        <details className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
-          <summary className="cursor-pointer select-none font-semibold">קבצים ישנים (לא חובה) — רק אם צריך היסטוריה מלפני {isoToDisplay(priorityRange.from)}</summary>
-          <div className="mt-3">{renderUploadGrid()}</div>
-        </details>
-      ) : renderUploadGrid()}
+      {(fileNames.monthly || fileNames.product) && (
+        <p className={`text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>טעונים גם קבצי לקוחות ישנים ({[fileNames.monthly, fileNames.product].filter(Boolean).join(', ')}) — ניהול בהגדרות ← היסטוריה ישנה מקבצים.</p>
+      )}
     </div>
   );
-  function renderUploadGrid() { return (
-      <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-      {[
-        { label:'מכירות ללקוח בחתך חודשי', sub:'מגמה, נטישה, לקוחות חדשים', fileName:fileNames.monthly, onUpload:onUploadMonthly, onClear:onClearMonthly, isLoading:loading.monthly, count:fileCounts.monthly ?? monthlyData.length },
-        { label:'מכירות ללקוח לפי מוצר', sub:priorityRange ? 'תמהיל מוצרים, Cross-sell · כרגע מוצג מ-Priority' : 'תמהיל מוצרים, Cross-sell', fileName:fileNames.product, onUpload:onUploadProduct, onClear:onClearProduct, isLoading:loading.product, count:fileCounts.product ?? productData.length },
-      ].map((card,i) => (
-        <div key={i} className={`p-4 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-          <p className={`text-sm font-bold mb-0.5 ${isDarkMode?'text-white':'text-slate-800'}`}>{card.label}</p>
-          <p className={`text-xs mb-3 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{card.sub}</p>
-          {card.fileName ? (
-            <div className="flex items-center gap-2">
-              <div className={`flex-1 flex items-center gap-2 px-3 py-2 rounded-xl ${isDarkMode?'bg-slate-700/50':'bg-slate-50'}`}>
-                <FileSpreadsheet className="w-4 h-4 text-emerald-500 shrink-0"/>
-                <span className={`text-xs truncate ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{card.fileName}</span>
-                <span className={`text-xs shrink-0 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>({card.count.toLocaleString()})</span>
-              </div>
-              <button onClick={card.onClear} className={`p-2 rounded-lg ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-500 hover:bg-red-50'}`}><Trash2 className="w-4 h-4"/></button>
-            </div>
-          ) : (
-            <label className={`flex items-center justify-center gap-2 py-2.5 rounded-xl border-dashed border-2 cursor-pointer text-xs font-medium transition-colors ${isDarkMode?'border-slate-600 text-slate-400 hover:border-pink-500 hover:text-pink-400':'border-slate-200 text-slate-500 hover:border-pink-400 hover:text-pink-600'}`}>
-              {card.isLoading?<Loader2 className="w-4 h-4 animate-spin"/>:<Upload className="w-4 h-4"/>} העלה קובץ
-              <input type="file" accept=".xlsx,.xls" onChange={card.onUpload} className="hidden" disabled={card.isLoading}/>
-            </label>
-          )}
-        </div>
-      ))}
-      </div>
-  ); }
 
   if (!hasAnyData) {
     return (
@@ -700,7 +655,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, onUplo
             <div className={`relative p-6 rounded-full ${isDarkMode?'bg-gradient-to-br from-slate-800 to-slate-900 border border-slate-700':'bg-gradient-to-br from-slate-50 to-white border border-slate-100'}`}><User className={`w-12 h-12 ${isDarkMode?'text-slate-500':'text-slate-300'}`}/></div>
           </div>
           <h3 className={`text-xl font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>אין נתוני לקוחות עדיין</h3>
-          <p className={`mt-2 max-w-sm ${isDarkMode?'text-slate-400':'text-slate-500'}`}>לחץ "סנכרן עכשיו מ-Priority" למעלה — או טען קובץ "מכירות ללקוח בחתך חודשי" / "מכירות ללקוח לפי מוצר"</p>
+          <p className={`mt-2 max-w-sm ${isDarkMode?'text-slate-400':'text-slate-500'}`}>לחץ "סנכרן עכשיו מ-Priority" למעלה. קבצי לקוחות ישנים אפשר לטעון בהגדרות ← היסטוריה ישנה מקבצים</p>
         </div>
         {uploadCards}
       </div>
@@ -1231,7 +1186,7 @@ const PrioritySyncBar = ({ isDarkMode, range, lastSyncAt, onSync, what }) => (
   </div>
 );
 
-const EmptyState = ({ onUpload, loading, isDarkMode, activeTab, onSync }) => (
+const EmptyState = ({ isDarkMode, activeTab, onSync, onOpenFiles }) => (
   <div className="flex flex-col items-center justify-center h-full text-center p-8 animate-in fade-in zoom-in duration-500">
     <div className="relative mb-6">
       <div className={`absolute inset-0 rounded-3xl blur-2xl opacity-40 ${isDarkMode?'bg-blue-600':'bg-blue-300'}`}/>
@@ -1240,29 +1195,19 @@ const EmptyState = ({ onUpload, loading, isDarkMode, activeTab, onSync }) => (
       </div>
     </div>
     <h3 className={`text-2xl font-bold mb-2 ${isDarkMode?'text-white':'text-slate-800'}`}>אין נתונים עדיין</h3>
-    <p className={`max-w-xs mb-2 text-sm leading-relaxed ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
-      טען קבצי Excel או CSV של מכירות / ספקים כדי להתחיל
+    <p className={`max-w-xs mb-4 text-sm leading-relaxed ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+      {activeTab==='sales' ? 'הנתונים מגיעים מחשבוניות המכירה ב-Priority.' : 'הנתונים האלה מגיעים מקובץ ישן.'}
     </p>
     {activeTab==='sales' && onSync && (
-      <button type="button" onClick={onSync} className="mb-4 inline-flex items-center gap-2 px-6 py-3 rounded-2xl text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">
+      <button type="button" onClick={onSync} className="mb-3 inline-flex items-center gap-2 px-6 py-3 rounded-2xl text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">
         <Activity className="w-4 h-4"/> סנכרן מכירות מ-Priority
       </button>
     )}
-    {activeTab==='sales' && (
-      <p className={`max-w-xs mb-6 text-xs px-3 py-1.5 rounded-lg ${isDarkMode?'bg-slate-800 text-slate-400 border border-slate-700':'bg-slate-100 text-slate-500 border border-slate-200'}`}>
-        שם הקובץ הנדרש: <span className="font-bold">מכירות חודשיות לפי מוצר</span>
-      </p>
+    {onOpenFiles && (
+      <button type="button" onClick={onOpenFiles} className={`text-xs font-semibold underline ${isDarkMode?'text-slate-400':'text-slate-500'}`}>
+        היסטוריה ישנה מקבצים (בהגדרות)
+      </button>
     )}
-    <label className="group flex items-center gap-3 px-7 py-3.5 bg-gradient-to-l from-blue-600 to-blue-500 hover:from-blue-700 hover:to-blue-600 text-white rounded-2xl cursor-pointer transition-all hover:scale-105 shadow-lg shadow-blue-500/25 font-medium">
-      {loading ? <Loader2 className="w-5 h-5 animate-spin"/> : <Upload className="w-5 h-5"/>}
-      בחר קבצים
-      <input type="file" accept=".csv,.xlsx,.xls" multiple onChange={onUpload} className="hidden" disabled={loading}/>
-    </label>
-    <div className="flex items-center gap-1.5 mt-4">
-      {['.xlsx','.xls','.csv'].map(ext => (
-        <span key={ext} className={`px-2 py-0.5 rounded-md text-[11px] font-mono ${isDarkMode?'bg-slate-800 text-slate-400 border border-slate-700':'bg-slate-100 text-slate-500 border border-slate-200'}`}>{ext}</span>
-      ))}
-    </div>
   </div>
 );
 
@@ -1328,28 +1273,6 @@ const Autocomplete = ({ options, value, onChange, placeholder, icon: Icon, multi
           }) : <div style={isDarkMode?{color:'#64748b'}:{color:'#94a3b8'}} className="px-4 py-3 text-sm text-center">לא נמצאו תוצאות</div>}
         </div>
       )}
-    </div>
-  );
-};
-
-// Clear Modal
-const ClearModal = ({ isOpen, onClose, onConfirm, type, isDarkMode }) => {
-  if (!isOpen) return null;
-  return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className={`rounded-2xl shadow-2xl w-full max-w-sm p-8 flex flex-col items-center text-center ${isDarkMode?'bg-slate-800':'bg-white'}`}>
-        <div className={`p-4 rounded-full mb-5 ${isDarkMode?'bg-red-500/10':'bg-red-50'}`}>
-          <AlertTriangle className="w-9 h-9 text-red-500"/>
-        </div>
-        <h3 className={`text-xl font-bold mb-2 ${isDarkMode?'text-white':'text-slate-800'}`}>מחיקת נתונים</h3>
-        <p className={`mb-7 text-sm leading-relaxed ${isDarkMode?'text-slate-400':'text-slate-600'}`}>
-          האם למחוק את כל נתוני ה<strong>{type==='sales'?'מכירות':type==='suppliers'?'ספקים':(type==='overview'||type==='procurement')?'מערכת (מכירות + ספקים)':'מערכת'}</strong>? פעולה זו אינה הפיכה.
-        </p>
-        <div className="flex gap-3 w-full">
-          <button onClick={onClose} className={`flex-1 py-3 rounded-xl font-medium ${isDarkMode?'bg-slate-700 text-slate-300 hover:bg-slate-600':'bg-slate-100 text-slate-700 hover:bg-slate-200'}`}>ביטול</button>
-          <button onClick={()=>{onConfirm();onClose();}} className="flex-1 py-3 bg-red-600 text-white rounded-xl font-medium hover:bg-red-700 shadow-lg shadow-red-600/20">מחק</button>
-        </div>
-      </div>
     </div>
   );
 };
@@ -1823,7 +1746,6 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
   const [exporting, setExporting] = useState(false);
   const [pdfGenerating, setPdfGenerating] = useState(false);
   const [invFileName, setInvFileName] = useState(() => localStorage.getItem('inventoryFileName')||'');
-  const [importStats, setImportStats] = useState(null);
   // Two independent, optional upload slots — mirrors the "לקוחות" tab UX: each
   // slot shows its own filename/stats when filled, or an upload prompt when
   // empty, so it's obvious at a glance which of the two expected files is
@@ -1834,7 +1756,6 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
     try { return JSON.parse(localStorage.getItem('procurementInvSlots')||'null') || { product:null, masterCard:null }; }
     catch { return { product:null, masterCard:null }; }
   });
-  const [showBanner, setShowBanner] = useState(false);
   const [importBanner, setImportBanner] = useState(null); // {count, skipped}
   const [ordersLoading, setOrdersLoading] = useState(false);
   const [showLegend, setShowLegend] = useState(false);
@@ -1975,9 +1896,6 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
     const anyEstimated = sorted.some(b => b.estimatedValue > 0);
     return { data, anyEstimated, noDateValue: Math.round(noDateValue), noDateCount, totalValue: Math.round(active.reduce((s,o)=>s+(o.valueILS||0),0)) };
   }, [ordersEnriched, leadTime, leadTimeMap]);
-  const [showAddOrder, setShowAddOrder] = useState(false);
-  const [editOrderId, setEditOrderId] = useState(null);
-  const [orderForm, setOrderForm] = useState({ productKey:'', productName:'', supplier:'', orderedQty:'', orderDate:'', expectedDate:'', status:'ordered', poNumber:'', notes:'' });
   const [aiInsightOpen, setAiInsightOpen] = useState(false);
   const [aiInsightLoading, setAiInsightLoading] = useState(false);
   const [aiInsightText, setAiInsightText] = useState('');
@@ -2132,7 +2050,7 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
         +'== A לרכש ==\n'+topALines+'\n\n'
         +'סה"כ להזמנה: '+totalOrder.toLocaleString()+' יח\' | עלות: ₪'+Math.round(totalCost).toLocaleString()+'\n\n'
         +'== הזמנות באיחור ==\n'+(overdueOrders.length ? overdueOrders.slice(0,8).map(o=>'• '+o.productName+' מ-'+(o.supplier||'?')+': איחור '+o.daysLate+' ימים, '+o.orderedQty+' יח\'').join('\n') : 'אין')+'\n\n'
-        +'== עליות מחיר קניה ==\n'+(priceChanges.filter(p=>p.priceChangePct>0).length ? priceChanges.filter(p=>p.priceChangePct>0).slice(0,6).map(p=>'• '+p.name+': +'+p.priceChangePct.toFixed(1)+'%').join('\n') : 'אין')+'\n\n'
+        +'== עליות מחיר קניה ==\n'+(invoicePriceUps.length ? invoicePriceUps.slice(0,6).map(x=>'• '+(nameMap[x.k]||x.k)+': +'+x.pct.toFixed(1)+'%').join('\n') : 'אין')+'\n\n'
         +'תן: 1) עדיפויות 2) אזהרות 3) המלצה לשיפור.';
       const text = await callGemini(prompt, apiKey);
       setAiInsightText(text);
@@ -2144,32 +2062,11 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
     setOpenOrders(orders);
     localStorage.setItem('openOrders', JSON.stringify(orders));
   };
-  const addOrder = () => {
-    if (!orderForm.productName || !orderForm.orderedQty) return;
-    const order = {
-      id: Date.now().toString(),
-      ...orderForm,
-      orderedQty: parseFloat(orderForm.orderedQty)||0,
-      productKey: orderForm.productKey || orderForm.productName,
-    };
-    saveOrders([...openOrders, order]);
-    setOrderForm({ productKey:'', productName:'', supplier:'', orderedQty:'', orderDate:'', expectedDate:'', status:'ordered', poNumber:'', notes:'' });
-    setShowAddOrder(false);
-  };
-  const updateOrder = (id, field, val) => {
-    saveOrders(openOrders.map(o => o.id===id ? {...o, [field]: field==='orderedQty'?parseFloat(val)||0:val} : o));
-  };
   const deleteOrder = (id) => saveOrders(openOrders.filter(o=>o.id!==id));
-  const receiveOrder = (id) => {
-    const o = openOrders.find(x=>x.id===id);
-    if (o) saveReceiptLog([...receiptLog, {
-      supplier:o.supplier||'', productKey:o.productKey||o.productName, poNumber:o.poNumber||'',
-      orderDate:o.orderDate||'', expectedDate:o.expectedDate||'', receivedDate:new Date().toISOString().slice(0,10), qty:o.orderedQty||0, estimated:false,
-    }]);
-    saveOrders(openOrders.filter(x=>x.id!==id)); // remove when received
-  };
 
   // ── Supplier reliability — real lead time & on-time rate from received orders ──
+  const onTimeStats = useMemo(() => supplierOnTime({ purchaseLines, poMeta,
+    sinceIso: new Date(Date.now() - 540*DAY_MS).toISOString().slice(0,10) }), [purchaseLines, poMeta]);
   const supplierReliability = useMemo(() => {
     const out = {};
     receiptLog.forEach(r => {
@@ -2188,9 +2085,15 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
     Object.values(out).forEach(s => {
       s.avgLeadDays = s.leadDaysN ? Math.round(s.leadDaysSum/s.leadDaysN) : null;
       s.onTimePct = s.onTimeBase ? Math.round(s.onTimeN/s.onTimeBase*100) : null;
+      s.onTimeSource = s.onTimeBase ? 'estimate' : null;
+    });
+    // Preferred: promised date on the PO line (REQDATE) vs the supplier invoice date.
+    Object.entries(onTimeStats).forEach(([sup, t]) => {
+      if (!out[sup]) out[sup] = { deliveries:0, leadDaysSum:0, leadDaysN:0, onTimeN:0, onTimeBase:0, estimatedN:0, openOverdue:0, openCount:0, avgLeadDays:null };
+      Object.assign(out[sup], { onTimePct: t.pct, onTimeN: t.onTime, onTimeBase: t.n, avgLateDays: t.avgLateDays, onTimeSource: 'po' });
     });
     return out;
-  }, [receiptLog, ordersEnriched]);
+  }, [receiptLog, ordersEnriched, onTimeStats]);
 
   // Map incoming quantities by product key for use in calculations
   const incomingMap = useMemo(() => incomingMapOf(openOrders), [openOrders]);
@@ -2235,14 +2138,11 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
       }
       setInvFileName(file.name);
       const { withQty, withCost, withMinStock, withSupplier } = nx.stats;
-      setImportStats({ total: parsed.length, withQty, withCost, withMinStock });
       setInvSlots(prev => {
         const next = { ...prev, [slotKey]: { name: file.name, total: parsed.length, withQty, withCost, withMinStock, withSupplier, importedAt: Date.now() } };
         try { localStorage.setItem('procurementInvSlots', JSON.stringify(next)); } catch { setInvUploadError('הקובץ נטען למסך אבל לא נשמר בדפדפן — כנראה אחסון הדפדפן מלא. פנה מקום ונסה שוב, אחרת המידע ייעלם ברענון.'); }
         return next;
       });
-      setShowBanner(true);
-      setTimeout(() => setShowBanner(false), 7000);
       setInvLoading(false);
     };
     if (file.name.match(/\.xlsx?$/) && window.XLSX) {
@@ -2283,7 +2183,7 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
     setNameMap({}); localStorage.removeItem('procurementNames');
     // Price history is intentionally kept — it's the record of past prices,
     // and wiping it on every inventory reset would defeat its purpose.
-    setInvFileName(''); setImportStats(null); setInvSlots({ product:null, masterCard:null });
+    setInvFileName(''); setInvSlots({ product:null, masterCard:null });
     localStorage.removeItem('procurementStock'); localStorage.removeItem('procurementCost');
     localStorage.removeItem('procurementMinStock'); localStorage.removeItem('procurementSupplier');
     localStorage.removeItem('procurementMOQ');
@@ -2646,36 +2546,33 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
 
   // ── Supplier spend trend — from the "ספקים" expense file ──
   // Monthly spend per supplier: last 3 full months vs the 3 before, plus 12-month total.
+  // Spend per supplier from the supplier invoice lines (₪, credits net out) — calendar months.
   const supplierSpend = useMemo(() => {
-    if (!suppliersData.length) return [];
-    let months = [...new Set(suppliersData.map(d=>d.date).filter(Boolean))].sort((a,b)=>getDateVal(a)-getDateVal(b));
-    if (excludeCurrentMonth && months.length > 1) months = months.slice(0,-1);
-    const last3 = new Set(months.slice(-3)), prev3 = new Set(months.slice(-6,-3)), last12 = new Set(months.slice(-12));
+    if (!purchaseLines.length) return [];
+    const now = new Date();
+    const months = [];
+    for (let i = excludeCurrentMonth ? 12 : 11; i >= (excludeCurrentMonth ? 1 : 0); i--) {
+      const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+      months.push(`${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}`);
+    }
+    const last3 = new Set(months.slice(-3)), prev3 = new Set(months.slice(-6,-3)), last12 = new Set(months);
     const by = {};
-    suppliersData.forEach(r => {
-      const name = (r.supplier && r.supplier!=='כללי') ? r.supplier : (r.description || r.supplier || 'לא ידוע');
-      if (!by[name]) by[name] = { name, last3:0, prev3:0, last12:0, series:{} };
-      const v = r.total || 0;
-      if (last3.has(r.date)) by[name].last3 += v;
-      if (prev3.has(r.date)) by[name].prev3 += v;
-      if (last12.has(r.date)) { by[name].last12 += v; by[name].series[r.date] = (by[name].series[r.date]||0) + v; }
+    purchaseLines.forEach(l => {
+      const m = (l.d || '').slice(0, 7); if (!last12.has(m)) return;
+      const name = l.s || 'לא ידוע';
+      const x = by[name] ||= { name, last3:0, prev3:0, last12:0, series:{} };
+      const v = (l.tot || 0) * (l.rate || 1);
+      x.last12 += v; x.series[m] = (x.series[m]||0) + v;
+      if (last3.has(m)) x.last3 += v;
+      if (prev3.has(m)) x.prev3 += v;
     });
     return Object.values(by)
-      .map(x => ({ ...x, changePct: x.prev3>0 ? (x.last3-x.prev3)/x.prev3*100 : null, sparkline: months.slice(-12).map(m=>({m, v:x.series[m]||0})) }))
+      .map(x => ({ ...x, changePct: x.prev3>0 ? (x.last3-x.prev3)/x.prev3*100 : null, sparkline: months.map(m=>({m, v:x.series[m]||0})) }))
       .filter(x => x.last12 > 0)
       .sort((a,b) => b.last12 - a.last12);
-  }, [suppliersData, excludeCurrentMonth]);
+  }, [purchaseLines, excludeCurrentMonth]);
 
-  // ── Purchase price changes (catalog price history) and PO price deviations ──
-  // monthlyImpactILS = extra (or saved) ₪ per month at the current sales pace.
-  const priceChanges = useMemo(() => products
-    .filter(p => p.priceChangePct!=null && Math.abs(p.priceChangePct) >= 0.5)
-    .map(p => {
-      const fx = (p.unitCost!=null && p.unitCostOriginal>0) ? p.unitCost/p.unitCostOriginal : null;
-      const monthlyImpactILS = (fx!=null && p.prevPrice!=null) ? (p.avgMonthly||0) * (p.unitCostOriginal - p.prevPrice) * fx : null;
-      return { ...p, monthlyImpactILS };
-    })
-    .sort((a,b) => Math.abs(b.monthlyImpactILS??0) - Math.abs(a.monthlyImpactILS??0) || Math.abs(b.priceChangePct) - Math.abs(a.priceChangePct)), [products]);
+  // ── Open POs priced away from the catalog ──
   const poPriceDeviations = useMemo(() => ordersEnriched
     .filter(o => o.poPriceDiffPct!=null && Math.abs(o.poPriceDiffPct) >= 3)
     .sort((a,b) => Math.abs(b.poPriceDiffPct) - Math.abs(a.poPriceDiffPct)), [ordersEnriched]);
@@ -3470,7 +3367,7 @@ const renderProductRow = (p) => {
   // stored data, and the page reloads to show it. The same job also runs by
   // itself every night at 22:00.
   const [prioSync, setPrioSync] = useState({ busy:false, log:[], errors:{}, at: (() => { try { return Number(localStorage.getItem('prioritySyncAt'))||null; } catch { return null; } })() });
-  const [prioFields, setPrioFields] = useState(null);
+  const [lastSyncJob, setLastSyncJob] = useState(null); // latest finished server sync: { status, finished_at, error }
   const followJob = async (id) => {
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
     const t0 = Date.now();
@@ -3493,7 +3390,7 @@ const renderProductRow = (p) => {
     setPrioSync(s => ({ ...s, busy:true, log:['מתחיל סנכרון בשרת…'], errors:{}, progress:null }));
     try {
       const { data: sess } = await supabase.auth.getSession();
-      if (!sess?.session) throw new Error('הסנכרון מ-Priority דורש התחברות עם Google (במצב מקומי אין גישה לשרת).');
+      if (!sess?.session) throw new Error('הסנכרון מ-Priority דורש התחברות עם Google.');
       const { data, error } = await supabase.functions.invoke('priority-sync', { body: { action: 'start', kind: full ? 'full' : 'incremental' } });
       if (error) { let msg = error.message; try { const j = await error.context?.json?.(); if (j?.error) msg = j.error; } catch { /* generic */ } throw new Error(msg); }
       const job = await followJob(data.id);
@@ -3511,6 +3408,10 @@ const renderProductRow = (p) => {
   useEffect(() => {
     let cancelled = false;
     (async () => {
+      try {
+        const { data: last } = await supabase.from('sync_jobs').select('status,finished_at,error').in('status', ['done','error']).order('id', { ascending:false }).limit(1);
+        if (!cancelled && last?.length) setLastSyncJob(last[0]);
+      } catch { /* status line only */ }
       try {
         const { data } = await supabase.from('sync_jobs').select('id,status').in('status', ['queued','running']).order('id', { ascending:false }).limit(1);
         if (cancelled || !data?.length) return;
@@ -3542,10 +3443,6 @@ const renderProductRow = (p) => {
       else { if (win) { win.document.open(); win.document.write(data.html); win.document.close(); } setDigestMsg(''); }
     } catch (e) { if (win) win.close(); setDigestMsg(`לא הצליח: ${e.message || e}`); }
   };
-  const showPriorityFields = async () => {
-    setPrioFields({ loading:true });
-    try { setPrioFields({ data: await describeAll() }); } catch (e) { setPrioFields({ error: e.message || String(e) }); }
-  };
   const renderPriorityCard = () => {
     const muted = isDarkMode?'text-slate-400':'text-slate-500';
     const strong = isDarkMode?'text-slate-100':'text-slate-800';
@@ -3564,7 +3461,6 @@ const renderProductRow = (p) => {
             {prioSync.busy ? 'מסנכרן…' : 'סנכרן עכשיו'}
           </button>
           <button type="button" onClick={()=>{ if (window.confirm('סנכרון מלא מושך מחדש 24 חודשי חשבוניות ולוקח כמה דקות. להמשיך?')) syncFromPriority(true); }} disabled={prioSync.busy} className={`text-xs font-semibold underline ${muted}`}>סנכרון מלא</button>
-          <button type="button" onClick={showPriorityFields} className={`text-xs font-semibold underline ${muted}`}>בדיקת שדות</button>
         </div>
         <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${muted}`}>
           <span>סיכום שבועי במייל — כל יום ראשון ב-07:00:</span>
@@ -3581,17 +3477,6 @@ const renderProductRow = (p) => {
           <ul role="status" aria-live="polite" className={`text-xs space-y-0.5 ${hasErr?(isDarkMode?'text-amber-200':'text-amber-800'):muted}`}>
             {prioSync.log.map((t,i) => <li key={i}>• {t}</li>)}
           </ul>
-        )}
-        {prioFields && (
-          <div className="space-y-1">
-            {prioFields.loading && <p className={`text-xs ${muted}`}>טוען רשימת שדות…</p>}
-            {prioFields.error && <p className="text-xs text-red-600">{prioFields.error}</p>}
-            {prioFields.data && (<>
-              <p className={`text-xs ${muted}`}>אם משהו לא נמשך נכון — העתק את זה ושלח:</p>
-              <textarea readOnly dir="ltr" rows={6} value={JSON.stringify(prioFields.data)} onFocus={e=>e.target.select()}
-                className={`w-full text-[11px] font-mono p-2 rounded border ${isDarkMode?'bg-slate-900 border-slate-700 text-slate-300':'bg-white border-slate-300 text-slate-700'}`}/>
-            </>)}
-          </div>
         )}
       </div>
     );
@@ -3621,12 +3506,6 @@ const renderProductRow = (p) => {
     const range = m.from ? ` · ${isoToDisplay(m.from)}–${isoToDisplay(m.to)}` : '';
     return { loaded:true, name:m.name, at:m.at, detail:`${m.rows.toLocaleString()} שורות${range}` };
   };
-  const filesSummary = (() => {
-    const st = FILE_SLOT_DEFS.map(d => ({ d, s: slotStatus(d.key) }));
-    const loaded = st.filter(x => x.s.loaded).length;
-    const stale = st.filter(x => x.s.loaded && x.s.at && (Date.now()-x.s.at)/DAY_MS > x.d.staleDays).map(x => x.d.title);
-    return { loaded, total: FILE_SLOT_DEFS.length, stale };
-  })(); // recomputed every render — cheap, and depends on many pieces of state
   const guardedUpload = async (e, slot, handler) => {
     const f = e.target.files?.[0]; if (!f) return;
     try {
@@ -3675,45 +3554,9 @@ const renderProductRow = (p) => {
     }
     setFileMsg({ slot:key, kind:'ok', text:'נמחק.' });
   };
-  const renderOtherSources = () => {
-    if (!otherSources.length) return null;
-    const muted = isDarkMode?'text-slate-400':'text-slate-500';
-    const strong = isDarkMode?'text-slate-100':'text-slate-800';
-    return (
-      <div className={`rounded-xl border p-4 ${isDarkMode?'bg-slate-900/40 border-slate-700':'bg-slate-50/60 border-slate-200'}`}>
-        <p className={`font-bold text-sm ${strong}`}>קבצים נוספים שטעונים באתר</p>
-        <p className={`text-xs mt-0.5 mb-2 ${muted}`}>קבצים שהועלו בלשוניות האחרות. כשיש גם שורות חשבוניות (מ-Priority או מקובץ), החודשים שהן מכסות נלקחים מהן — והקבצים האלה משמשים רק לחודשים ישנים יותר. אפשר למחוק כל קובץ בנפרד.</p>
-        <ul className={`divide-y ${isDarkMode?'divide-slate-700':'divide-slate-200'}`}>
-          {otherSources.map(src => (
-            <li key={src.id} className="flex items-center gap-3 py-2 text-xs">
-              <FileSpreadsheet className="w-4 h-4 shrink-0 text-emerald-600"/>
-              <div className="flex-1 min-w-0">
-                <p className={`font-semibold truncate ${strong}`} title={src.name}>{src.name}</p>
-                <p className={muted}>{src.label}{src.detail ? ` · ${src.detail}` : ''}</p>
-              </div>
-              <button type="button" onClick={() => { if (window.confirm(`למחוק את הקובץ "${src.name}"?\n(${src.label})`)) src.onDelete(); }}
-                aria-label={`מחק את ${src.name}`}
-                className={`shrink-0 inline-flex items-center gap-1 px-2.5 py-1.5 rounded-lg font-semibold ${isDarkMode?'text-red-300 hover:bg-red-500/10':'text-red-700 hover:bg-red-50'}`}>
-                <Trash2 className="w-3.5 h-3.5"/>מחק
-              </button>
-            </li>
-          ))}
-        </ul>
-      </div>
-    );
-  };
-  const renderFilesPanel = () => {
-    const muted = isDarkMode?'text-slate-400':'text-slate-500';
-    const strong = isDarkMode?'text-slate-100':'text-slate-800';
-    return (
-      <section aria-label="קבצים" className="space-y-3">
-        {renderPriorityCard()}
-        <div className="flex flex-wrap items-baseline gap-2">
-          <h3 className={`text-base font-bold ${strong}`}>קבצים</h3>
-          <span className={`text-sm ${muted}`}>כל משבצת מקבלת קובץ אחד מסוים. אם תעלה קובץ למשבצת הלא נכונה, תופיע הודעה לאיזו משבצת הוא שייך.</span>
-        </div>
-        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3">
-          {FILE_SLOT_DEFS.map((d, i) => {
+  const renderSlotCard = (d, i) => {
+            const muted = isDarkMode?'text-slate-400':'text-slate-500';
+            const strong = isDarkMode?'text-slate-100':'text-slate-800';
             const st = slotStatus(d.key);
             const ageDays = st.at ? Math.floor((Date.now()-st.at)/DAY_MS) : null;
             const stale = st.loaded && ageDays!=null && ageDays > d.staleDays;
@@ -3766,11 +3609,31 @@ const renderProductRow = (p) => {
                 </div>
               </div>
             );
-          })}
+  };
+  const renderFilesPanel = () => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-100':'text-slate-800';
+    return (
+      <section aria-label="קבצים" className="space-y-3">
+        {renderPriorityCard()}
+        <div className="flex flex-wrap items-baseline gap-2">
+          <h3 className={`text-base font-bold ${strong}`}>קבצים</h3>
+          <span className={`text-sm ${muted}`}>כל משבצת מקבלת קובץ אחד מסוים. אם תעלה קובץ למשבצת הלא נכונה, תופיע הודעה לאיזו משבצת הוא שייך.</span>
         </div>
-        {renderOtherSources()}
+        {(() => { const d = FILE_SLOT_DEFS.find(x => x.key === 'shipments'); return (
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">{renderSlotCard(d, 0)}</div>
+        ); })()}
+        <details className={`rounded-xl border ${isDarkMode?'border-slate-700':'border-slate-200'}`}>
+          <summary className={`cursor-pointer select-none px-4 py-3 text-sm font-semibold ${strong}`}>
+            העלאה ידנית (רק אם Priority לא זמין)
+            <span className={`mr-2 text-xs font-normal ${muted}`}>מלאי, כרטיס פריט, הזמנות פתוחות ושורות חשבוניות — מתעדכנים לבד מהסנכרון</span>
+          </summary>
+          <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-3 p-3 pt-0">
+            {FILE_SLOT_DEFS.filter(x => x.key !== 'shipments').map((d, i) => renderSlotCard(d, i + 1))}
+          </div>
+        </details>
         <div className={`flex flex-wrap items-center gap-x-4 gap-y-1 text-xs ${muted}`}>
-          <span>היסטוריה לפני תקופת שורות החשבוניות נלקחת מקובץ "מכירות חודשיות לפי מוצר" שבלשונית מכירות{salesDataRaw.length?' (נטען)':' (לא נטען)'}.</span>
+          <span>היסטוריה לפני תקופת שורות החשבוניות נלקחת מקובץ "מכירות חודשיות לפי מוצר" (הגדרות ← היסטוריה ישנה מקבצים){salesDataRaw.length?' (נטען)':' (לא נטען)'}.</span>
           {(invSlots.product || invSlots.masterCard) && <button type="button" onClick={clearInventory} className={`font-semibold ${isDarkMode?'text-red-300':'text-red-700'} hover:underline`}>נקה את נתוני המלאי וכרטיס הפריט</button>}
         </div>
       </section>
@@ -4125,7 +3988,7 @@ const renderProductRow = (p) => {
                     <div className={`text-sm ${strong}`}>{v.lastPo ? isoToDisplay(v.lastPo) : '—'}</div>
                     <div className={`text-sm ${strong}`}>{v.pb?.spend12 ? formatShort(v.pb.spend12) : '—'}</div>
                     <div>
-                      <p className={`text-sm ${strong}`}>{v.lead} ח׳ <span className={`text-xs font-normal ${muted}`}>{{manual:'ידני',computed:'מחושב',global:'כללי'}[v.leadInfo.source]}</span></p>
+                      <p className={`text-sm ${strong}`}>{v.lead} ח׳ <span className={`text-xs font-normal ${muted}`}>{{manual:'ידני',computed:'מחושב',global:'ברירת מחדל'}[v.leadInfo.source]}</span></p>
                       <p className={`text-xs ${v.leadInfo.source==='manual' && v.leadInfo.computedDays!=null && v.leadInfo.computedDays > v.lead*30*1.2+3 ?(isDarkMode?'text-orange-300':'text-orange-700'):muted}`}>{v.leadInfo.st ? `בפועל ~${v.leadInfo.st.median} יום (${v.leadInfo.st.n})` : 'אין נתון בפועל'}</p>
                     </div>
                     <ChevronLeft className={`w-4 h-4 ${muted}`}/>
@@ -4155,7 +4018,7 @@ const renderProductRow = (p) => {
               <ChevronRight className="w-4 h-4"/> כל הספקים
             </button>
             <h3 className={`text-2xl font-bold ${strong}`}>{v.name}</h3>
-            <p className={`text-sm ${muted}`}>{v.items.length} מוצרים · זמן אספקה {v.lead} ח׳ ({{manual:'ידני',computed:'מחושב מההזמנות',global:'כללי'}[v.leadInfo.source]}){v.pb?.mainCur && v.pb.mainCur!=='ILS' ? ` · מטבע ${v.pb.mainCur}` : ''}</p>
+            <p className={`text-sm ${muted}`}>{v.items.length} מוצרים · זמן אספקה {v.lead} ח׳ ({{manual:'ידני',computed:'מחושב מההזמנות',global:'ברירת מחדל'}[v.leadInfo.source]}){v.pb?.mainCur && v.pb.mainCur!=='ILS' ? ` · מטבע ${v.pb.mainCur}` : ''}</p>
           </div>
           <div className="flex-1"/>
           <div className={`flex flex-wrap gap-5 rounded-xl border px-4 py-2.5 text-sm ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
@@ -4164,7 +4027,7 @@ const renderProductRow = (p) => {
               ['הזמנה אחרונה', v.lastPo ? isoToDisplay(v.lastPo) : '—'],
               ['חשבונית אחרונה', v.pb?.lastInv ? isoToDisplay(v.pb.lastInv) : '—'],
               ['משליחה עד חשבונית', v.leadInfo.st ? `~${v.leadInfo.st.median} יום` : '—'],
-              ['הגיעו בזמן', v.rel?.onTimePct!=null ? `${v.rel.onTimePct}%` : '—'],
+              ['הגיעו בזמן', v.rel?.onTimePct!=null ? `${v.rel.onTimePct}%${v.rel.onTimeSource==='po' ? ` (${v.rel.onTimeBase} שורות)` : ' (הערכה)'}` : '—'],
             ].map(([l,val]) => <div key={l} className="flex flex-col"><span className={`text-xs ${muted}`}>{l}</span><b className={strong}>{val}</b></div>)}
           </div>
         </div>
@@ -4360,8 +4223,8 @@ const renderProductRow = (p) => {
   if (!salesData.length) return (
     <div className="space-y-5 animate-in fade-in duration-500">
       <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
-        <h3 className={`text-lg font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>כדי להתחיל, טען את הקבצים</h3>
-        <p className={`text-sm mt-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>הכי חשוב: שורות חשבוניות מכירה (מה נמכר), יתרות מלאי וכרטיס פריט. השאר מוסיפים פרטים.</p>
+        <h3 className={`text-lg font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>כדי להתחיל, סנכרן מ-Priority</h3>
+        <p className={`text-sm mt-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>לחץ "סנכרן עכשיו" — הסנכרון הראשון מושך 24 חודשים ולוקח כמה דקות. אפשר גם להעלות את דוח המשלוחים מהמשלח.</p>
       </div>
       {renderFilesPanel()}
     </div>
@@ -4397,20 +4260,6 @@ const renderProductRow = (p) => {
     {renderProductDrawer()}
     <div className="space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-500">
 
-      {/* Import banner */}
-      {showBanner && importStats && (
-        <div className={`flex flex-wrap items-center gap-3 px-5 py-3.5 rounded-2xl border animate-in fade-in slide-in-from-top-2 duration-300 ${isDarkMode?'bg-emerald-500/10 border-emerald-500/20 text-emerald-300':'bg-emerald-50 border-emerald-200 text-emerald-800'}`}>
-          <Check className="w-5 h-5 shrink-0"/>
-          <span className="font-medium text-sm">יובאו {importStats.total} פריטים מ-{invFileName}</span>
-          <div className="flex gap-3 text-xs mr-auto">
-            {importStats.withQty > 0 && <span className={`px-2 py-1 rounded-lg ${isDarkMode?'bg-emerald-500/10':'bg-emerald-100'}`}>✓ {importStats.withQty} עם כמות מלאי</span>}
-            {importStats.withCost > 0 && <span className={`px-2 py-1 rounded-lg ${isDarkMode?'bg-blue-500/10':'bg-blue-100 text-blue-800'}`}>✓ {importStats.withCost} עם מחיר קניה</span>}
-            {importStats.withMinStock > 0 && <span className={`px-2 py-1 rounded-lg ${isDarkMode?'bg-orange-500/10':'bg-orange-100 text-orange-800'}`}>✓ {importStats.withMinStock} עם מינימום מלאי</span>}
-            {importStats.withQty === 0 && <span className={`px-2 py-1 rounded-lg ${isDarkMode?'bg-orange-500/10':'bg-orange-100 text-orange-800'}`}>⚠ אין עמודת כמות — הזן מלאי ידנית או ייצא "יתרות מלאי" מ-Priority</span>}
-          </div>
-          <button onClick={()=>setShowBanner(false)}><X className="w-4 h-4 opacity-50 hover:opacity-100"/></button>
-        </div>
-      )}
 
       {/* ── What needs action — four cards that also filter the table ── */}
       {(() => {
@@ -4463,20 +4312,19 @@ const renderProductRow = (p) => {
           </button>
           <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>מלאי יעד</b> {monthsToStock} ח׳</span>
           <span className="opacity-40">|</span>
-          <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>זמן אספקה</b> {leadTime} ח׳{Object.keys(leadTimeMap).length>0?` · ${Object.keys(leadTimeMap).length} ספקים עם זמן משלהם`:''}</span>
+          <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>זמן אספקה ברירת מחדל</b> {leadTime} ח׳{Object.keys(leadTimeMap).length>0?` · ${Object.keys(leadTimeMap).length} ספקים עם זמן משלהם`:''}</span>
           <span className="opacity-40">|</span>
           <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>בסיס ממוצע</b> {avgWindowMonths===0?'כל הנתונים':`${avgWindowMonths} ח׳`}</span>
           <span className="opacity-40">|</span>
-          <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>קבצים</b> {filesSummary.loaded}/{filesSummary.total} טעונים</span>
+          {(() => {
+            const at = Math.max(prioSync.at || 0, lastSyncJob?.finished_at && lastSyncJob.status==='done' ? new Date(lastSyncJob.finished_at).getTime() : 0) || null;
+            const hrs = at ? (Date.now() - at) / 3600000 : null;
+            const ago = hrs==null ? 'עוד לא סונכרן' : hrs < 1 ? 'לפני פחות משעה' : hrs < 48 ? `לפני ${Math.round(hrs)} שעות` : `לפני ${Math.round(hrs/24)} ימים`;
+            return <span><b className={isDarkMode?'text-slate-200':'text-slate-800'}>Priority</b> {hrs==null ? ago : `סונכרן ${ago}`}</span>;
+          })()}
           <div className="flex-1"/>
-          {filesSummary.stale.length>0 && (
-            <button type="button" onClick={()=>setSettingsOpen(true)} title={filesSummary.stale.join(', ')} className={`text-xs font-semibold px-2 py-1 rounded ${procChipCls('watch', isDarkMode)}`}>{filesSummary.stale.length===1?`"${filesSummary.stale[0]}" לא עודכן`:`${filesSummary.stale.length} קבצים לא עודכנו`}</button>
-          )}
-          {!invSlots.product && !invSlots.masterCard && stockedCount===0 && (
-            <button type="button" onClick={()=>setSettingsOpen(true)} className={`text-xs font-semibold px-2 py-1 rounded ${procChipCls('watch', isDarkMode)}`}>לא נטען קובץ מלאי</button>
-          )}
-          {completeness.total>0 && completeness.withStock>0 && completeness.withStock<completeness.total && (
-            <button type="button" onClick={()=>setSettingsOpen(true)} className={`text-xs font-semibold px-2 py-1 rounded ${procChipCls('watch', isDarkMode)}`}>{completeness.total-completeness.withStock} מוצרים בלי מלאי</button>
+          {lastSyncJob?.status==='error' && !prioSync.busy && (
+            <button type="button" onClick={()=>setSettingsOpen(true)} title={lastSyncJob.error||''} className={`text-xs font-semibold px-2 py-1 rounded ${procChipCls('now', isDarkMode)}`}>הסנכרון האחרון נכשל</button>
           )}
           {completeness.total>0 && completeness.withCost<completeness.total && (
             <button type="button" onClick={()=>setSettingsOpen(true)} className={`text-xs font-semibold px-2 py-1 rounded ${procChipCls('watch', isDarkMode)}`}>{completeness.total-completeness.withCost} מוצרים בלי מחיר קניה</button>
@@ -4501,13 +4349,13 @@ const renderProductRow = (p) => {
             </div>
             <div>
               <div className="flex justify-between items-center mb-1.5">
-                <span className={`text-xs font-medium ${isDarkMode?'text-slate-300':'text-slate-600'}`}>זמן אספקה כללי (חודשים)</span>
+                <span className={`text-xs font-medium ${isDarkMode?'text-slate-300':'text-slate-600'}`}>זמן אספקה — ברירת מחדל לספקים בלי נתונים (חודשים)</span>
                 <span className={`text-sm font-bold px-2.5 py-0.5 rounded-lg ${isDarkMode?'bg-emerald-500/20 text-emerald-300':'bg-emerald-50 text-emerald-700'}`}>{leadTime}</span>
               </div>
               <input type="range" min={0} max={4} step={1} value={leadTime} onChange={e=>setLeadTime(+e.target.value)} className="w-full accent-emerald-500"/>
               <div className="flex justify-between mt-0.5">{[0,1,2,3,4].map(n=><span key={n} className={`text-xs ${isDarkMode?'text-slate-600':'text-slate-300'}`}>{n}</span>)}</div>
               <p className={`text-[10px] mt-1.5 ${isDarkMode?'text-slate-600':'text-slate-400'}`}>
-                זה הערך שחל כברירת מחדל. ניתן להגדיר זמן אספקה שונה לכל ספק בלשונית "לפי ספק" — הוא יקבל עדיפות על הערך הזה.
+                חל רק על ספקים שאין להם זמן אספקה מחושב מההזמנות ב-Priority ואין להם הגדרה ידנית (בכרטיס הספק).
               </p>
             </div>
             {/* Average window */}
@@ -4729,7 +4577,7 @@ const renderProductRow = (p) => {
         <div role="tablist" aria-label="תצוגות רכש" className={`flex flex-wrap items-center gap-1 rounded-xl p-1 border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
           {(() => {
             const lateCount = overdueOrders.length;
-            const priceUp = priceChanges.filter(p=>p.priceChangePct>0).length + poPriceDeviations.filter(o=>o.poPriceDiffPct>0).length;
+            const priceUp = invoicePriceUps.length + poPriceDeviations.filter(o=>o.poPriceDiffPct>0).length;
             const urgentSched = scheduleData.filter(p=>p.urgency==='critical'||p.urgency==='urgent').length;
             const activeShipCount = shipmentsEnriched.filter(x=>x.stage.idx<2).length;
             const shipDelayedCount = shipmentsEnriched.filter(x=>x.stage.idx<2 && x.delayDays>0).length;
@@ -4784,31 +4632,7 @@ const renderProductRow = (p) => {
               </div>
             </div>
             <div className="flex items-center gap-2 flex-wrap">
-              {/* Import from Priority — shows filename when present, with replace/remove */}
-              {ordersFileName ? (
-                <div className={`flex items-center gap-2 px-3 py-2 rounded-xl border ${isDarkMode?'border-emerald-700 bg-emerald-900/20':'border-emerald-200 bg-emerald-50'}`}>
-                  <FileSpreadsheet className="w-4 h-4 text-emerald-500 shrink-0"/>
-                  <div className="min-w-0">
-                    <p className={`text-xs font-medium truncate max-w-[200px] ${isDarkMode?'text-emerald-300':'text-emerald-700'}`}>{ordersFileName}</p>
-                    <p className={`text-[10px] ${isDarkMode?'text-emerald-500/70':'text-emerald-600/70'}`}>{openOrders.filter(o=>o.fromPriority).length} הזמנות מ-Priority</p>
-                  </div>
-                  <label className={`p-1.5 rounded-lg cursor-pointer transition-colors shrink-0 ${isDarkMode?'text-slate-400 hover:bg-slate-700':'text-slate-500 hover:bg-slate-100'}`} title="החלף קובץ">
-                    {ordersLoading?<Loader2 className="w-4 h-4 animate-spin"/>:<RefreshCw className="w-4 h-4"/>}
-                    <input type="file" accept=".xlsx,.xls,.csv" onChange={handlePriorityOrdersUpload} className="hidden" disabled={ordersLoading}/>
-                  </label>
-                  <button onClick={clearPriorityOrders} title="הסר הזמנות שיובאו מ-Priority (הזמנות שהוספו ידנית יישארו)" className={`p-1.5 rounded-lg shrink-0 ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-500 hover:bg-red-50'}`}><Trash2 className="w-4 h-4"/></button>
-                </div>
-              ) : (
-                <label className={`flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-medium border cursor-pointer transition-colors ${isDarkMode?'border-emerald-700 bg-emerald-900/20 text-emerald-400 hover:bg-emerald-900/40':'border-emerald-200 bg-emerald-50 text-emerald-700 hover:bg-emerald-100'}`}>
-                  {ordersLoading ? <Loader2 className="w-4 h-4 animate-spin"/> : <Upload className="w-4 h-4"/>}
-                  ייבוא מ-Priority
-                  <input type="file" accept=".xlsx,.xls,.csv" onChange={handlePriorityOrdersUpload} className="hidden" disabled={ordersLoading}/>
-                </label>
-              )}
-              <button onClick={()=>{setShowAddOrder(true);setEditOrderId(null);setOrderForm({productKey:'',productName:'',supplier:'',orderedQty:'',orderDate:new Date().toISOString().slice(0,10),expectedDate:'',status:'ordered',poNumber:'',notes:''}); }}
-                className="flex items-center gap-2 px-4 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-medium transition-colors shadow-lg shadow-blue-500/20">
-                <Check className="w-4 h-4"/> + הוסף ידנית
-              </button>
+              <span className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{openOrders.filter(o=>o.fromPriority).length} שורות מ-Priority · מתעדכן בכל סנכרון</span>
             </div>
           </div>
 
@@ -4834,75 +4658,13 @@ const renderProductRow = (p) => {
             </div>
           )}
 
-          {/* Add / Edit form */}
-          {showAddOrder && (
-            <div className={`p-5 rounded-2xl border-2 border-blue-500/30 animate-in fade-in duration-200 ${isDarkMode?'bg-slate-800':'bg-blue-50/30'}`}>
-              <h3 className={`font-bold text-sm mb-4 ${isDarkMode?'text-white':'text-slate-800'}`}>{editOrderId ? 'עריכת הזמנה' : 'הזמנה חדשה'}</h3>
-              <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                {[
-                  {field:'productName', label:'שם מוצר *', placeholder:'בחר מוצר...', type:'datalist', options: [...new Set(salesData.map(d=>d.description).filter(Boolean))].sort()},
-                  {field:'supplier', label:'ספק', placeholder:'שם ספק', type:'text'},
-                  {field:'orderedQty', label:'כמות שהוזמנה *', placeholder:'0', type:'number'},
-                  {field:'orderDate', label:'תאריך הזמנה', placeholder:'', type:'date'},
-                  {field:'expectedDate', label:'תאריך אספקה צפוי', placeholder:'', type:'date'},
-                  {field:'poNumber', label:'מספר הזמנה / PO', placeholder:'PO-001', type:'text'},
-                ].map(f => (
-                  <div key={f.field}>
-                    <label className={`block text-xs font-medium mb-1 ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{f.label}</label>
-                    {f.type==='datalist' ? (
-                      <div className="relative">
-                        <input list={`dl-${f.field}`} value={orderForm[f.field]} onChange={e=>setOrderForm(p=>({...p,[f.field]:e.target.value, productKey:e.target.value}))}
-                          placeholder={f.placeholder}
-                          style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#334155'}:{}}
-                          className={`w-full px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'border-slate-700 text-white placeholder-slate-500':'border-slate-200 bg-white'}`}/>
-                        <datalist id={`dl-${f.field}`}>{f.options.map(o=><option key={o} value={o}/>)}</datalist>
-                      </div>
-                    ) : (
-                      <input type={f.type} value={orderForm[f.field]} onChange={e=>setOrderForm(p=>({...p,[f.field]:e.target.value}))}
-                        placeholder={f.placeholder}
-                        style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#334155',colorScheme:'dark'}:{}}
-                        className={`w-full px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'border-slate-700 text-white placeholder-slate-500':'border-slate-200 bg-white'}`}/>
-                    )}
-                  </div>
-                ))}
-                <div>
-                  <label className={`block text-xs font-medium mb-1 ${isDarkMode?'text-slate-300':'text-slate-600'}`}>סטטוס</label>
-                  <select value={orderForm.status} onChange={e=>setOrderForm(p=>({...p,status:e.target.value}))}
-                    style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#334155'}:{}}
-                    className={`w-full px-3 py-2 rounded-xl border text-sm focus:outline-none ${isDarkMode?'border-slate-700':'border-slate-200 bg-white'}`}>
-                    <option value="ordered">הוזמן</option>
-                    <option value="in_transit">בדרך</option>
-                    <option value="delayed">מאחר</option>
-                  </select>
-                </div>
-              </div>
-              <div className="mt-3">
-                <label className={`block text-xs font-medium mb-1 ${isDarkMode?'text-slate-300':'text-slate-600'}`}>הערות</label>
-                <input type="text" value={orderForm.notes} onChange={e=>setOrderForm(p=>({...p,notes:e.target.value}))} placeholder="הערות נוספות..."
-                  style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#334155'}:{}}
-                  className={`w-full px-3 py-2 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'border-slate-700 text-white placeholder-slate-500':'border-slate-200 bg-white'}`}/>
-              </div>
-              <div className="flex gap-3 mt-4">
-                <button onClick={()=>{setShowAddOrder(false);setEditOrderId(null);}} className={`px-4 py-2 rounded-xl text-sm font-medium border transition-colors ${isDarkMode?'border-slate-600 text-slate-300 hover:bg-slate-700':'border-slate-200 text-slate-600 hover:bg-slate-50'}`}>ביטול</button>
-                <button onClick={()=>{
-                  if(editOrderId){
-                    saveOrders(openOrders.map(o=>o.id===editOrderId?{...o,...orderForm,orderedQty:parseFloat(orderForm.orderedQty)||0,productKey:orderForm.productKey||orderForm.productName}:o));
-                    setEditOrderId(null); setShowAddOrder(false);
-                  } else { addOrder(); }
-                }} disabled={!orderForm.productName||!orderForm.orderedQty}
-                  className="px-5 py-2 bg-blue-600 hover:bg-blue-700 text-white rounded-xl text-sm font-medium disabled:opacity-40 transition-colors shadow-md shadow-blue-500/20">
-                  {editOrderId?'עדכן':'הוסף הזמנה'}
-                </button>
-              </div>
-            </div>
-          )}
 
           {/* Orders list */}
           {openOrders.length === 0 ? (
             <div className={`flex flex-col items-center py-16 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
               <ShoppingCart className={`w-12 h-12 mb-3 ${isDarkMode?'text-slate-600':'text-slate-300'}`}/>
               <p className={`font-medium ${isDarkMode?'text-white':'text-slate-800'}`}>אין הזמנות פתוחות</p>
-              <p className={`text-sm mt-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>לחץ "+ הוסף הזמנה" להוספת הזמנה שבדרך</p>
+              <p className={`text-sm mt-1 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>הזמנות בסטטוס "נשלחה" או "אושרה" מסונכרנות אוטומטית מ-Priority</p>
             </div>
           ) : (
             <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
@@ -5005,7 +4767,7 @@ const renderProductRow = (p) => {
                       {sortTh('orders','orderDate','הוזמן')}
                       {sortTh('orders','expectedDate','אספקה צפויה')}
                       {sortTh('orders','status','סטטוס')}
-                      <th className="px-4 py-3">פעולות</th>
+                      <th className="px-2 py-3"></th>
                     </tr>
                   </thead>
                   <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
@@ -5054,28 +4816,16 @@ const renderProductRow = (p) => {
                             {isOverdue && <div className="text-[10px]">באיחור {order.daysLate} ימים</div>}
                           </td>
                           <td className="px-4 py-3.5">
-                            <select value={order.status} onChange={e=>updateOrder(order.id,'status',e.target.value)}
-                              style={isDarkMode?{background:'#1e293b',color:'#f1f5f9',borderColor:'#334155'}:{}}
-                              className={`text-xs px-2 py-1 rounded-lg border font-medium ${statusStyle}`}>
-                              <option value="ordered">הוזמן</option>
-                              <option value="in_transit">בדרך</option>
-                              <option value="delayed">מאחר</option>
-                            </select>
+                            <span className={`inline-block text-xs px-2 py-1 rounded-lg border font-medium ${statusStyle}`}>{order.poStatus||statusLabel}</span>
                           </td>
                           <td className="px-4 py-3.5">
                             <div className="flex items-center gap-2">
-                              <button onClick={()=>{setEditOrderId(order.id);setOrderForm({...order,orderedQty:order.orderedQty.toString()});setShowAddOrder(true);}}
-                                className={`p-1.5 rounded-lg transition-colors ${isDarkMode?'text-slate-400 hover:bg-slate-700':'text-slate-400 hover:bg-slate-100'}`} title="ערוך">
-                                <Settings className="w-3.5 h-3.5"/>
-                              </button>
-                              <button onClick={()=>{ if(window.confirm('סמן כהתקבל וסגור הזמנה?')) receiveOrder(order.id); }}
-                                className={`p-1.5 rounded-lg transition-colors text-emerald-500 hover:bg-emerald-500/10`} title="סמן כהתקבל">
-                                <Check className="w-3.5 h-3.5"/>
-                              </button>
-                              <button onClick={()=>{ if(window.confirm('מחק הזמנה?')) deleteOrder(order.id); }}
-                                className={`p-1.5 rounded-lg transition-colors text-red-400 hover:bg-red-500/10`} title="מחק">
+                              {!order.fromPriority && (
+                              <button onClick={()=>{ if(window.confirm('למחוק הזמנה ידנית ישנה?')) deleteOrder(order.id); }}
+                                className={`p-1.5 rounded-lg transition-colors text-red-400 hover:bg-red-500/10`} title="מחק הזמנה ידנית ישנה">
                                 <Trash2 className="w-3.5 h-3.5"/>
                               </button>
+                              )}
                             </div>
                           </td>
                         </tr>
@@ -5086,7 +4836,7 @@ const renderProductRow = (p) => {
               </div>
               <div className={`px-5 py-3 border-t text-xs flex items-center gap-2 ${isDarkMode?'border-slate-700 text-slate-500':'border-slate-100 text-slate-400'}`}>
                 <Info className="w-3.5 h-3.5 shrink-0"/>
-                ✓ = סמן כהתקבל (מסיר מהרשימה) | כמויות בדרך מחושבות אוטומטית בהמלצות הרכש ובלוח הזמנים
+                הרשימה מתעדכנת מ-Priority בכל סנכרון (נשלחה / אושרה) — הזמנה שהתקבלה יוצאת מהרשימה לבד | כמויות בדרך מחושבות אוטומטית בהמלצות הרכש
               </div>
             </div>
           )}
@@ -5280,43 +5030,9 @@ const renderProductRow = (p) => {
               <div>
                 <p className={`font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>מחירי רכש והוצאות לספקים</p>
                 {onOpenSupplierAnalytics && <button type="button" onClick={onOpenSupplierAnalytics} className={`text-xs font-semibold ${isDarkMode?'text-blue-300':'text-blue-700'} hover:underline`}>לניתוח ההוצאות המלא לפי חודשים ←</button>}
-                <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>שינויי מחיר קניה, הזמנות שמחירן חורג מהקטלוג, ומגמת ההוצאה לכל ספק</p>
+                <p className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>עליות מחיר בחשבוניות ספק, הזמנות שמחירן חורג מהקטלוג, ומגמת ההוצאה לכל ספק</p>
               </div>
             </div>
-          </div>
-
-          {/* 1) Catalog price changes */}
-          <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-            <div className={`px-5 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
-              <h3 className={`font-bold text-sm ${isDarkMode?'text-white':'text-slate-800'}`}>שינויי מחיר קניה ({priceChanges.length})</h3>
-              <p className={`text-[11px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>משווה את "מחיר קניה אחרון" בכל ייבוא של כרטיס פריט לייבוא הקודם. השפעה חודשית = שינוי המחיר × כמות ממוצעת לחודש.</p>
-            </div>
-            {priceChanges.length===0 ? (
-              <p className={`px-5 py-8 text-center text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
-                עדיין אין שינויי מחיר. ההיסטוריה נבנית מעכשיו: בכל פעם שתייבא כרטיס פריט עם מחירים חדשים, השינוי יופיע כאן.
-              </p>
-            ) : (
-              <div className="overflow-x-auto max-h-96 overflow-y-auto">
-                <table className={`w-full text-sm text-right min-w-[700px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
-                  <thead className={`text-[11px] font-semibold sticky top-0 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
-                    <tr>{sortTh('priceChanges','name','מוצר',{className:'px-4 py-2.5'})}{sortTh('priceChanges','supplier','ספק',{className:'px-4 py-2.5'})}{sortTh('priceChanges','prevPrice','מחיר קודם',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('priceChanges','unitCostOriginal','מחיר נוכחי',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('priceChanges','priceChangePct','שינוי',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('priceChanges','monthlyImpactILS','השפעה חודשית ₪',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('priceChanges','priceChangedAt','תאריך',{className:'px-4 py-2.5',firstDir:'desc'})}</tr>
-                  </thead>
-                  <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-                    {sortRows('priceChanges', priceChanges).map(p => (
-                      <tr key={p.key} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
-                        <td className="px-4 py-2.5"><p className={`font-medium text-sm truncate max-w-[220px] ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{p.name}</p>{p.sku&&p.sku!==p.name&&<p className={`text-[10px] font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}</p>}</td>
-                        <td className="px-4 py-2.5 text-xs">{p.supplier||'—'}</td>
-                        <td className="px-4 py-2.5 text-xs tabular-nums">{formatUnitCost(p.prevPrice, p.currency)}</td>
-                        <td className="px-4 py-2.5 text-xs tabular-nums font-bold">{formatUnitCost(p.unitCostOriginal, p.currency)}</td>
-                        <td className={`px-4 py-2.5 text-xs font-bold tabular-nums ${p.priceChangePct>0?'text-red-500':'text-emerald-500'}`}>{p.priceChangePct>0?'+':''}{p.priceChangePct.toFixed(1)}%</td>
-                        <td className={`px-4 py-2.5 text-xs tabular-nums ${p.monthlyImpactILS>0?'text-red-500':p.monthlyImpactILS<0?'text-emerald-500':''}`}>{p.monthlyImpactILS!=null && Math.round(p.monthlyImpactILS)!==0 ? `${p.monthlyImpactILS>0?'+':''}${formatCurrency(p.monthlyImpactILS)}` : '—'}</td>
-                        <td className="px-4 py-2.5 text-xs">{p.priceChangedAt ? new Date(p.priceChangedAt).toLocaleDateString('he-IL') : '—'}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
           </div>
 
           {/* 2) Open POs priced away from the catalog */}
@@ -5354,10 +5070,10 @@ const renderProductRow = (p) => {
           <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
             <div className={`px-5 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
               <h3 className={`font-bold text-sm ${isDarkMode?'text-white':'text-slate-800'}`}>מגמת הוצאה לספקים</h3>
-              <p className={`text-[11px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>מקובץ ההוצאות בלשונית "ספקים" · 3 החודשים האחרונים לעומת 3 שלפניהם</p>
+              <p className={`text-[11px] mt-0.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>מחשבוניות הספק ב-Priority (₪, כולל זיכויים) · 3 החודשים האחרונים לעומת 3 שלפניהם</p>
             </div>
             {supplierSpend.length===0 ? (
-              <p className={`px-5 py-8 text-center text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>לא נטען קובץ הוצאות לספקים — טען אותו בלשונית "ספקים" כדי לראות את מגמת ההוצאה</p>
+              <p className={`px-5 py-8 text-center text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>אין עדיין חשבוניות ספק מ-Priority — לחץ "סנכרן" כדי לראות את מגמת ההוצאה</p>
             ) : (
               <div className="overflow-x-auto max-h-96 overflow-y-auto">
                 <table className={`w-full text-sm text-right min-w-[640px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
@@ -5706,11 +5422,10 @@ const renderProductRow = (p) => {
 
 
 // ─── SETTINGS MODAL ────────────────────────────────────
-const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode, exchangeRates, onSaveRates }) => {
+const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode, exchangeRates, onSaveRates, legacyFiles }) => {
   const [localKey, setLocalKey] = useState(apiKey);
   const [showKey, setShowKey] = useState(false);
   const [saved, setSaved] = useState(false);
-  const [importStatus, setImportStatus] = useState(null); // {type:'success'|'error', text}
   const [localRates, setLocalRates] = useState({ EUR:'', USD:'' });
   const [ratesSaved, setRatesSaved] = useState(false);
   const [trashItems, setTrashItems] = useState([]); // recoverable recently-deleted datasets
@@ -5799,75 +5514,6 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode, exchangeRa
   }, [isOpen]);
   const formatBytes = (b) => b<1024 ? `${b}B` : b<1024*1024 ? `${(b/1024).toFixed(0)}KB` : `${(b/1024/1024).toFixed(2)}MB`;
 
-  const handleExportAll = async () => {
-    const data = {};
-    BACKUP_KEYS.forEach(k => { const v = localStorage.getItem(k); if (v!==null) data[k] = v; });
-    // Heavy datasets come from IndexedDB and get embedded as actual JS values
-    // (not pre-stringified) — JSON.stringify(payload) below serializes the
-    // whole thing in one pass either way.
-    // A failed read must NOT silently produce a backup file that's missing
-    // the sales data — the person would only discover that when restoring.
-    const exportFailed = [];
-    for (const key of IDB_KEYS) {
-      try { const v = await idbGet(key); if (v !== null) data[key] = v; } catch { exportFailed.push(KEY_LABELS[key]||key); }
-    }
-    if (exportFailed.length > 0) {
-      const proceed = window.confirm(`שים לב: הנתונים הבאים לא נקראו ולא ייכללו בקובץ הגיבוי:\n• ${exportFailed.join('\n• ')}\n\nלהמשיך בכל זאת בגיבוי חלקי?`);
-      if (!proceed) { setImportStatus({ type:'error', text:'הייצוא בוטל — נסה לרענן את הדף ולייצא שוב.' }); return; }
-    }
-    const payload = { app:'BizDataPro', version:2, exportedAt:new Date().toISOString(), data };
-    const blob = new Blob([JSON.stringify(payload)], {type:'application/json;charset=utf-8'});
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a'); a.style.display='none'; a.href=url;
-    a.setAttribute('download', 'BizDataPro_גיבוי_'+new Date().toLocaleDateString('he-IL').replace(/\//g,'-')+'.json');
-    document.body.appendChild(a); a.click();
-    setTimeout(()=>{ document.body.removeChild(a); URL.revokeObjectURL(url); }, 200);
-    // Used by the "back up your data" reminder banner in the header
-    try { localStorage.setItem('lastBackupDate', new Date().toISOString()); } catch { /* reminder metadata only */ }
-    setImportStatus({ type:'success', text:'קובץ הגיבוי נוצר והורד ✓' });
-  };
-
-  const handleImportAll = (e) => {
-    const file = e.target.files[0]; if (!file) return;
-    const reader = new FileReader();
-    reader.onload = async (ev) => {
-      let parsed;
-      try {
-        parsed = JSON.parse(ev.target.result);
-        if (!parsed?.data || typeof parsed.data !== 'object') throw new Error('invalid');
-      } catch {
-        setImportStatus({ type:'error', text:'קובץ לא תקין — זה לא קובץ גיבוי של BizData Pro' });
-        return;
-      }
-      // Each key is written independently — a failure on one must not silently
-      // abort the rest, and the person needs to actually see what didn't make
-      // it rather than just getting a generic success message while data
-      // quietly went missing. Heavy datasets (IDB_KEYS) go to IndexedDB;
-      // older backups (version 1) may have them as JSON strings in
-      // localStorage-style entries, so both string and pre-parsed forms are handled.
-      const failed = [];
-      for (const [k,v] of Object.entries(parsed.data)) {
-        if (IDB_KEYS.includes(k)) {
-          try {
-            const value = typeof v === 'string' ? JSON.parse(v) : v;
-            await idbSet(k, value);
-          } catch { failed.push(k); }
-        } else if (BACKUP_KEYS.includes(k)) {
-          try { localStorage.setItem(k, v); }
-          catch { failed.push(k); }
-        }
-      }
-      if (failed.length === 0) {
-        try { localStorage.setItem('lastBackupDate', new Date().toISOString()); } catch { /* reminder metadata only */ }
-        setImportStatus({ type:'success', text:'הנתונים יובאו! טוען מחדש...' });
-        setTimeout(() => window.location.reload(), 1200);
-      } else {
-        setImportStatus({ type:'error', text:`חלק מהנתונים לא יובאו: ${failed.join(', ')}. נסה לפנות מקום ולייבא שוב.` });
-      }
-    };
-    reader.readAsText(file);
-    e.target.value = '';
-  };
 
   const handleSave = () => {
     const trimmed = localKey.trim();
@@ -5973,34 +5619,7 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode, exchangeRa
             </div>
           </div>
 
-          {/* Backup & Restore */}
-          <div className={`pt-5 border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
-            <div className="flex items-center gap-2 mb-2">
-              <FileSpreadsheet className={`w-4 h-4 ${isDarkMode?'text-purple-400':'text-purple-600'}`}/>
-              <label className={`text-sm font-medium ${isDarkMode?'text-slate-200':'text-slate-700'}`}>גיבוי ושחזור נתונים</label>
-            </div>
-            <p className={`text-xs leading-relaxed mb-3 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
-              שומר את כל הנתונים (מכירות, רכש, לקוחות, הגדרות) לקובץ אחד. שמור אותו בגוגל דרייב (או כל מקום אחר), וייבא אותו במחשב אחר כדי לקבל את כל המידע שלך בלי קשר ל-localStorage של אותו מחשב.
-            </p>
-            <div className="flex gap-2">
-              <button onClick={handleExportAll}
-                className={`flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium border transition-colors ${isDarkMode?'bg-purple-500/10 border-purple-500/30 text-purple-300 hover:bg-purple-500/20':'bg-purple-50 border-purple-200 text-purple-700 hover:bg-purple-100'}`}>
-                <Download className="w-4 h-4"/> ייצוא לקובץ
-              </button>
-              <label className={`flex-1 flex items-center justify-center gap-2 px-3 py-2.5 rounded-xl text-sm font-medium border cursor-pointer transition-colors ${isDarkMode?'bg-slate-700/50 border-slate-600 text-slate-300 hover:bg-slate-700':'bg-slate-50 border-slate-200 text-slate-600 hover:bg-slate-100'}`}>
-                <Upload className="w-4 h-4"/> ייבוא מקובץ
-                <input type="file" accept=".json" onChange={handleImportAll} className="hidden"/>
-              </label>
-            </div>
-            {importStatus && (
-              <p className={`text-xs mt-2 font-medium ${importStatus.type==='success'?(isDarkMode?'text-emerald-400':'text-emerald-600'):(isDarkMode?'text-red-400':'text-red-600')}`}>
-                {importStatus.text}
-              </p>
-            )}
-            <p className={`text-[11px] mt-2 ${isDarkMode?'text-slate-600':'text-slate-400'}`}>
-              ⚠ ייבוא קובץ גיבוי מחליף את הנתונים הקיימים במחשב הזה.
-            </p>
-          </div>
+          {legacyFiles}
 
           {/* Storage diagnostic */}
           <div className={`pt-5 border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
@@ -6118,7 +5737,6 @@ const App = () => {
   const [exchangeRates, setExchangeRates] = useState(() => { try { return JSON.parse(localStorage.getItem('exchangeRates')||'{}'); } catch { return {}; } });
   // Backup reminder — until cloud sync exists, the JSON export is the only
   // safety net, so the app nudges when it's been 7+ days since the last one.
-  const [backupReminderDays, setBackupReminderDays] = useState(null); // null = hidden; -1 = never backed up; n = days since last
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
@@ -6266,7 +5884,6 @@ const App = () => {
   const [chatOpen, setChatOpen] = useState(false);
   const [chatMessages, setChatMessages] = useState([]);
   const [chatThinking, setChatThinking] = useState(false);
-  const [clearModalOpen, setClearModalOpen] = useState(false);
 
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   // Global setting: most customers are invoiced only at month-end/start of next
@@ -6328,25 +5945,6 @@ const App = () => {
     save('suppliersFileNames', suppliersFileNames);
   }, [suppliersData, suppliersFileNames, idbReady, idbLoadFailed]);
 
-  // Backup reminder check — runs after load, and re-runs when Settings closes
-  // (exporting a backup there updates lastBackupDate and should hide the banner).
-  useEffect(() => {
-    if (!idbReady || settingsOpen) return;
-    const hasData = salesData.length>0 || suppliersData.length>0 || customerMonthlyData.length>0;
-    if (!hasData) { setBackupReminderDays(null); return; }
-    try {
-      const snooze = localStorage.getItem('backupReminderSnoozedUntil');
-      if (snooze && Date.now() < +snooze) { setBackupReminderDays(null); return; }
-      const last = localStorage.getItem('lastBackupDate');
-      if (!last) { setBackupReminderDays(-1); return; }
-      const days = Math.floor((Date.now() - new Date(last).getTime()) / (24*60*60*1000));
-      setBackupReminderDays(days >= 7 ? days : null);
-    } catch { setBackupReminderDays(null); }
-  }, [idbReady, settingsOpen, salesData, suppliersData, customerMonthlyData]);
-  const snoozeBackupReminder = () => {
-    try { localStorage.setItem('backupReminderSnoozedUntil', String(Date.now() + 3*24*60*60*1000)); } catch { /* snooze is cosmetic */ }
-    setBackupReminderDays(null);
-  };
 
   // Toggle theme
   const toggleTheme = () => { const n=!isDarkMode; setIsDarkMode(n); localStorage.setItem('theme',n?'dark':'light'); };
@@ -6441,8 +6039,7 @@ const App = () => {
   };
 
   const handleClearData = () => {
-    // overview + procurement = clear everything, like summary
-    const clearBoth = activeTab==='summary' || activeTab==='overview' || activeTab==='procurement';
+    const clearBoth = true; // the one remaining entry point (Settings → old history files) clears both file datasets
     const keys = clearBoth ? ['sales','suppliers'] : [activeTab];
     keys.forEach(k => {
       if (k==='sales') {
@@ -6608,13 +6205,66 @@ const App = () => {
   const otherSources = useMemo(() => {
     const out = [];
     const count = (data, n) => data.reduce((c, r) => c + (String(r.id||'').endsWith('-' + n) ? 1 : 0), 0);
-    salesFileNames.forEach(n => out.push({ id:'s:'+n, name:n, label:'מכירות חודשיות לפי מוצר (לשונית מכירות)', detail:`${count(salesFileData, n).toLocaleString()} שורות`, onDelete:() => removeDataFile('sales', n) }));
-    suppliersFileNames.forEach(n => out.push({ id:'p:'+n, name:n, label:'הוצאות לפי ספק (לשונית ספקים)', detail:`${count(suppliersData, n).toLocaleString()} שורות`, onDelete:() => removeDataFile('suppliers', n) }));
-    if (customerMonthlyFileName && customerMonthlyData.length) out.push({ id:'cm', name:customerMonthlyFileName, label:'מכירות ללקוח בחתך חודשי (לשונית לקוחות)', detail:`${customerMonthlyData.length.toLocaleString()} שורות`, onDelete:clearCustomerMonthly });
-    if (customerProductFileName && customerProductData.length) out.push({ id:'cp', name:customerProductFileName, label:'מכירות ללקוח לפי מוצר (לשונית לקוחות)', detail:`${customerProductData.length.toLocaleString()} שורות`, onDelete:clearCustomerProduct });
+    salesFileNames.forEach(n => out.push({ id:'s:'+n, name:n, label:'מכירות חודשיות לפי מוצר', detail:`${count(salesFileData, n).toLocaleString()} שורות`, onDelete:() => removeDataFile('sales', n) }));
+    suppliersFileNames.forEach(n => out.push({ id:'p:'+n, name:n, label:'הוצאות לפי ספק', detail:`${count(suppliersData, n).toLocaleString()} שורות`, onDelete:() => removeDataFile('suppliers', n) }));
+    if (customerMonthlyFileName && customerMonthlyData.length) out.push({ id:'cm', name:customerMonthlyFileName, label:'מכירות ללקוח בחתך חודשי', detail:`${customerMonthlyData.length.toLocaleString()} שורות`, onDelete:clearCustomerMonthly });
+    if (customerProductFileName && customerProductData.length) out.push({ id:'cp', name:customerProductFileName, label:'מכירות ללקוח לפי מוצר', detail:`${customerProductData.length.toLocaleString()} שורות`, onDelete:clearCustomerProduct });
     return out;
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [salesFileNames, suppliersFileNames, salesFileData, suppliersData, customerMonthlyFileName, customerMonthlyData, customerProductFileName, customerProductData]);
+
+  // Old-history files — everything that still comes from an uploaded file lives in one place (Settings).
+  const renderLegacyFiles = () => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500';
+    const strong = isDarkMode?'text-slate-200':'text-slate-700';
+    const btn = `flex items-center justify-center gap-2 px-3 py-2 rounded-xl text-xs font-medium border cursor-pointer transition-colors ${isDarkMode?'bg-slate-700/50 border-slate-600 text-slate-200 hover:bg-slate-700':'bg-slate-50 border-slate-200 text-slate-700 hover:bg-slate-100'}`;
+    const uploads = [
+      { key:'sales', label:'מכירות חודשיות לפי מוצר / הוצאות לפי ספק', accept:'.csv,.xlsx,.xls', multiple:true, onChange:handleFileUpload, busy:loading },
+      { key:'cm', label:'מכירות ללקוח בחתך חודשי', accept:'.xlsx,.xls', onChange:handleCustomerMonthlyUpload, busy:customerUploadLoading.monthly },
+      { key:'cp', label:'מכירות ללקוח לפי מוצר', accept:'.xlsx,.xls', onChange:handleCustomerProductUpload, busy:customerUploadLoading.product },
+    ];
+    return (
+      <div className={`pt-5 border-t ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+        <div className="flex items-center gap-2 mb-1">
+          <FileSpreadsheet className={`w-4 h-4 ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}/>
+          <span className={`text-sm font-medium ${strong}`}>היסטוריה ישנה מקבצים</span>
+        </div>
+        <p className={`text-xs leading-relaxed mb-3 ${muted}`}>
+          {salesLinesRange ? `Priority מכסה מ-${isoToDisplay(salesLinesRange.from)}. ` : ''}קבצים כאן נחוצים רק להיסטוריה מלפני זה. החודשים ש-Priority מכסה תמיד נלקחים מ-Priority.
+        </p>
+        <div className="grid grid-cols-1 gap-2">
+          {uploads.map(u => (
+            <label key={u.key} className={`${btn} ${u.busy?'opacity-60 cursor-wait':''}`}>
+              {u.busy ? <Loader2 className="w-4 h-4 animate-spin"/> : <Upload className="w-4 h-4"/>} העלה: {u.label}
+              <input type="file" accept={u.accept} multiple={!!u.multiple} onChange={u.onChange} className="hidden" disabled={u.busy}/>
+            </label>
+          ))}
+        </div>
+        {customerUploadError && <p className={`text-xs mt-2 font-medium ${isDarkMode?'text-red-400':'text-red-600'}`}>{customerUploadError.text}</p>}
+        {customerUploadSuccess && !customerUploadError && <p className={`text-xs mt-2 font-medium ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>הקובץ נשמר ✓</p>}
+        {otherSources.length > 0 && (
+          <ul className={`mt-3 divide-y rounded-xl border ${isDarkMode?'divide-slate-700 border-slate-700':'divide-slate-100 border-slate-200'}`}>
+            {otherSources.map(src => (
+              <li key={src.id} className="flex items-center gap-2 px-3 py-2 text-xs">
+                <div className="flex-1 min-w-0">
+                  <p className={`font-semibold truncate ${strong}`} title={src.name}>{src.name}</p>
+                  <p className={muted}>{src.label}{src.detail ? ` · ${src.detail}` : ''}</p>
+                </div>
+                <button type="button" onClick={() => { if (window.confirm(`למחוק את הקובץ "${src.name}"?`)) src.onDelete(); }} aria-label={`מחק את ${src.name}`}
+                  className={`shrink-0 inline-flex items-center gap-1 px-2 py-1 rounded-lg font-semibold ${isDarkMode?'text-red-300 hover:bg-red-500/10':'text-red-700 hover:bg-red-50'}`}>
+                  <Trash2 className="w-3.5 h-3.5"/>מחק
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+        {(salesData.length>0 || suppliersData.length>0) && (
+          <button type="button" onClick={() => { if (window.confirm('למחוק את כל קבצי המכירות והספקים הישנים? (אפשר לבטל מיד אחרי)')) handleClearData(); }}
+            className={`mt-2 text-xs font-semibold hover:underline ${isDarkMode?'text-red-300':'text-red-700'}`}>מחק את כל קבצי המכירות והספקים</button>
+        )}
+      </div>
+    );
+  };
 
   // ─── Saved views — remembers a filter combo (tab + date range + product/supplier) ───
   const [savedViews, setSavedViews] = useState(() => { try { return JSON.parse(localStorage.getItem('savedViews')||'[]'); } catch { return []; } });
@@ -7350,9 +7000,8 @@ const App = () => {
 
   return (
     <div className={`flex min-h-screen font-sans transition-colors duration-300 ${isDarkMode?'bg-slate-950 text-slate-100':'bg-slate-50 text-slate-800'}`} dir="rtl">
-      <SettingsModal isOpen={settingsOpen} onClose={()=>setSettingsOpen(false)} apiKey={apiKey} onSave={setApiKey} isDarkMode={isDarkMode} exchangeRates={exchangeRates} onSaveRates={setExchangeRates}/>
+      <SettingsModal isOpen={settingsOpen} onClose={()=>setSettingsOpen(false)} apiKey={apiKey} onSave={setApiKey} isDarkMode={isDarkMode} exchangeRates={exchangeRates} onSaveRates={setExchangeRates} legacyFiles={renderLegacyFiles()}/>
       <AIModal isOpen={aiModalOpen} onClose={()=>setAiModalOpen(false)} loading={aiLoading} report={aiReport} isDarkMode={isDarkMode}/>
-      <ClearModal isOpen={clearModalOpen} onClose={()=>setClearModalOpen(false)} onConfirm={handleClearData} type={activeTab} isDarkMode={isDarkMode}/>
 
       {/* Undo toast — appears after clearing a dataset, active for 10s */}
       {undoToast && (
@@ -7404,18 +7053,7 @@ const App = () => {
             <Activity className="w-5 h-5 text-emerald-400 shrink-0 group-hover:text-emerald-300"/>
             {!isSidebarCollapsed && <span className="text-sm font-medium text-slate-300 group-hover:text-white text-right">סנכרן מ-Priority{lastSyncAt && <span className="block text-[11px] text-slate-500">לאחרונה {new Date(lastSyncAt).toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</span>}</span>}
           </button>
-          <label className={`flex items-center gap-3 p-2.5 rounded-xl cursor-pointer transition-colors group ${isSidebarCollapsed?'justify-center':''} ${loading?'opacity-50':'hover:bg-white/10'}`}>
-            {loading?<Loader2 className="w-5 h-5 animate-spin text-blue-400 shrink-0"/>:<Upload className="w-5 h-5 text-blue-400 shrink-0 group-hover:text-blue-300"/>}
-            {!isSidebarCollapsed && <span className="text-sm font-medium text-slate-300 group-hover:text-white">טען קבצים</span>}
-            <input type="file" accept=".csv,.xlsx,.xls" multiple onChange={handleFileUpload} className="hidden" disabled={loading}/>
-          </label>
           {storageWarning && !isSidebarCollapsed && <div className="text-xs text-red-400 bg-red-400/10 px-3 py-2 rounded-lg flex items-center gap-2"><AlertTriangle className="w-3 h-3 shrink-0"/>אחסון מלא</div>}
-          {(salesData.length>0||suppliersData.length>0) && (
-            <button onClick={()=>setClearModalOpen(true)} className={`w-full flex items-center gap-3 p-2.5 rounded-xl text-red-400 hover:bg-red-400/10 transition-colors ${isSidebarCollapsed?'justify-center':''}`}>
-              <Trash2 className="w-5 h-5 shrink-0"/>
-              {!isSidebarCollapsed && <span className="text-sm font-medium">נקה נתונים</span>}
-            </button>
-          )}
           {!isSidebarCollapsed && typeof __BUILD_TIME__ !== 'undefined' && <p className="px-2.5 text-[10px] text-slate-600" title="אם התאריך כאן ישן — רענן את הדף (Ctrl+Shift+R)">גרסה {new Date(__BUILD_TIME__).toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}</p>}
         </div>
       </div>
@@ -7500,14 +7138,6 @@ const App = () => {
                 <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${excludeCurrentMonth?'translate-x-0.5':'translate-x-3.5'}`}/>
               </div>
             </button>
-            {/* Backup reminder — a small header button instead of a full-width banner on every page */}
-            {backupReminderDays !== null && idbLoadFailed.length === 0 && (
-              <button type="button" onClick={()=>setSettingsOpen(true)}
-                title={backupReminderDays === -1 ? 'עדיין לא יצרת קובץ גיבוי. הנתונים שמורים רק בדפדפן הזה — ניקוי היסטוריה או תקלה ימחקו אותם.' : `עברו ${backupReminderDays} ימים מהגיבוי האחרון`}
-                className={`hidden sm:flex items-center gap-1.5 px-3 py-2 rounded-xl text-xs font-semibold ${isDarkMode?'bg-orange-500/15 text-orange-300 hover:bg-orange-500/25':'bg-orange-50 text-orange-800 hover:bg-orange-100'}`}>
-                <FileSpreadsheet className="w-3.5 h-3.5"/>{backupReminderDays === -1 ? 'אין גיבוי' : `גיבוי לפני ${backupReminderDays} ימים`}
-              </button>
-            )}
             {/* One menu for the rarely-used controls: theme, notifications, settings, backup */}
             <div className="relative">
               <button type="button" onClick={()=>setHeaderMenuOpen(p=>!p)} aria-expanded={headerMenuOpen} aria-label="עוד — מצב כהה, התראות, הגדרות"
@@ -7525,15 +7155,9 @@ const App = () => {
                     </button>
                     <button role="menuitem" type="button" onClick={()=>{setSettingsOpen(true); setHeaderMenuOpen(false);}}
                       className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-right ${isDarkMode?'text-slate-200 hover:bg-slate-700':'text-slate-700 hover:bg-slate-50'}`}>
-                      <Settings className="w-4 h-4"/>הגדרות, שערי מטבע וגיבוי
+                      <Settings className="w-4 h-4"/>הגדרות ושערי מטבע
                       {!apiKey && <span className={`mr-auto whitespace-nowrap text-[11px] font-semibold px-1.5 py-0.5 rounded ${isDarkMode?'bg-orange-500/15 text-orange-300':'bg-orange-50 text-orange-800'}`}>חסר מפתח AI</span>}
                     </button>
-                    {backupReminderDays !== null && (
-                      <button role="menuitem" type="button" onClick={()=>{snoozeBackupReminder(); setHeaderMenuOpen(false);}}
-                        className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-right ${isDarkMode?'text-slate-200 hover:bg-slate-700':'text-slate-700 hover:bg-slate-50'}`}>
-                        <Bell className="w-4 h-4"/>הזכר לי לגבות בעוד 3 ימים
-                      </button>
-                    )}
                     <div className={`mt-1 pt-2 border-t px-3 ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
                       <p className={`text-xs font-semibold mb-2 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>התראות</p>
                       {notifications.length>0 ? notifications.map(n=>(
@@ -7586,14 +7210,6 @@ const App = () => {
               fileCounts={{ monthly: customerMonthlyData.length, product: customerProductData.length }}
               isDarkMode={isDarkMode}
               fileNames={{ monthly:customerMonthlyFileName, product:customerProductFileName }}
-              onUploadMonthly={handleCustomerMonthlyUpload}
-              onUploadProduct={handleCustomerProductUpload}
-              onClearMonthly={clearCustomerMonthly}
-              onClearProduct={clearCustomerProduct}
-              loading={customerUploadLoading}
-              uploadError={customerUploadError}
-              uploadSuccess={customerUploadSuccess}
-              onDismissError={()=>setCustomerUploadError(null)}
               excludeCurrentMonth={excludeCurrentMonth}
             />
           )}
@@ -7651,7 +7267,7 @@ const App = () => {
 
           {/* Sales / Suppliers */}
           {(activeTab==='sales'||activeTab==='suppliers') && (
-            activeData.length===0 ? <EmptyState onUpload={handleFileUpload} loading={loading} isDarkMode={isDarkMode} activeTab={activeTab} onSync={requestPrioritySync}/> : (
+            activeData.length===0 ? <EmptyState isDarkMode={isDarkMode} activeTab={activeTab} onSync={requestPrioritySync} onOpenFiles={()=>setSettingsOpen(true)}/> : (
               <div className="space-y-6 animate-in fade-in duration-400">
                 {activeTab==='sales' && <PrioritySyncBar isDarkMode={isDarkMode} range={salesLinesRange} lastSyncAt={lastSyncAt} onSync={requestPrioritySync} what="נתוני המכירות"/>}
                 {/* Filters Bar */}

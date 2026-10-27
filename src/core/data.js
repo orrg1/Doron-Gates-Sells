@@ -678,6 +678,28 @@ export const supplierLeadTimes = ({ purchaseLines = [], poMeta = {}, transitBySu
   return out;
 };
 
+// ─── On-time delivery per supplier ───
+// A supplier invoice line counts as on time when its date is no later than the
+// promised date (REQDATE) of the same item on the same PO, plus a 3-day grace.
+export const supplierOnTime = ({ purchaseLines = [], poMeta = {}, sinceIso = null, graceDays = 3 }) => {
+  const by = {}; const seen = new Set();
+  purchaseLines.forEach(l => {
+    if (!l.po || !l.k || !(l.q > 0) || (sinceIso && l.d < sinceIso)) return;
+    const due = poMeta[l.po]?.dues?.[l.k]; if (!due) return;
+    const key = l.po + '|' + l.k + '|' + l.inv; if (seen.has(key)) return; seen.add(key);
+    const late = Math.round((Date.parse(l.d) - Date.parse(due)) / 86400000);
+    if (!Number.isFinite(late)) return;
+    const s = (by[l.s] ||= { n: 0, onTime: 0, lateDaysSum: 0, lateN: 0 });
+    s.n++;
+    if (late <= graceDays) s.onTime++; else { s.lateN++; s.lateDaysSum += late; }
+  });
+  const out = {};
+  Object.entries(by).forEach(([sup, s]) => {
+    out[sup] = { n: s.n, onTime: s.onTime, pct: Math.round(s.onTime / s.n * 100), avgLateDays: s.lateN ? Math.round(s.lateDaysSum / s.lateN) : 0 };
+  });
+  return out;
+};
+
 // ─── Unusually large deals (one-off projects) ───
 // Per product, a sale line counts as unusual when it is far above the product's
 // normal line size AND it alone is at least half of that month's sales — and the

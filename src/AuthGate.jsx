@@ -43,7 +43,7 @@ function CloudBadge({ email, isAdmin, onSignOut }) {
     if (error) setErr(error.message); else { setNewEmail(''); loadUsers(); }
   };
   const removeUser = async (em) => { if (em === email) return; const { error } = await supabase.from('allowed_users').delete().eq('email', em); if (error) setErr(error.message); else loadUsers(); };
-  const label = st.state === 'saving' ? 'שומר לשרת…' : st.state === 'error' ? 'שמירה לשרת נכשלה — ינסה שוב' : st.state === 'saved' ? `נשמר בשרת${st.lastSaved ? ' · ' + new Date(st.lastSaved).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' }) : ''}` : 'מקומי בלבד';
+  const label = st.state === 'saving' ? 'שומר לשרת…' : st.state === 'error' ? 'שמירה לשרת נכשלה — ינסה שוב' : st.state === 'saved' ? `נשמר בשרת${st.lastSaved ? ' · ' + new Date(st.lastSaved).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' }) : ''}` : 'מחובר';
   const dot = st.state === 'saving' ? '#D9822B' : st.state === 'error' ? '#C8322B' : st.state === 'saved' ? '#2E8B57' : '#8A919E';
   const d = dark();
   return (
@@ -55,8 +55,8 @@ function CloudBadge({ email, isAdmin, onSignOut }) {
       {open && (
         <div className={`absolute bottom-12 left-0 w-80 rounded-xl border shadow-2xl p-4 space-y-3 text-sm ${d ? 'bg-slate-800 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}>
           <div>
-            <p className="font-bold">{email || 'מצב מקומי'}</p>
-            <p className="text-xs opacity-70">{email ? 'הנתונים נשמרים בשרת ומסונכרנים בין המחשבים' : 'הנתונים נשמרים רק בדפדפן הזה'}</p>
+            <p className="font-bold">{email}</p>
+            <p className="text-xs opacity-70">הנתונים נשמרים בשרת ומסונכרנים בין המחשבים</p>
             {st.state === 'error' && <p className="text-xs mt-1 font-semibold text-red-600">{st.message}</p>}
           </div>
           {isAdmin && users && (
@@ -114,20 +114,18 @@ function NewDataNotice() {
 }
 
 export default function AuthGate() {
-  const [phase, setPhase] = useState('checking'); // checking | login | denied | hydrating | ready | local | error
+  const [phase, setPhase] = useState('checking'); // checking | login | denied | hydrating | ready | error
   const [email, setEmail] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
 
   useEffect(() => {
+    try { localStorage.removeItem('cloudLocalMode'); } catch { /* old local-mode flag */ }
     let done = false;
     const start = async (session) => {
       if (done) return;
-      if (!session) {
-        if (localStorage.getItem('cloudLocalMode') === '1') { done = true; setPhase('local'); return; }
-        setPhase('login'); return;
-      }
+      if (!session) { setPhase('login'); return; }
       done = true;
       const em = (session.user?.email || '').toLowerCase();
       setEmail(em);
@@ -149,17 +147,14 @@ export default function AuthGate() {
 
   const signIn = async () => {
     setError('');
-    localStorage.removeItem('cloudLocalMode');
     const { error: e } = await supabase.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.origin + window.location.pathname } });
     if (e) setError(e.message);
   };
   const signOut = async () => {
-    if (phase === 'local') { localStorage.removeItem('cloudLocalMode'); window.location.reload(); return; }
     await flushAll(); stopSync(); await supabase.auth.signOut(); window.location.reload();
   };
-  const useLocal = () => { localStorage.setItem('cloudLocalMode', '1'); setPhase('local'); };
 
-  if (phase === 'ready' || phase === 'local') return (<><App /><CloudBadge email={phase === 'ready' ? email : ''} isAdmin={isAdmin} onSignOut={signOut} />{phase === 'ready' && <NewDataNotice />}</>);
+  if (phase === 'ready') return (<><App /><CloudBadge email={email} isAdmin={isAdmin} onSignOut={signOut} /><NewDataNotice /></>);
 
   if (phase === 'checking' || phase === 'hydrating') return (
     <Shell>
@@ -182,7 +177,6 @@ export default function AuthGate() {
       <p className="font-bold text-lg">לא הצלחתי לטעון מהשרת</p>
       <p className="text-sm mt-2 opacity-80 break-words" dir="auto">{error}</p>
       <button type="button" onClick={() => window.location.reload()} className="mt-5 w-full py-2.5 rounded-xl bg-blue-600 text-white font-semibold">נסה שוב</button>
-      <button type="button" onClick={useLocal} className="mt-2 w-full py-2 text-sm opacity-70 hover:underline">המשך במצב מקומי (בלי שרת)</button>
     </Shell>
   );
 
@@ -194,7 +188,6 @@ export default function AuthGate() {
         <GoogleIcon /> התחבר עם Google
       </button>
       {error && <p className="text-sm mt-3 text-red-600" dir="auto">{error}</p>}
-      <button type="button" onClick={useLocal} className="mt-4 w-full py-2 text-sm opacity-70 hover:underline">המשך בלי התחברות (נשמר רק בדפדפן הזה)</button>
     </Shell>
   );
 }
