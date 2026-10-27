@@ -14,7 +14,7 @@
 //   • the website: { action:'digest', send?:true } — preview the weekly email (or send it now).
 // Priority is only ever read (GET).
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
-import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/43b1f875f775f5d2b05f407de211c346f7a84397/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
+import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/312f467b6894cb51f030939816216e05044fcbab/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
 
 const ROOT = (Deno.env.get('PRIORITY_ROOT') || 'https://p.priority-connect.online/odata/Priority/tabA974E.ini/gate').replace(/\/+$/, '');
 const PAT = Deno.env.get('PRIORITY_PAT') || '';
