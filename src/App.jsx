@@ -17,7 +17,8 @@ import {
   Info, Bell, User, Settings, Eye, EyeOff, TrendingDown, Zap,
   PieChart as PieChartIcon, Target, ArrowUpRight, ArrowDownRight, Home,
   ShoppingCart, ClipboardList, Sliders, TriangleAlert, Star, CircleDot,
-  Minus, RefreshCw, SlidersHorizontal, MoreHorizontal
+  Minus, RefreshCw, SlidersHorizontal, MoreHorizontal,
+  Menu,
 } from 'lucide-react';
 import {
   ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid,
@@ -5741,10 +5742,10 @@ const App = () => {
   const [isSidebarCollapsed, setIsSidebarCollapsed] = useState(false);
   const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
 
-  // Auto-collapse on mobile
+  // On a phone the sidebar is a slide-in drawer (opened from the header) — always show it with labels
   useEffect(() => {
     const checkMobile = () => {
-      if (window.innerWidth < 768) { setIsSidebarCollapsed(true); }
+      if (window.innerWidth < 768) { setIsSidebarCollapsed(false); }
     };
     checkMobile();
     window.addEventListener('resize', checkMobile);
@@ -7034,7 +7035,7 @@ const App = () => {
             <div className="bg-blue-600 p-1.5 rounded-lg shrink-0"><LayoutDashboard className="w-4 h-4 text-white"/></div>
             {!isSidebarCollapsed && <span className="text-white font-bold tracking-tight text-lg">BizData <span className="text-blue-400 text-xs font-normal">PRO</span></span>}
           </div>
-          {!isSidebarCollapsed && <button onClick={()=>setIsSidebarCollapsed(true)} className="p-1.5 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white"><ChevronRight className="w-4 h-4"/></button>}
+          {!isSidebarCollapsed && <button onClick={()=>setIsSidebarCollapsed(true)} className="max-md:hidden p-1.5 rounded-lg hover:bg-white/10 text-slate-400 hover:text-white"><ChevronRight className="w-4 h-4"/></button>}
         </div>
         <nav className="flex-1 p-3 space-y-1 pt-4">
           {isSidebarCollapsed && <button onClick={()=>setIsSidebarCollapsed(false)} className="w-full flex justify-center p-2 text-slate-400 hover:text-white hover:bg-white/10 rounded-xl mb-3"><ChevronLeft className="w-4 h-4"/></button>}
@@ -7063,6 +7064,10 @@ const App = () => {
         {/* Header */}
         <header className={`px-6 py-0 h-16 flex items-center justify-between border-b z-10 transition-colors ${isDarkMode?'bg-slate-900 border-slate-800':'bg-white border-slate-200'}`}>
           <div className="flex items-center gap-3">
+            <button type="button" onClick={()=>setIsMobileMenuOpen(true)} aria-label="פתח תפריט"
+              className={`md:hidden p-2 -mr-2 rounded-xl ${isDarkMode?'text-slate-200 hover:bg-slate-800':'text-slate-700 hover:bg-slate-100'}`}>
+              <Menu className="w-6 h-6"/>
+            </button>
             <h1 className={`text-lg font-bold ${isDarkMode?'text-white':'text-slate-800'}`}>
               {navItems.find(n=>n.id===activeTab)?.label}
             </h1>
