@@ -68,7 +68,7 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
 
   // 1. what to order, by supplier
   const bySup = {};
-  products.filter(p => p.suggestedOrder > 0).forEach(p => {
+  products.filter(p => p.suggestedOrder > 0 && !p.ownMade).forEach(p => {
     const s = (bySup[p.supplier || 'ספק לא ידוע'] ||= { name: p.supplier || 'ספק לא ידוע', n: 0, now: 0, value: 0, lead: p.effectiveLeadTime });
     s.n++; if (p.status === 'now') s.now++; s.value += p.orderCost || 0;
   });
@@ -107,7 +107,8 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
   return {
     generatedAt: now, today,
     syncAt: app.prioritySyncAt ? Number(app.prioritySyncAt) : null,
-    toOrder, toOrderTotal: toOrder.reduce((a, s) => a + s.value, 0), toOrderNow: products.filter(p => p.status === 'now').length,
+    toOrder, toOrderTotal: toOrder.reduce((a, s) => a + s.value, 0), toOrderNow: products.filter(p => p.status === 'now' && !p.ownMade).length,
+    toMake: products.filter(p => p.ownMade && p.suggestedOrder > 0).length, toMakeNow: products.filter(p => p.ownMade && p.status === 'now').length,
     latePOs: Object.values(lateBySup).map(s => ({ ...s, pos: [...s.pos] })).sort((a, b) => b.maxDays - a.maxDays), latePOLines: latePOs.length,
     delayed: delayed.slice(0, 10).map(s => ({ cont: s.cont, sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays })),
     priceUps: priceUps.slice(0, 15), excessValue, excessPOs: excessPOs.slice(0, 10).map(p => ({ name: p.name, sku: p.sku, supplier: p.supplier, poExcess: p.poExcess, value: p.poExcessValue })), excessPOCount: excessPOs.length,
@@ -134,6 +135,7 @@ export const renderDigestHtml = (d, { siteUrl }) => {
     <tr><td style="background:#0f172a;color:#fff;padding:18px 22px"><div style="font-size:18px;font-weight:bold">סיכום שבועי — רכש ומכירות</div>
       <div style="font-size:12px;opacity:.75;margin-top:4px">${esc(isoToDisplay(d.today))}${d.syncAt ? ` · נתוני Priority מ-${esc(new Date(d.syncAt).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }))}` : ''}</div></td></tr>
     ${sec('מה להזמין השבוע', p(`<b>${d.toOrderNow}</b> מוצרים להזמין עכשיו · שווי משוער של כל ההמלצות <b>${ils(d.toOrderTotal)}</b>`) +
+      (d.toMake ? p(`ייצור עצמי: <b>${d.toMake}</b> מוצרים לייצר${d.toMakeNow ? ` (מהם <b style="color:#C8322B">${d.toMakeNow}</b> דחופים)` : ''}`) : '') +
       table(['ספק', 'מוצרים', 'דחוף', 'שווי משוער', 'זמן אספקה'], d.toOrder.slice(0, 12).map(s => [esc(s.name), s.n, s.now ? `<b style="color:#C8322B">${s.now}</b>` : '—', s.value ? ils(s.value) : '—', `${s.lead} ח׳`])), proc)}
     ${sec('מה בדרך — באיחור ונדחה', p(`הזמנות רכש באיחור: <b>${d.latePOLines}</b> שורות`) +
       table(['ספק', 'שורות', 'איחור מרבי', 'הזמנות'], d.latePOs.slice(0, 8).map(s => [esc(s.name), s.lines, `${s.maxDays} ימים`, esc(s.pos.slice(0, 4).join(', '))])) +

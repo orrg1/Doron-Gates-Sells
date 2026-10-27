@@ -4,6 +4,10 @@
 import { getDateVal, calcOrderPlan, isoToMonthKey, parseFlexDate, startOfToday, DAY_MS } from './data.js';
 
 // ─── PROCUREMENT STATUS — one status and at most one note per row ─────
+// Items whose Priority product family is "ייצור עצמי" are made in-house: they are planned
+// under one pseudo-supplier of that name ("what to produce"), not ordered from a supplier.
+export const OWN_MADE = 'ייצור עצמי';
+export const isOwnMadeFamily = (fam) => /ייצור\s*עצמי/.test(String(fam || ''));
 export const procStatus = (p) => {
   if (p.currentStock === null) return 'unknown';
   if (p.suggestedOrder > 0) return p.risk === 'critical' ? 'now' : 'soon';
@@ -119,10 +123,11 @@ export const computeProducts = (ctx) => {
     const minStock     = minStockMap[key]??minStockMap[p.sku]??minStockMap[p.name]??null;
     // Last supplier invoice for this SKU — fills supplier / price when the item card has none.
     const lastP = lastSupBySku[p.sku] ?? lastSupBySku[key] ?? null;
-    const supplier     = supplierMap[key]??supplierMap[p.sku]??supplierMap[p.name]??lastP?.s??null;
+    const ex = itemsExtra[p.sku] ?? itemsExtra[key] ?? null;
+    const ownMade = isOwnMadeFamily(ex?.fam);
+    const supplier     = ownMade ? OWN_MADE : (supplierMap[key]??supplierMap[p.sku]??supplierMap[p.name]??lastP?.s??null);
     const catalogCost  = costMap[key]??costMap[p.sku]??costMap[p.name]??null;
     const costFromPurchase = catalogCost==null && lastP && lastP.p>0;
-    const ex = itemsExtra[p.sku] ?? itemsExtra[key] ?? null;
     // Last resort: Priority's average cost (always in ₪) when there is no item-card price and no supplier invoice.
     const costFromAvg = catalogCost==null && !costFromPurchase && ex?.avgCost>0;
     const currency     = costFromPurchase ? lastP.cur : costFromAvg ? 'ILS' : (currencyMap[key]??currencyMap[p.sku]??currencyMap[p.name]??null);
@@ -257,7 +262,7 @@ export const computeProducts = (ctx) => {
     out.statusRank = { now:0, soon:1, watch:2, unknown:3, ok:4 }[out.status];
     out.chip = procChip(out);
     out.costFromPurchase = costFromPurchase; out.costFromAvg = costFromAvg; out.lastPurchase = lastP;
-    out.family = ex?.fam || ''; out.ownMade = ex?.type === 'P'; out.avgCostPriority = ex?.avgCost ?? null; out.listPrice = ex?.listPrice ?? null;
+    out.family = ex?.fam || ''; out.ownMade = ownMade; out.avgCostPriority = ex?.avgCost ?? null; out.listPrice = ex?.listPrice ?? null;
     out.lastSalePriority = ex?.lastSale || ''; out.lastBuyPriority = ex?.lastBuy || '';
     out.stockout = so; out.skippedMonths = skippedMonths;
     out.lostQty = so && so.outDays && avgMonthly > 0 ? Math.round(so.outDays * avgMonthly / 30) : 0;

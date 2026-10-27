@@ -1223,6 +1223,8 @@ function finalizeSync({ prev, payloads, failed = {}, since = {}, sSince, pSince,
 }
 
 // src/core/procModel.js
+var OWN_MADE = "\u05D9\u05D9\u05E6\u05D5\u05E8 \u05E2\u05E6\u05DE\u05D9";
+var isOwnMadeFamily = (fam) => /ייצור\s*עצמי/.test(String(fam || ""));
 var procStatus = (p) => {
   if (p.currentStock === null) return "unknown";
   if (p.suggestedOrder > 0) return p.risk === "critical" ? "now" : "soon";
@@ -1315,10 +1317,11 @@ var computeProducts = (ctx) => {
     const currentStock = stockMap[key] ?? stockMap[p.sku] ?? stockMap[p.name] ?? null;
     const minStock = minStockMap[key] ?? minStockMap[p.sku] ?? minStockMap[p.name] ?? null;
     const lastP = lastSupBySku[p.sku] ?? lastSupBySku[key] ?? null;
-    const supplier = supplierMap[key] ?? supplierMap[p.sku] ?? supplierMap[p.name] ?? lastP?.s ?? null;
+    const ex = itemsExtra[p.sku] ?? itemsExtra[key] ?? null;
+    const ownMade = isOwnMadeFamily(ex?.fam);
+    const supplier = ownMade ? OWN_MADE : supplierMap[key] ?? supplierMap[p.sku] ?? supplierMap[p.name] ?? lastP?.s ?? null;
     const catalogCost = costMap[key] ?? costMap[p.sku] ?? costMap[p.name] ?? null;
     const costFromPurchase = catalogCost == null && lastP && lastP.p > 0;
-    const ex = itemsExtra[p.sku] ?? itemsExtra[key] ?? null;
     const costFromAvg = catalogCost == null && !costFromPurchase && ex?.avgCost > 0;
     const currency = costFromPurchase ? lastP.cur : costFromAvg ? "ILS" : currencyMap[key] ?? currencyMap[p.sku] ?? currencyMap[p.name] ?? null;
     const unitCostOriginal = costFromPurchase ? lastP.p : costFromAvg ? ex.avgCost : catalogCost;
@@ -1423,7 +1426,7 @@ var computeProducts = (ctx) => {
     out.costFromAvg = costFromAvg;
     out.lastPurchase = lastP;
     out.family = ex?.fam || "";
-    out.ownMade = ex?.type === "P";
+    out.ownMade = ownMade;
     out.avgCostPriority = ex?.avgCost ?? null;
     out.listPrice = ex?.listPrice ?? null;
     out.lastSalePriority = ex?.lastSale || "";
@@ -1588,7 +1591,7 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
     outlierDecisions: decisions
   });
   const bySup = {};
-  products.filter((p) => p.suggestedOrder > 0).forEach((p) => {
+  products.filter((p) => p.suggestedOrder > 0 && !p.ownMade).forEach((p) => {
     const s = bySup[p.supplier || "\u05E1\u05E4\u05E7 \u05DC\u05D0 \u05D9\u05D3\u05D5\u05E2"] ||= { name: p.supplier || "\u05E1\u05E4\u05E7 \u05DC\u05D0 \u05D9\u05D3\u05D5\u05E2", n: 0, now: 0, value: 0, lead: p.effectiveLeadTime };
     s.n++;
     if (p.status === "now") s.now++;
@@ -1629,7 +1632,9 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
     syncAt: app.prioritySyncAt ? Number(app.prioritySyncAt) : null,
     toOrder,
     toOrderTotal: toOrder.reduce((a, s) => a + s.value, 0),
-    toOrderNow: products.filter((p) => p.status === "now").length,
+    toOrderNow: products.filter((p) => p.status === "now" && !p.ownMade).length,
+    toMake: products.filter((p) => p.ownMade && p.suggestedOrder > 0).length,
+    toMakeNow: products.filter((p) => p.ownMade && p.status === "now").length,
     latePOs: Object.values(lateBySup).map((s) => ({ ...s, pos: [...s.pos] })).sort((a, b) => b.maxDays - a.maxDays),
     latePOLines: latePOs.length,
     delayed: delayed.slice(0, 10).map((s) => ({ cont: s.cont, sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays })),
@@ -1660,7 +1665,7 @@ var renderDigestHtml = (d, { siteUrl }) => {
   <table width="640" cellpadding="0" cellspacing="0" style="max-width:640px;background:#ffffff;border-radius:12px;overflow:hidden" dir="rtl">
     <tr><td style="background:#0f172a;color:#fff;padding:18px 22px"><div style="font-size:18px;font-weight:bold">\u05E1\u05D9\u05DB\u05D5\u05DD \u05E9\u05D1\u05D5\u05E2\u05D9 \u2014 \u05E8\u05DB\u05E9 \u05D5\u05DE\u05DB\u05D9\u05E8\u05D5\u05EA</div>
       <div style="font-size:12px;opacity:.75;margin-top:4px">${esc(isoToDisplay(d.today))}${d.syncAt ? ` \xB7 \u05E0\u05EA\u05D5\u05E0\u05D9 Priority \u05DE-${esc(new Date(d.syncAt).toLocaleString("he-IL", { timeZone: "Asia/Jerusalem", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }))}` : ""}</div></td></tr>
-    ${sec("\u05DE\u05D4 \u05DC\u05D4\u05D6\u05DE\u05D9\u05DF \u05D4\u05E9\u05D1\u05D5\u05E2", p(`<b>${d.toOrderNow}</b> \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DC\u05D4\u05D6\u05DE\u05D9\u05DF \u05E2\u05DB\u05E9\u05D9\u05D5 \xB7 \u05E9\u05D5\u05D5\u05D9 \u05DE\u05E9\u05D5\u05E2\u05E8 \u05E9\u05DC \u05DB\u05DC \u05D4\u05D4\u05DE\u05DC\u05E6\u05D5\u05EA <b>${ils(d.toOrderTotal)}</b>`) + table(["\u05E1\u05E4\u05E7", "\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD", "\u05D3\u05D7\u05D5\u05E3", "\u05E9\u05D5\u05D5\u05D9 \u05DE\u05E9\u05D5\u05E2\u05E8", "\u05D6\u05DE\u05DF \u05D0\u05E1\u05E4\u05E7\u05D4"], d.toOrder.slice(0, 12).map((s) => [esc(s.name), s.n, s.now ? `<b style="color:#C8322B">${s.now}</b>` : "\u2014", s.value ? ils(s.value) : "\u2014", `${s.lead} \u05D7\u05F3`])), proc)}
+    ${sec("\u05DE\u05D4 \u05DC\u05D4\u05D6\u05DE\u05D9\u05DF \u05D4\u05E9\u05D1\u05D5\u05E2", p(`<b>${d.toOrderNow}</b> \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DC\u05D4\u05D6\u05DE\u05D9\u05DF \u05E2\u05DB\u05E9\u05D9\u05D5 \xB7 \u05E9\u05D5\u05D5\u05D9 \u05DE\u05E9\u05D5\u05E2\u05E8 \u05E9\u05DC \u05DB\u05DC \u05D4\u05D4\u05DE\u05DC\u05E6\u05D5\u05EA <b>${ils(d.toOrderTotal)}</b>`) + (d.toMake ? p(`\u05D9\u05D9\u05E6\u05D5\u05E8 \u05E2\u05E6\u05DE\u05D9: <b>${d.toMake}</b> \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DC\u05D9\u05D9\u05E6\u05E8${d.toMakeNow ? ` (\u05DE\u05D4\u05DD <b style="color:#C8322B">${d.toMakeNow}</b> \u05D3\u05D7\u05D5\u05E4\u05D9\u05DD)` : ""}`) : "") + table(["\u05E1\u05E4\u05E7", "\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD", "\u05D3\u05D7\u05D5\u05E3", "\u05E9\u05D5\u05D5\u05D9 \u05DE\u05E9\u05D5\u05E2\u05E8", "\u05D6\u05DE\u05DF \u05D0\u05E1\u05E4\u05E7\u05D4"], d.toOrder.slice(0, 12).map((s) => [esc(s.name), s.n, s.now ? `<b style="color:#C8322B">${s.now}</b>` : "\u2014", s.value ? ils(s.value) : "\u2014", `${s.lead} \u05D7\u05F3`])), proc)}
     ${sec("\u05DE\u05D4 \u05D1\u05D3\u05E8\u05DA \u2014 \u05D1\u05D0\u05D9\u05D7\u05D5\u05E8 \u05D5\u05E0\u05D3\u05D7\u05D4", p(`\u05D4\u05D6\u05DE\u05E0\u05D5\u05EA \u05E8\u05DB\u05E9 \u05D1\u05D0\u05D9\u05D7\u05D5\u05E8: <b>${d.latePOLines}</b> \u05E9\u05D5\u05E8\u05D5\u05EA`) + table(["\u05E1\u05E4\u05E7", "\u05E9\u05D5\u05E8\u05D5\u05EA", "\u05D0\u05D9\u05D7\u05D5\u05E8 \u05DE\u05E8\u05D1\u05D9", "\u05D4\u05D6\u05DE\u05E0\u05D5\u05EA"], d.latePOs.slice(0, 8).map((s) => [esc(s.name), s.lines, `${s.maxDays} \u05D9\u05DE\u05D9\u05DD`, esc(s.pos.slice(0, 4).join(", "))])) + (d.delayed.length ? '<div style="height:10px"></div>' + table(["\u05DE\u05DB\u05D5\u05DC\u05D4", "\u05E1\u05E4\u05E7", "\u05D4\u05D2\u05E2\u05D4", "\u05E0\u05D3\u05D7\u05D4"], d.delayed.map((s) => [esc(s.cont || "\u2014"), esc(s.sup), esc(isoToDisplay(s.arr)), `${s.delayDays} \u05D9\u05DE\u05D9\u05DD (\u05D4\u05D9\u05D4 ${esc(isoToDisplay(s.from))})`])) : ""), proc)}
     ${sec("\u05D4\u05EA\u05D9\u05D9\u05E7\u05E8\u05D5\u05D9\u05D5\u05EA \u05D1\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05D5\u05EA \u05E1\u05E4\u05E7 \u05D4\u05E9\u05D1\u05D5\u05E2", table(["\u05DE\u05D5\u05E6\u05E8", "\u05E1\u05E4\u05E7", "\u05E7\u05D5\u05D3\u05DD", "\u05E2\u05DB\u05E9\u05D9\u05D5", "\u05E9\u05D9\u05E0\u05D5\u05D9"], d.priceUps.map((x) => [esc(x.name), esc(x.s), `${x.prevP} ${esc(x.cur)}`, `<b>${x.p} ${esc(x.cur)}</b>`, `<b style="color:#C8322B">${pctS(x.pct)}</b>`])), proc)}
     ${sec("\u05DE\u05DC\u05D0\u05D9 \u05E2\u05D5\u05D3\u05E3", p(`\u05DB\u05E1\u05E3 \u05E9\u05D9\u05D5\u05E9\u05D1 \u05D1\u05DE\u05DC\u05D0\u05D9 \u05E2\u05D5\u05D3\u05E3: <b>${ils(d.excessValue)}</b> \xB7 \u05D4\u05D6\u05DE\u05E0\u05D5\u05EA \u05E4\u05EA\u05D5\u05D7\u05D5\u05EA \u05E2\u05DC \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05D1\u05E2\u05D5\u05D3\u05E3: <b>${d.excessPOCount}</b>`) + table(["\u05DE\u05D5\u05E6\u05E8", "\u05E1\u05E4\u05E7", "\u05D1\u05D4\u05D6\u05DE\u05E0\u05D4 \u05DE\u05D9\u05D5\u05EA\u05E8\u05EA", "\u05E9\u05D5\u05D5\u05D9"], d.excessPOs.map((x) => [esc(x.name), esc(x.supplier || "\u2014"), `${x.poExcess} \u05D9\u05D7\u05F3`, x.value ? ils(x.value) : "\u2014"])), proc)}

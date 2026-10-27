@@ -2,7 +2,7 @@ import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react'
 import { createPortal } from 'react-dom';
 import * as XLSXLib from 'xlsx';
 import { supabase, flushAll, queueDataset } from './cloud.js';
-import { procStatus, PROC_STATUS_LABEL, procChip, computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './core/procModel.js';
+import { OWN_MADE, procStatus, PROC_STATUS_LABEL, procChip, computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './core/procModel.js';
 import { supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
@@ -17,7 +17,7 @@ import {
   Info, Bell, User, Settings, Eye, EyeOff, TrendingDown, Zap,
   PieChart as PieChartIcon, Target, ArrowUpRight, ArrowDownRight, Home,
   ShoppingCart, ClipboardList, Sliders, TriangleAlert, Star, CircleDot,
-  Minus, RefreshCw, SlidersHorizontal, MoreHorizontal,
+  Minus, RefreshCw, SlidersHorizontal, MoreHorizontal, Factory,
   Menu,
 } from 'lucide-react';
 import {
@@ -2208,7 +2208,7 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
     if (abcFilter!=='all') data=data.filter(p=>p.abc===abcFilter);
     if (familyFilter) data=data.filter(p=>(p.family||'ללא משפחה')===familyFilter);
     if (riskFilter!=='all') data=data.filter(p=>p.risk===riskFilter);
-    if (actionFilter==='order') data=data.filter(p=>p.suggestedOrder>0);
+    if (actionFilter==='order') data=data.filter(p=>p.suggestedOrder>0 && !p.ownMade);
     if (actionFilter==='late') data=data.filter(p=>p.overdue);
     if (outlierOnly) data=data.filter(p=>p.outlierPending>0);
     if (searchTerm) data=data.filter(p=>smartMatch(p.name, searchTerm)||smartMatch(p.sku, searchTerm));
@@ -2427,11 +2427,13 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
   const stockedCount = useMemo(()=>products.filter(p=>p.currentStock!==null).length,[products]);
   // Numbers for the four action cards — always over ALL products, not the filtered table.
   const actionKpis = useMemo(() => {
-    const toOrder = products.filter(p=>p.suggestedOrder>0 && p.currentStock!==null);
+    const toOrder = products.filter(p=>p.suggestedOrder>0 && p.currentStock!==null && !p.ownMade);
+    const toMake = products.filter(p=>p.suggestedOrder>0 && p.currentStock!==null && p.ownMade);
     const stockValue = products.reduce((s,p)=>s+(p.unitCost!=null?Math.max(0,p.currentStock??0)*p.unitCost:0),0);
     const monthlyCogs = products.reduce((s,p)=>s+(p.unitCost!=null?(p.avgMonthly||0)*p.unitCost:0),0);
     return {
       orderCount: toOrder.length,
+      makeCount: toMake.length,
       orderCost: toOrder.reduce((s,p)=>s+(p.orderCost||0),0),
       urgentCount: toOrder.filter(p=>p.status==='now').length,
       lateValue: overdueOrders.reduce((s,o)=>s+(o.valueILS||0),0),
@@ -2526,10 +2528,10 @@ const ProcurementPage = ({ syncRequest = null, onSyncRequestHandled, onSyncDone,
         draftCount: items.filter(p => draftQty[p.key] != null).length,
         ordersCount: orders.length, ordersLate: orders.filter(o => o.isOverdue).length,
         ships, nextShip, shipDelayed: ships.some(s => s.delayDays > 0),
-        pb, rel, lead, leadInfo, lastPo,
+        pb, rel, lead, leadInfo, lastPo, ownMade: name === OWN_MADE,
         actualLeadDays: leadInfo.st?.median ?? rel?.avgLeadDays ?? null,
       };
-    }).sort((a,b) => a.worstRank - b.worstRank || b.value - a.value || (b.pb?.spend12||0) - (a.pb?.spend12||0));
+    }).sort((a,b) => (b.ownMade - a.ownMade) || a.worstRank - b.worstRank || b.value - a.value || (b.pb?.spend12||0) - (a.pb?.spend12||0));
   }, [products, draftQty, ordersEnriched, activeShipsBySupplier, purchBySupplier, supplierReliability, leadTimeMap, leadTime, leadStats, leadAddTransit]);
   const vendorObj = vendor ? vendors.find(v => v.name === vendor) : null;
   const setDraftFor = (p, val) => {
@@ -3672,7 +3674,7 @@ const renderProductRow = (p) => {
     return (
       <div className={`rounded-2xl border px-5 py-4 space-y-3 text-sm ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
         <div className="flex flex-wrap items-baseline gap-x-4 gap-y-1">
-          <b className={strong}>זמן אספקה בתכנון: {v.lead} ח׳</b>
+          <b className={strong}>{v.ownMade ? 'זמן ייצור בתכנון' : 'זמן אספקה בתכנון'}: {v.lead} ח׳</b>
           <span className={muted}>{srcLabel}</span>
         </div>
         {st ? (
@@ -3947,7 +3949,8 @@ const renderProductRow = (p) => {
         spend12: v => v.pb?.spend12 || null,
         lead: v => v.actualLeadDays ?? v.lead * 30,
       });
-      const grid = { gridTemplateColumns:'minmax(0,1.6fr) 140px 140px 170px 120px 120px 130px 20px' };
+      const grid = { gridTemplateColumns:'minmax(170px,1.6fr) 120px 130px 170px 110px 110px 130px 20px' };
+      const stickyBg = isDarkMode?'bg-slate-800':'bg-white';
       return (
         <div className={cardCls}>
           <div className="flex flex-wrap items-center gap-3 px-5 py-4">
@@ -3958,22 +3961,22 @@ const renderProductRow = (p) => {
               className={`px-3 py-2 border rounded-xl text-sm w-64 focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'bg-slate-900 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
           </div>
           <div className="overflow-x-auto">
-            <div className="min-w-[1000px]">
+            <div className="min-w-[1080px]">
               <div className={`grid gap-4 px-5 py-2.5 ${headCls}`} style={grid}>
-                {sortHead('vendors','name','ספק')}{sortHead('vendors','toOrder','להזמין',{firstDir:'desc'})}{sortHead('vendors','worst','מצב')}{sortHead('vendors','incoming','בדרך',{firstDir:'desc'})}{sortHead('vendors','lastPo','הזמנה אחרונה',{firstDir:'desc'})}{sortHead('vendors','spend12','קניות 12 ח׳',{firstDir:'desc'})}{sortHead('vendors','lead','זמן אספקה',{firstDir:'desc'})}<div/>
+                <div className={`sticky right-0 z-[1] -mr-5 pr-5 ${isDarkMode?'bg-slate-900':'bg-slate-50'}`}>{sortHead('vendors','name','ספק')}</div>{sortHead('vendors','toOrder','להזמין',{firstDir:'desc'})}{sortHead('vendors','worst','מצב')}{sortHead('vendors','incoming','בדרך',{firstDir:'desc'})}{sortHead('vendors','lastPo','הזמנה אחרונה',{firstDir:'desc'})}{sortHead('vendors','spend12','קניות 12 ח׳',{firstDir:'desc'})}{sortHead('vendors','lead','זמן אספקה',{firstDir:'desc'})}<div/>
               </div>
               {list.map(v => {
                 const st = v.worst;
                 return (
                   <button key={v.name} type="button" onClick={()=>{ setVendor(v.name); setDrawerKey(null); }}
                     className={`w-full text-right grid gap-4 items-center px-5 py-3.5 border-t transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${isDarkMode?'border-slate-700 hover:bg-slate-700/40':'border-slate-100 hover:bg-slate-50'}`} style={grid}>
-                    <div className="min-w-0">
-                      <p className={`font-bold text-sm truncate ${strong}`}>{v.name}</p>
+                    <div className={`min-w-0 sticky right-0 z-[1] -mr-5 pr-5 py-1 ${stickyBg}`}>
+                      <p className={`font-bold text-sm truncate flex items-center gap-1.5 ${strong}`} title={v.name}>{v.ownMade && <Factory className="w-4 h-4 shrink-0 text-violet-500" aria-hidden="true"/>}{v.name}</p>
                       <p className={`text-xs ${muted}`}>{v.items.length} מוצרים{v.draftCount?` · ${v.draftCount} כמויות שקבעת`:''}</p>
                     </div>
                     <div>
                       {v.toOrder.length ? <>
-                        <p className={`text-sm font-bold ${strong}`}>{v.toOrder.length} מוצרים</p>
+                        <p className={`text-sm font-bold ${strong}`}>{v.toOrder.length} {v.ownMade?'לייצר':'מוצרים'}</p>
                         <p className={`text-xs ${muted}`}>{v.value>0?formatShort(v.value):''}</p>
                       </> : <span className={muted}>—</span>}
                     </div>
@@ -4018,8 +4021,9 @@ const renderProductRow = (p) => {
             <button type="button" onClick={()=>setVendor(null)} className={`inline-flex items-center gap-1 text-sm font-semibold ${isDarkMode?'text-blue-300':'text-blue-700'} hover:underline`}>
               <ChevronRight className="w-4 h-4"/> כל הספקים
             </button>
-            <h3 className={`text-2xl font-bold ${strong}`}>{v.name}</h3>
-            <p className={`text-sm ${muted}`}>{v.items.length} מוצרים · זמן אספקה {v.lead} ח׳ ({{manual:'ידני',computed:'מחושב מההזמנות',global:'ברירת מחדל'}[v.leadInfo.source]}){v.pb?.mainCur && v.pb.mainCur!=='ILS' ? ` · מטבע ${v.pb.mainCur}` : ''}</p>
+            <h3 className={`text-2xl font-bold flex items-center gap-2 ${strong}`}>{v.ownMade && <Factory className="w-6 h-6 text-violet-500" aria-hidden="true"/>}{v.name}</h3>
+            {v.ownMade && <p className={`text-sm ${muted}`}>מוצרים שמשפחת המוצר שלהם ב-Priority היא "ייצור עצמי" — כאן רואים כמה לייצר, לא להזמין מספק.</p>}
+            <p className={`text-sm ${muted}`}>{v.items.length} מוצרים · {v.ownMade ? 'זמן ייצור' : 'זמן אספקה'} {v.lead} ח׳ ({{manual:'ידני',computed:'מחושב מההזמנות',global:'ברירת מחדל'}[v.leadInfo.source]}){v.pb?.mainCur && v.pb.mainCur!=='ILS' ? ` · מטבע ${v.pb.mainCur}` : ''}</p>
           </div>
           <div className="flex-1"/>
           <div className={`flex flex-wrap gap-5 rounded-xl border px-4 py-2.5 text-sm ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
@@ -4054,7 +4058,7 @@ const renderProductRow = (p) => {
             <div className="overflow-x-auto">
               <div style={{minWidth: 220 + months.length*24 + 600}}>
                 <div className={`grid gap-3 items-center px-4 py-2.5 ${headCls}`} style={grid}>
-                  {sortHead('vendorItems','name','מוצר')}
+                  <div className={`sticky right-0 z-[1] -mr-4 pr-4 ${isDarkMode?'bg-slate-900':'bg-slate-50'}`}>{sortHead('vendorItems','name','מוצר')}</div>
                   <div className="flex gap-0.5">{months.map(m => <span key={m} className="text-[10px] text-center" style={{width:22}}>{m.split('-')[0]}</span>)}</div>
                   {sortHead('vendorItems','avgMonthly','ממוצע',{firstDir:'desc'})}{sortHead('vendorItems','currentStock','מלאי',{firstDir:'desc'})}{sortHead('vendorItems','incomingQty','בדרך · הגעה',{firstDir:'desc'})}{sortHead('vendorItems','suggestedOrder','מומלץ',{firstDir:'desc'})}{sortHead('vendorItems','qty','להזמין',{firstDir:'desc'})}
                 </div>
@@ -4064,7 +4068,7 @@ const renderProductRow = (p) => {
                   const edited = draftQty[p.key] != null;
                   return (
                     <div key={p.key} className={`grid gap-3 items-center px-4 py-2.5 border-t ${isDarkMode?'border-slate-700':'border-slate-100'} ${drawerKey===p.key?(isDarkMode?'bg-slate-700/50':'bg-blue-50/60'):''}`} style={grid}>
-                      <button type="button" onClick={()=>setDrawerKey(p.key)} className="text-right min-w-0 group focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded">
+                      <button type="button" onClick={()=>setDrawerKey(p.key)} className={`text-right min-w-0 group focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded sticky right-0 z-[1] -mr-4 pr-4 py-1 ${drawerKey===p.key?(isDarkMode?'bg-slate-700':'bg-blue-50'):(isDarkMode?'bg-slate-800':'bg-white')}`}>
                         <p className={`text-sm font-semibold truncate group-hover:underline ${strong}`} title={p.name}>{p.name}</p>
                         <p className="flex items-center gap-1.5 min-w-0">
                           <span className={`text-xs font-mono ${muted}`}>{p.sku}</span>
@@ -4097,7 +4101,7 @@ const renderProductRow = (p) => {
           </div>
 
           <aside aria-label="רשימה להזמנה ב-Priority" className={`rounded-2xl border p-4 space-y-3 2xl:sticky 2xl:top-4 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
-            <h4 className={`font-bold ${strong}`}>רשימה להזמנה ב-Priority</h4>
+            <h4 className={`font-bold ${strong}`}>{v.ownMade ? 'רשימת ייצור' : 'רשימה להזמנה ב-Priority'}</h4>
             <p className={`text-xs leading-relaxed ${muted}`}>הכמויות מהטבלה. תקליד אותן בהזמנת הרכש ב-Priority — כשתטען שוב את קובץ ההזמנות הפתוחות, השורות יעברו אוטומטית ל"בדרך" והרשימה תתנקה.</p>
             <div className={`rounded-lg border divide-y text-sm max-h-80 overflow-y-auto ${isDarkMode?'border-slate-700 divide-slate-700':'border-slate-200 divide-slate-100'}`}>
               {toOrder.length ? toOrder.map(p => (
@@ -4106,7 +4110,7 @@ const renderProductRow = (p) => {
                   <span className={`flex-1 truncate text-xs ${strong}`}>{p.name}</span>
                   <b className={`tabular-nums ${strong}`}>{orderQtyFor(p).toLocaleString()}</b>
                 </div>
-              )) : <p className={`px-3 py-3 text-xs ${muted}`}>אין כמויות להזמנה מהספק הזה</p>}
+              )) : <p className={`px-3 py-3 text-xs ${muted}`}>{v.ownMade ? 'אין כרגע מה לייצר' : 'אין כמויות להזמנה מהספק הזה'}</p>}
             </div>
             {Object.keys(totalByCur).length>0 && (
               <div className="flex justify-between text-sm"><span className={muted}>סה״כ משוער</span><b className={strong}>{Object.entries(totalByCur).map(([c,a])=>formatUnitCost(Math.round(a), c==='ILS'?null:c)).join(' + ')}</b></div>
@@ -4282,7 +4286,7 @@ const renderProductRow = (p) => {
             <button type="button" onClick={()=>pick('order')} aria-pressed={isProducts&&actionFilter==='order'} className={cardCls(isProducts&&actionFilter==='order')}>
               <span className={lbl}><span className="w-2 h-2 rounded-full" style={{background:procDotColor.now}}/>להזמין</span>
               <span className="flex items-baseline gap-2"><span className={big}>{actionKpis.orderCount}</span><span className={sub}>מוצרים{actionKpis.orderCost>0?` · ${formatShort(actionKpis.orderCost)}`:''}</span></span>
-              <span className={small}>{stockedCount>0 ? `${actionKpis.urgentCount} דחופים — המלאי ייגמר לפני שהזמנה תגיע` : 'העלה קובץ מלאי כדי לחשב'}</span>
+              <span className={small}>{stockedCount>0 ? `${actionKpis.urgentCount} דחופים — המלאי ייגמר לפני שהזמנה תגיע${actionKpis.makeCount?` · ועוד ${actionKpis.makeCount} לייצור עצמי`:''}` : 'העלה קובץ מלאי כדי לחשב'}</span>
             </button>
             <button type="button" onClick={()=>pick('late')} aria-pressed={isProducts&&actionFilter==='late'} className={cardCls(isProducts&&actionFilter==='late')}>
               <span className={lbl}><span className="w-2 h-2 rounded-full" style={{background:procDotColor.soon}}/>הזמנות באיחור</span>
@@ -5532,23 +5536,23 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode, exchangeRa
 
   if (!isOpen) return null;
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200">
-      <div className={`rounded-2xl shadow-2xl w-full max-w-md overflow-hidden ${isDarkMode?'bg-slate-800 border border-slate-700':'bg-white'}`}>
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/60 backdrop-blur-sm animate-in fade-in duration-200" onClick={e=>{ if (e.target===e.currentTarget) onClose(); }}>
+      <div className={`rounded-2xl shadow-2xl w-full max-w-md overflow-hidden flex flex-col max-h-[calc(100dvh-2rem)] ${isDarkMode?'bg-slate-800 border border-slate-700':'bg-white'}`}>
         {/* Header */}
-        <div className={`px-6 py-4 border-b flex items-center justify-between ${isDarkMode?'border-slate-700 bg-slate-900/40':'border-slate-100 bg-slate-50'}`}>
+        <div className={`shrink-0 px-6 py-4 border-b flex items-center justify-between ${isDarkMode?'border-slate-700 bg-slate-900/40':'border-slate-100 bg-slate-50'}`}>
           <div className="flex items-center gap-3">
             <div className={`p-2 rounded-xl ${isDarkMode?'bg-slate-700':'bg-white border border-slate-200'}`}>
               <Settings className="w-5 h-5 text-slate-500"/>
             </div>
             <h2 className={`font-bold text-lg ${isDarkMode?'text-white':'text-slate-800'}`}>הגדרות</h2>
           </div>
-          <button onClick={onClose} className={`p-2 rounded-full transition-colors ${isDarkMode?'hover:bg-slate-700 text-slate-400':'hover:bg-slate-100 text-slate-500'}`}>
+          <button onClick={onClose} aria-label="סגור" className={`p-2 rounded-full transition-colors ${isDarkMode?'hover:bg-slate-700 text-slate-400':'hover:bg-slate-100 text-slate-500'}`}>
             <X className="w-5 h-5"/>
           </button>
         </div>
 
         {/* Body */}
-        <div className="px-6 py-5 space-y-5">
+        <div className="px-6 py-5 space-y-5 flex-1 min-h-0 overflow-y-auto overscroll-contain">
           {/* API Key section */}
           <div>
             <div className="flex items-center gap-2 mb-2">
@@ -5658,7 +5662,7 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode, exchangeRa
         </div>
 
         {/* Footer */}
-        <div className={`px-6 py-4 border-t flex gap-3 ${isDarkMode?'border-slate-700 bg-slate-900/30':'border-slate-100 bg-slate-50'}`}>
+        <div className={`shrink-0 px-6 py-4 border-t flex gap-3 ${isDarkMode?'border-slate-700 bg-slate-900/30':'border-slate-100 bg-slate-50'}`}>
           {apiKey && (
             <button onClick={handleClear}
               className={`px-4 py-2 rounded-xl text-sm font-medium transition-colors ${isDarkMode?'text-red-400 hover:bg-red-500/10':'text-red-600 hover:bg-red-50'}`}>
@@ -7028,7 +7032,7 @@ const App = () => {
         ${isSidebarCollapsed?'w-[68px]':'w-60'}
         ${isDarkMode?'bg-slate-900 border-slate-800':'bg-slate-900 border-slate-800'}
         max-md:fixed max-md:top-0 max-md:right-0 max-md:h-full max-md:z-40
-        ${isMobileMenuOpen?'max-md:translate-x-0':'max-md:translate-x-full'}
+        ${isMobileMenuOpen?'max-md:translate-x-0':'max-md:translate-x-full max-md:invisible'}
         max-md:!w-64 max-md:transition-transform`}>
         <div className="p-4 flex items-center justify-between border-b border-white/10 h-16">
           <div className={`flex items-center gap-2.5 ${isSidebarCollapsed?'justify-center w-full':''}`}>

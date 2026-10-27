@@ -3,3 +3,8 @@
 /* Chart axis numbers: keep them left-to-right inside the RTL page, otherwise
    the browser anchors them on the wrong side and they overlap the bars. */
 .recharts-cartesian-axis-tick-value { direction: ltr; unicode-bidi: plaintext; }
+
+/* Phones: the page itself never pans sideways — only tables scroll inside their own box,
+   and reaching a table's edge doesn't drag the whole page with it. */
+html, body, #root { overflow-x: hidden; overscroll-behavior-x: none; }
+.overflow-x-auto { overscroll-behavior-x: contain; }
