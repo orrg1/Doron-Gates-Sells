@@ -3440,15 +3440,20 @@ const renderProductRow = (p) => {
 
   // Weekly summary email: preview it, or send it now (it also goes out by itself every Sunday 07:00).
   const [digestMsg, setDigestMsg] = useState('');
+  const [digestPreview, setDigestPreview] = useState(null); // html of the weekly email, shown in a dialog
+  useEffect(() => {
+    if (!digestPreview) return;
+    const onKey = (e) => { if (e.key === 'Escape') setDigestPreview(null); };
+    window.addEventListener('keydown', onKey); return () => window.removeEventListener('keydown', onKey);
+  }, [digestPreview]);
   const digestAction = async (send) => {
     setDigestMsg(send ? 'שולח…' : 'מכין תצוגה מקדימה…');
-    const win = send ? null : window.open('', '_blank');
     try {
       const { data, error } = await supabase.functions.invoke('priority-sync', { body: { action: 'digest', send } });
       if (error) { let msg = error.message; try { const j = await error.context?.json?.(); if (j?.error) msg = j.error; } catch { /* generic */ } throw new Error(msg); }
       if (send) setDigestMsg(`נשלח אל ${(data.to||[]).join(', ')}`);
-      else { if (win) { win.document.open(); win.document.write(data.html); win.document.close(); } setDigestMsg(''); }
-    } catch (e) { if (win) win.close(); setDigestMsg(`לא הצליח: ${e.message || e}`); }
+      else { setDigestPreview(data.html); setDigestMsg(''); }
+    } catch (e) { setDigestMsg(`לא הצליח: ${e.message || e}`); }
   };
   const renderPriorityCard = () => {
     const muted = isDarkMode?'text-slate-400':'text-slate-500';
@@ -3456,6 +3461,21 @@ const renderProductRow = (p) => {
     const hasErr = Object.keys(prioSync.errors||{}).length > 0;
     return (
       <div className={`rounded-xl border p-4 space-y-3 ${isDarkMode?'bg-blue-500/5 border-blue-500/30':'bg-blue-50/60 border-blue-200'}`}>
+        {digestPreview && (
+          <div className="fixed inset-0 z-50 flex items-center justify-center p-2 sm:p-4 bg-black/60" role="dialog" aria-modal="true" aria-label="תצוגה מקדימה של הסיכום השבועי"
+            onClick={e=>{ if (e.target===e.currentTarget) setDigestPreview(null); }}>
+            <div className={`w-full max-w-3xl h-[calc(100dvh-1rem)] sm:h-[calc(100dvh-2rem)] flex flex-col rounded-2xl overflow-hidden shadow-2xl ${isDarkMode?'bg-slate-800':'bg-white'}`}>
+              <div className={`shrink-0 flex items-center gap-3 px-4 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-200'}`}>
+                <b className={`flex-1 ${strong}`}>תצוגה מקדימה — סיכום שבועי</b>
+                <button type="button" onClick={()=>{ setDigestPreview(null); if (window.confirm('לשלוח את הסיכום השבועי עכשיו?')) digestAction(true); }}
+                  className="px-3 py-1.5 rounded-lg text-sm font-semibold text-white bg-blue-600 hover:bg-blue-700">שלח עכשיו</button>
+                <button type="button" onClick={()=>setDigestPreview(null)} aria-label="סגור" autoFocus
+                  className={`p-2 rounded-full ${isDarkMode?'text-slate-300 hover:bg-slate-700':'text-slate-500 hover:bg-slate-100'}`}><X className="w-5 h-5"/></button>
+              </div>
+              <iframe title="הסיכום השבועי" srcDoc={digestPreview} sandbox="allow-popups allow-popups-to-escape-sandbox" className="flex-1 w-full bg-slate-100 border-0"/>
+            </div>
+          </div>
+        )}
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex-1 min-w-[220px]">
             <p className={`font-bold text-sm ${strong}`}>סנכרון ישיר מ-Priority</p>
