@@ -3,7 +3,7 @@ import { createPortal } from 'react-dom';
 import * as XLSXLib from 'xlsx';
 import { supabase, flushAll, queueDataset } from './cloud.js';
 import { OWN_MADE, procStatus, PROC_STATUS_LABEL, procChip, computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './core/procModel.js';
-import { stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
+import { priceCheck, stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
@@ -3328,7 +3328,9 @@ const renderProductRow = (p) => {
               const chg = first && last ? (last.p / first.p - 1) * 100 : null;
               return (
                 <section>
-                  <h3 className={`text-sm font-bold mb-1 ${strong}`}>מחיר קנייה לאורך זמן</h3>
+                  <h3 className={`text-sm font-bold mb-1 flex items-center gap-2 ${strong}`}>מחיר קנייה לאורך זמן
+                    <button type="button" onClick={()=>{ setPriceSku(p.sku); setViewMode('prices'); setDrawerKey(null); }} className={`text-xs font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>בדיקת מחיר מלאה</button>
+                  </h3>
                   <p className={`text-xs mb-2 ${muted}`}>{pts.length} חשבוניות ספק{chg!=null ? ` · מ-${isoToDisplay(first.d)}: ${chg>=0?'+':''}${chg.toFixed(1)}% ב-${mainCur==='ILS'?'₪':mainCur}` : ''}{mainCur!=='ILS' ? ' · כחול = מטבע הספק, אפור = בשקלים' : ''}</p>
                   <div style={{height:120}} dir="ltr">
                     <ResponsiveContainer width="100%" height="100%">
@@ -3987,6 +3989,194 @@ const renderProductRow = (p) => {
   };
 
   // ══ PRICES FROM SUPPLIER INVOICES: increases + supplier price index ══
+  // ── Price tracker: search a product, see every supplier invoice price, and whether the latest is right ──
+  const [priceSku, setPriceSku] = useState(null);
+  const [priceSearch, setPriceSearch] = useState('');
+  const [priceFilter, setPriceFilter] = useState('issues'); // issues | high | all
+  const [priceInIls, setPriceInIls] = useState(false);
+  const priceChecks = useMemo(() => {
+    const poPrice = {}, catalog = {};
+    ordersEnriched.forEach(o => { if (o.unitPriceOriginal > 0) poPrice[o.productKey] = { p: o.unitPriceOriginal, cur: o.currency || 'ILS', po: o.poNumber || '' }; });
+    Object.entries(costMap).forEach(([k, v]) => { if (v > 0) catalog[k] = { p: v, cur: currencyMap[k] || 'ILS' }; });
+    return priceCheck(priceHist, { poPrice, catalog, names: nameMap });
+  }, [priceHist, ordersEnriched, costMap, currencyMap, nameMap]);
+  const priceTopRef = useRef(null);
+  const openPrice = (k) => { setPriceSku(k); setPriceSearch(''); setTimeout(() => priceTopRef.current?.scrollIntoView({ behavior:'smooth', block:'start' }), 50); };
+  const renderPriceTracker = () => {
+    if (!purchaseLines.length) return null;
+    const muted = isDarkMode?'text-slate-400':'text-slate-500', strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const box = `rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`;
+    const curOf = (c) => c==='ILS' ? null : c;
+    const pctEl = (v, invert) => v==null ? <span className={muted}>—</span> : <span className={`font-bold tabular-nums ${(invert?-v:v)>=5?'text-red-500':(invert?-v:v)<=-5?'text-emerald-500':''}`} dir="ltr">{v>0?'+':''}{v.toFixed(1)}%</span>;
+    const VERDICT = { high:{t:'מחיר גבוה', c: isDarkMode?'bg-red-500/15 text-red-300':'bg-red-50 text-red-700'}, check:{t:'לבדיקה', c: isDarkMode?'bg-orange-500/15 text-orange-300':'bg-orange-50 text-orange-800'}, ok:{t:'תקין', c: isDarkMode?'bg-emerald-500/15 text-emerald-300':'bg-emerald-50 text-emerald-700'} };
+    const all = Object.values(priceChecks);
+    const matches = priceSearch.trim().length >= 2 ? all.filter(x => smartMatch(x.name, priceSearch) || smartMatch(x.k, priceSearch)).sort((a,b) => b.spend12 - a.spend12).slice(0, 12) : [];
+    const sel = priceSku ? priceChecks[priceSku] : null;
+    const pts = sel ? (priceHist[sel.k] || []) : [];
+    // chart: one line per supplier (and currency); ₪ when currencies differ or when asked
+    const curs = [...new Set(pts.map(x => x.cur))];
+    const useIls = priceInIls || curs.length > 1;
+    const series = [...new Set(pts.map(x => useIls ? x.s : `${x.s}|${x.cur}`))];
+    const chartData = pts.map(x => ({ d: x.d, [useIls ? x.s : `${x.s}|${x.cur}`]: Math.round((useIls ? x.ils : x.p) * 100) / 100, q: x.q, inv: x.inv }));
+    const COLORS = ['#2563eb','#d97706','#059669','#db2777','#7c3aed','#0891b2'];
+    const rows = sortRows('priceCheck', all.filter(x => priceFilter==='all' ? true : priceFilter==='high' ? x.verdict==='high' : x.verdict!=='ok')
+      .map(x => ({ ...x, lastD: x.last.d, s: x.last.s, reason: x.reasons.find(r => r.lvl!=='good')?.text || '' })), { verdict: x => ({high:0,check:1,ok:2})[x.verdict] });
+    const histRows = [...pts].reverse().map((x, i, arr) => {
+      const prevSame = arr.slice(i+1).find(y => y.s === x.s && y.cur === x.cur && y.inv !== x.inv);
+      return { ...x, chg: prevSame ? (x.p / prevSame.p - 1) * 100 : null };
+    });
+    return (
+      <div className="space-y-4" ref={priceTopRef}>
+        <div className={`${box} p-5 space-y-4`}>
+          <div className="flex flex-wrap items-center gap-3">
+            <div className="flex-1 min-w-[220px]">
+              <h3 className={`font-bold ${strong}`}>בדיקת מחיר למוצר</h3>
+              <p className={`text-xs mt-0.5 ${muted}`}>כל המחירים מחשבוניות הספק ב-Priority — האם המחיר האחרון תקין, ממה הוא שונה ולמה</p>
+            </div>
+            <div className="relative w-full sm:w-80">
+              <Search className={`w-4 h-4 absolute top-1/2 -translate-y-1/2 right-3 ${muted}`}/>
+              <input type="search" value={priceSearch} onChange={e=>setPriceSearch(e.target.value)} placeholder="חיפוש מוצר — שם או מק״ט" aria-label="חיפוש מוצר לבדיקת מחיר"
+                className={`w-full pr-9 pl-3 py-2.5 rounded-xl border text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'bg-slate-900 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
+              {matches.length > 0 && (
+                <ul className={`absolute z-20 mt-1 w-full max-h-80 overflow-y-auto rounded-xl border shadow-xl ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+                  {matches.map(x => (
+                    <li key={x.k}><button type="button" onClick={()=>openPrice(x.k)} className={`w-full text-right px-3 py-2 text-sm ${isDarkMode?'hover:bg-slate-700':'hover:bg-slate-50'}`}>
+                      <span className={`block font-semibold truncate ${strong}`}>{x.name}</span>
+                      <span className={`text-[11px] ${muted}`}><span className="font-mono">{x.k}</span> · {x.last.s} · {formatUnitCost(x.last.p, curOf(x.last.cur))} · <span className={`px-1 rounded ${VERDICT[x.verdict].c}`}>{VERDICT[x.verdict].t}</span></span>
+                    </button></li>
+                  ))}
+                </ul>
+              )}
+              {priceSearch.trim().length >= 2 && !matches.length && <p className={`absolute mt-1 text-xs ${muted}`}>לא נמצא מוצר עם חשבוניות ספק</p>}
+            </div>
+          </div>
+
+          {sel && (
+            <div className="space-y-4">
+              <div className="flex flex-wrap items-start gap-3">
+                <div className="flex-1 min-w-[220px]">
+                  <p className={`text-lg font-bold leading-snug ${strong}`}>{sel.name}</p>
+                  <p className={`text-xs ${muted}`}><span className="font-mono">{sel.k}</span> · {sel.nAll} חשבוניות ספק · ספק אחרון: {sel.last.s}</p>
+                </div>
+                <span className={`px-3 py-1 rounded-full text-sm font-bold ${VERDICT[sel.verdict].c}`}>{VERDICT[sel.verdict].t}</span>
+                <button type="button" onClick={()=>setPriceSku(null)} aria-label="סגור בדיקת מחיר" className={`p-1.5 rounded-lg ${isDarkMode?'text-slate-400 hover:bg-slate-700':'text-slate-500 hover:bg-slate-100'}`}><X className="w-4 h-4"/></button>
+              </div>
+              {sel.reasons.length > 0 ? (
+                <ul className="space-y-1">
+                  {sel.reasons.map((x,i) => <li key={i} className={`text-sm flex gap-2 ${x.lvl==='high'?(isDarkMode?'text-red-300':'text-red-700'):x.lvl==='good'?(isDarkMode?'text-emerald-300':'text-emerald-700'):(isDarkMode?'text-orange-300':'text-orange-800')}`}><span aria-hidden="true">{x.lvl==='good'?'✓':'•'}</span>{x.text}</li>)}
+                </ul>
+              ) : <p className={`text-sm ${isDarkMode?'text-emerald-300':'text-emerald-700'}`}>✓ המחיר האחרון בטווח הרגיל — לא נמצא משהו חריג</p>}
+
+              <div className="grid grid-cols-2 lg:grid-cols-4 gap-3">
+                {[
+                  ['מחיר אחרון', formatUnitCost(sel.last.p, curOf(sel.last.cur)), `${isoToDisplay(sel.last.d)} · ${sel.last.q.toLocaleString()} יח׳${sel.last.cur!=='ILS'?` · ≈₪${sel.last.ils.toFixed(2)}`:''}`],
+                  ['חשבונית קודמת', sel.prev ? formatUnitCost(sel.prev.p, curOf(sel.prev.cur)) : '—', sel.prev ? <>{isoToDisplay(sel.prev.d)} · {pctEl(sel.vsPrev)}</> : 'אין חשבונית קודמת מאותו ספק'],
+                  ['מחיר רגיל (12 ח׳)', sel.med!=null ? formatUnitCost(sel.med, curOf(sel.last.cur)) : '—', sel.med!=null ? <>חציון · האחרון {pctEl(sel.vsMed)}</> : 'מעט מדי חשבוניות'],
+                  ['טווח 12 ח׳', sel.n12 ? `${formatUnitCost(sel.min, curOf(sel.last.cur))} – ${formatUnitCost(sel.max, curOf(sel.last.cur))}` : '—', `${sel.n12} חשבוניות מהספק הזה`],
+                  ['בהזמנה פתוחה', sel.poP ? formatUnitCost(sel.poP.p, curOf(sel.poP.cur)) : '—', sel.poP ? <>{sel.poP.po} · מול האחרון {pctEl(sel.poVsLast)}</> : 'אין הזמנה פתוחה'],
+                  ['בכרטיס הפריט', sel.catP ? formatUnitCost(sel.catP.p, curOf(sel.catP.cur)) : '—', sel.catP ? <>מול האחרון {pctEl(sel.catVsLast)}</> : 'אין מחיר בכרטיס'],
+                  ['קניות 12 ח׳', sel.qty12 ? `${Math.round(sel.qty12).toLocaleString()} יח׳` : '—', sel.spend12 ? `≈ ${formatShort(sel.spend12)}` : ''],
+                  ['ספקים אחרים (12 ח׳)', sel.others.length ? sel.others.map(o => o.s.split(' - ')[0]).join(', ') : 'אין', sel.others.length ? sel.others.map(o => `${formatUnitCost(o.p, curOf(o.cur))}`).join(' · ') : 'רק הספק הזה'],
+                ].map(([l, v, sub]) => (
+                  <div key={l} className={`rounded-xl p-3 ${isDarkMode?'bg-slate-900/50':'bg-slate-50'}`}>
+                    <p className={`text-[11px] ${muted}`}>{l}</p>
+                    <p className={`text-sm sm:text-base font-bold tabular-nums break-words ${strong}`}>{v}</p>
+                    <p className={`text-[11px] ${muted}`}>{sub}</p>
+                  </div>
+                ))}
+              </div>
+
+              {pts.length > 1 && (
+                <div>
+                  <div className="flex items-center gap-3 mb-1">
+                    <p className={`text-sm font-bold ${strong}`}>מחיר לאורך זמן {useIls ? '(₪ ליחידה)' : `(${curs[0]==='ILS'?'₪':curs[0]} ליחידה)`}</p>
+                    {curs.length===1 && curs[0]!=='ILS' && <label className={`text-xs inline-flex items-center gap-1.5 ${muted}`}><input type="checkbox" checked={priceInIls} onChange={e=>setPriceInIls(e.target.checked)}/>הצג בשקלים</label>}
+                  </div>
+                  <div style={{height:220}} dir="ltr">
+                    <ResponsiveContainer width="100%" height="100%">
+                      <ComposedChart data={chartData} margin={{top:6,right:8,left:0,bottom:0}}>
+                        <CartesianGrid strokeDasharray="3 3" stroke={isDarkMode?'#334155':'#e2e8f0'}/>
+                        <XAxis dataKey="d" tick={{fontSize:10}} tickFormatter={d=>d.slice(8,10)+'/'+d.slice(5,7)+'/'+d.slice(2,4)}/>
+                        <YAxis tick={{fontSize:10}} width={50} domain={['auto','auto']}/>
+                        <RechartsTooltip formatter={(v, n) => [v, String(n).split('|')[0]]} labelFormatter={d => isoToDisplay(d)}/>
+                        {series.length > 1 && <Legend formatter={n => String(n).split('|').join(' · ')} wrapperStyle={{fontSize:11}}/>}
+                        {series.map((sname, i) => <Line key={sname} type="stepAfter" dataKey={sname} stroke={COLORS[i % COLORS.length]} strokeWidth={2} dot={{r:3}} connectNulls isAnimationActive={false}/>)}
+                      </ComposedChart>
+                    </ResponsiveContainer>
+                  </div>
+                </div>
+              )}
+
+              <div>
+                <p className={`text-sm font-bold mb-1.5 ${strong}`}>כל החשבוניות ({histRows.length})</p>
+                <div className="overflow-x-auto max-h-96 overflow-y-auto rounded-xl border border-inherit">
+                  <table className={`w-full text-sm text-right min-w-[720px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                    <thead className={`text-[11px] font-semibold sticky top-0 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}>
+                      <tr>{['תאריך','ספק','חשבונית','הזמנה','כמות','מחיר ליח׳','₪ ליח׳','שינוי מהקודם'].map(h => <th key={h} className="px-3 py-2">{h}</th>)}</tr>
+                    </thead>
+                    <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                      {histRows.map((x, i) => (
+                        <tr key={x.inv + i} className={i===0 ? (isDarkMode?'bg-blue-500/10':'bg-blue-50/60') : ''}>
+                          <td className="px-3 py-2 text-xs whitespace-nowrap">{isoToDisplay(x.d)}</td>
+                          <td className="px-3 py-2 text-xs">{x.s}</td>
+                          <td className="px-3 py-2 text-xs font-mono">{x.inv}</td>
+                          <td className="px-3 py-2 text-xs font-mono">{x.po || '—'}</td>
+                          <td className="px-3 py-2 text-xs tabular-nums">{x.q.toLocaleString()}</td>
+                          <td className={`px-3 py-2 text-xs tabular-nums font-bold ${strong}`}>{formatUnitCost(x.p, curOf(x.cur))}</td>
+                          <td className="px-3 py-2 text-xs tabular-nums">{x.cur==='ILS' ? '—' : `₪${x.ils.toFixed(2)}`}{x.cur!=='ILS' && <span className={`text-[10px] ${muted}`}> (שער {Number(x.rate).toFixed(3)})</span>}</td>
+                          <td className="px-3 py-2 text-xs">{pctEl(x.chg)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+          )}
+        </div>
+
+        <div className={`${box} overflow-hidden`}>
+          <div className={`px-5 py-3 border-b flex flex-wrap items-center gap-3 ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
+            <div className="flex-1 min-w-[220px]">
+              <h3 className={`font-bold text-sm ${strong}`}>מחירים לבדיקה</h3>
+              <p className={`text-[11px] mt-0.5 ${muted}`}>המחיר האחרון מעל הרגיל, עלייה מהחשבונית הקודמת, ספק אחר זול יותר, הזמנה פתוחה במחיר גבוה, או כרטיס פריט לא מעודכן. לחיצה פותחת את כל ההיסטוריה.</p>
+            </div>
+            <div role="group" aria-label="סינון" className={`flex rounded-lg p-1 text-xs ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
+              {[['issues',`לבדיקה (${all.filter(x=>x.verdict!=='ok').length})`],['high',`גבוה (${all.filter(x=>x.verdict==='high').length})`],['all',`הכל (${all.length})`]].map(([k,l]) => (
+                <button key={k} type="button" aria-pressed={priceFilter===k} onClick={()=>setPriceFilter(k)} className={`px-2.5 py-1 rounded-md font-semibold ${priceFilter===k?(isDarkMode?'bg-slate-600 text-white':'bg-white shadow text-slate-800'):(isDarkMode?'text-slate-300':'text-slate-500')}`}>{l}</button>
+              ))}
+            </div>
+          </div>
+          {rows.length===0 ? <p className={`px-5 py-8 text-center text-xs ${muted}`}>אין מחירים חריגים</p> : (
+            <div className="overflow-x-auto max-h-[28rem] overflow-y-auto">
+              <table className={`w-full text-sm text-right min-w-[860px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                <thead className={`text-[11px] font-semibold sticky top-0 z-[2] ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-100 text-slate-500'}`}><tr>
+                  {sortTh('priceCheck','verdict','מצב',{className:'px-4 py-2.5'})}{sortTh('priceCheck','name','מוצר',{className:'px-4 py-2.5'})}{sortTh('priceCheck','s','ספק',{className:'px-4 py-2.5'})}
+                  {sortTh('priceCheck','lastD','חשבונית אחרונה',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('priceCheck','vsPrev','מול קודם',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  {sortTh('priceCheck','vsMed','מול רגיל',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('priceCheck','spend12','קניות 12 ח׳',{className:'px-4 py-2.5',firstDir:'desc'})}
+                  <th className="px-4 py-2.5">למה</th>
+                </tr></thead>
+                <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                  {rows.slice(0, 300).map(x => (
+                    <tr key={x.k} onClick={()=>openPrice(x.k)} className={`cursor-pointer ${priceSku===x.k?(isDarkMode?'bg-blue-500/10':'bg-blue-50'):''} ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}`}>
+                      <td className="px-4 py-2.5"><span className={`px-2 py-0.5 rounded-full text-[11px] font-bold whitespace-nowrap ${VERDICT[x.verdict].c}`}>{VERDICT[x.verdict].t}</span></td>
+                      <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[220px] ${strong}`} title={x.name}>{x.name}</p><p className={`text-[11px] font-mono ${muted}`}>{x.k}</p></td>
+                      <td className="px-4 py-2.5 text-xs">{x.s}</td>
+                      <td className="px-4 py-2.5 text-xs tabular-nums"><b className={strong}>{formatUnitCost(x.last.p, curOf(x.last.cur))}</b> <span className={muted}>{isoToDisplay(x.last.d)}</span></td>
+                      <td className="px-4 py-2.5 text-xs">{pctEl(x.vsPrev)}</td>
+                      <td className="px-4 py-2.5 text-xs">{pctEl(x.vsMed)}</td>
+                      <td className="px-4 py-2.5 text-xs tabular-nums">{x.spend12 ? formatShort(x.spend12) : '—'}</td>
+                      <td className={`px-4 py-2.5 text-xs max-w-[320px] ${muted}`}>{x.reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </div>
+    );
+  };
   const renderInvoicePrices = () => {
     const muted = isDarkMode?'text-slate-400':'text-slate-500';
     const strong = isDarkMode?'text-slate-100':'text-slate-800';
@@ -3998,36 +4188,6 @@ const renderProductRow = (p) => {
     if (!purchaseLines.length) return null;
     return (
       <>
-        <div className={box}>
-          <div className={`px-5 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
-            <h3 className={`font-bold text-sm ${strong}`}>התייקרויות בחשבוניות ספק — 4 חודשים אחרונים</h3>
-            <p className={`text-[11px] mt-0.5 ${muted}`}>חשבונית שבה המחיר ליחידה עלה ב-5% או יותר מהחשבונית הקודמת של אותו מוצר, מאותו ספק ובאותו מטבע</p>
-          </div>
-          {ups.length===0 ? <p className={`px-5 py-8 text-center text-xs ${muted}`}>אין התייקרויות בתקופה</p> : (
-            <div className="overflow-x-auto max-h-80 overflow-y-auto">
-              <table className={`w-full text-sm text-right min-w-[720px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
-                <thead className={head}><tr>
-                  {sortTh('invUps','name','מוצר',{className:'px-4 py-2.5'})}{sortTh('invUps','s','ספק',{className:'px-4 py-2.5'})}
-                  {sortTh('invUps','prevP','מחיר קודם',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('invUps','p','מחיר חדש',{className:'px-4 py-2.5',firstDir:'desc'})}
-                  {sortTh('invUps','pct','שינוי',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('invUps','ilsPct','בשקלים',{className:'px-4 py-2.5',firstDir:'desc'})}{sortTh('invUps','d','תאריך',{className:'px-4 py-2.5',firstDir:'desc'})}
-                </tr></thead>
-                <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
-                  {ups.map(x => (
-                    <tr key={x.k+x.inv} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
-                      <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[220px] ${strong}`} title={x.name}>{x.name}</p><p className={`text-[11px] font-mono ${muted}`}>{x.k}</p></td>
-                      <td className="px-4 py-2.5 text-xs">{x.s}</td>
-                      <td className="px-4 py-2.5 text-xs tabular-nums">{formatUnitCost(x.prevP, x.cur==='ILS'?null:x.cur)} <span className={muted}>({isoToDisplay(x.prevD)})</span></td>
-                      <td className="px-4 py-2.5 text-xs tabular-nums font-bold">{formatUnitCost(x.p, x.cur==='ILS'?null:x.cur)}</td>
-                      <td className="px-4 py-2.5 text-xs">{pct(x.pct)}</td>
-                      <td className="px-4 py-2.5 text-xs">{x.cur==='ILS' ? '—' : pct(x.ilsPct)}</td>
-                      <td className="px-4 py-2.5 text-xs">{isoToDisplay(x.d)}</td>
-                    </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
-          )}
-        </div>
         <div className={box}>
           <div className={`px-5 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-100'}`}>
             <h3 className={`font-bold text-sm ${strong}`}>מדד מחירים לפי ספק — 6 חודשים אחרונים מול שנה קודם</h3>
@@ -5309,6 +5469,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
       {/* ══ PURCHASE PRICES VIEW ══ */}
       {viewMode==='prices' && (
         <div className="space-y-4 animate-in fade-in slide-in-from-bottom-2 duration-300">
+          {renderPriceTracker()}
           {renderInvoicePrices()}
           <div className={`p-5 rounded-2xl border ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
             <div className="flex items-center gap-3">

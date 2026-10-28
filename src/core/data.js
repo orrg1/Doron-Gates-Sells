@@ -766,11 +766,71 @@ export const purchasePriceHistory = (purchaseLines = []) => {
   const by = {};
   purchaseLines.forEach(l => {
     if (l.junk || !l.k || !(l.q > 0) || !(l.p > 0)) return;
-    (by[l.k] ||= []).push({ d: l.d, s: l.s, n: l.n, p: l.p, cur: l.cur || 'ILS', rate: l.rate || 1, ils: l.p * (l.rate || 1), q: l.q, inv: l.inv });
+    (by[l.k] ||= []).push({ d: l.d, s: l.s, n: l.n, p: l.p, cur: l.cur || 'ILS', rate: l.rate || 1, ils: l.p * (l.rate || 1), q: l.q, inv: l.inv, po: l.po || '' });
   });
   Object.values(by).forEach(a => a.sort((x, y) => x.d < y.d ? -1 : x.d > y.d ? 1 : 0));
   return by;
 };
+// ─── Price check: is the price I'm getting right? ───
+// For every product with supplier invoices: the latest price against the same supplier's previous
+// price and its median of the last 12 months (same currency), other suppliers' recent prices
+// (in ₪), the price on open POs and on the item card. Each finding is a plain-language reason;
+// verdict: 'high' (≥10% above normal), 'check' (something worth a look), 'ok'.
+// opts.poPrice: { sku: { p, cur, po } } · opts.catalog: { sku: { p, cur } } · opts.names: { sku: name }
+const wMedian = (pts) => {
+  const a = pts.slice().sort((x, y) => x.p - y.p); const tot = a.reduce((s, x) => s + (x.q || 1), 0);
+  let acc = 0; for (const x of a) { acc += (x.q || 1); if (acc >= tot / 2) return x.p; } return a.length ? a[a.length - 1].p : null;
+};
+export const priceCheck = (hist, { now = Date.now(), poPrice = {}, catalog = {}, names = {} } = {}) => {
+  const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const y1 = iso(now - 365 * 86400000);
+  const out = {};
+  Object.entries(hist).forEach(([k, pts]) => {
+    if (!pts.length) return;
+    const last = pts[pts.length - 1];
+    if (/^\s*(משלוח|הובלה|שילוח|עמלה|דמי)/.test(last.n || '')) return; // freight / fee lines, not products
+    const same = pts.filter(x => x.s === last.s && x.cur === last.cur);
+    const prev = [...same].reverse().find(x => x.inv !== last.inv && x.d <= last.d && x !== last) || null;
+    const yr = same.filter(x => x.d >= y1);
+    const base = yr.filter(x => x !== last);
+    const med = base.length >= 2 ? wMedian(base) : null;
+    const ps = yr.map(x => x.p);
+    const qtys = base.map(x => x.q).sort((a, b) => a - b); const medQ = qtys.length ? qtys[Math.floor(qtys.length / 2)] : null;
+    const allYr = pts.filter(x => x.d >= y1);
+    const spend12 = allYr.reduce((a, x) => a + x.ils * x.q, 0), qty12 = allYr.reduce((a, x) => a + x.q, 0);
+    // other suppliers, last 12 months, latest price each (₪ per unit)
+    const bySup = {}; allYr.forEach(x => { if (x.s !== last.s) bySup[x.s] = x; });
+    const others = Object.values(bySup).map(x => ({ s: x.s, d: x.d, p: x.p, cur: x.cur, ils: x.ils })).sort((a, b) => a.ils - b.ils);
+    const r = { k, name: names[k] || last.n || k, last, prev, med, min: ps.length ? Math.min(...ps) : last.p, max: ps.length ? Math.max(...ps) : last.p,
+      n12: yr.length, nAll: pts.length, spend12, qty12, others, reasons: [], verdict: 'ok', score: 0 };
+    r.vsPrev = prev ? (last.p / prev.p - 1) * 100 : null;
+    r.vsMed = med ? (last.p / med - 1) * 100 : null;
+    r.ilsVsPrev = prev && last.cur !== 'ILS' ? (last.ils / prev.ils - 1) * 100 : null;
+    const smallBuy = medQ && last.q < medQ / 2;
+    const add = (lvl, text, score) => { r.reasons.push({ lvl, text }); r.score += score; if (lvl === 'high') r.verdict = 'high'; else if (r.verdict === 'ok') r.verdict = 'check'; };
+    const f = (v) => `${v > 0 ? '+' : ''}${v.toFixed(0)}%`;
+    if (r.vsMed != null && r.vsMed >= 10) add(smallBuy ? 'check' : 'high', `המחיר האחרון ${f(r.vsMed)} מעל המחיר הרגיל (חציון 12 ח׳)${smallBuy ? ` — אבל נקנתה כמות קטנה מהרגיל (${last.q} מול ~${medQ})` : ''}`, r.vsMed);
+    else if (r.vsPrev != null && r.vsPrev >= 10) add(smallBuy ? 'check' : 'high', `עלה ${f(r.vsPrev)} מהחשבונית הקודמת`, r.vsPrev);
+    else if (r.vsPrev != null && r.vsPrev >= 5) add('check', `עלה ${f(r.vsPrev)} מהחשבונית הקודמת`, r.vsPrev);
+    if (r.ilsVsPrev != null && r.vsPrev != null && Math.abs(r.vsPrev) < 3 && r.ilsVsPrev >= 5) add('check', `מחיר הספק לא השתנה, אבל בשקלים יקר ב-${f(r.ilsVsPrev)} בגלל השער`, r.ilsVsPrev / 2);
+    const cheaper = others.find(o => o.ils < last.ils * 0.9);
+    if (cheaper) add('check', `ספק אחר זול ב-${Math.round((1 - cheaper.ils / last.ils) * 100)}% (בשקלים) — ${cheaper.s}, ${cheaper.d.split('-').reverse().join('.')}`, 8);
+    const po = poPrice[k];
+    if (po && po.cur === last.cur && po.p > 0) {
+      r.poP = po; r.poVsLast = (po.p / last.p - 1) * 100;
+      if (r.poVsLast >= 5) add(r.poVsLast >= 10 ? 'high' : 'check', `בהזמנה הפתוחה ${po.po} המחיר ${f(r.poVsLast)} מעל החשבונית האחרונה`, r.poVsLast);
+    }
+    const cat = catalog[k];
+    if (cat && cat.p > 0 && cat.cur === last.cur) {
+      r.catP = cat; r.catVsLast = (cat.p / last.p - 1) * 100;
+      if (Math.abs(r.catVsLast) >= 10) add('check', `המחיר בכרטיס הפריט (${cat.p}) שונה ב-${f(-r.catVsLast)} מהחשבונית האחרונה — כדאי לעדכן`, 3);
+    }
+    if (r.vsMed != null && r.vsMed <= -10) r.reasons.push({ lvl: 'good', text: `המחיר האחרון ${f(r.vsMed)} מתחת לרגיל` });
+    out[k] = r;
+  });
+  return out;
+};
+
 // Price increases: an invoice ≥ minPct above the previous invoice of the same product, supplier and currency.
 export const priceIncreases = (hist, { sinceIso, minPct = 5 } = {}) => {
   const out = [];

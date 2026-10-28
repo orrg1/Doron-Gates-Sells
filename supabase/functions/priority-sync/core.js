@@ -548,7 +548,7 @@ var purchasePriceHistory = (purchaseLines = []) => {
   const by = {};
   purchaseLines.forEach((l) => {
     if (l.junk || !l.k || !(l.q > 0) || !(l.p > 0)) return;
-    (by[l.k] ||= []).push({ d: l.d, s: l.s, n: l.n, p: l.p, cur: l.cur || "ILS", rate: l.rate || 1, ils: l.p * (l.rate || 1), q: l.q, inv: l.inv });
+    (by[l.k] ||= []).push({ d: l.d, s: l.s, n: l.n, p: l.p, cur: l.cur || "ILS", rate: l.rate || 1, ils: l.p * (l.rate || 1), q: l.q, inv: l.inv, po: l.po || "" });
   });
   Object.values(by).forEach((a) => a.sort((x, y) => x.d < y.d ? -1 : x.d > y.d ? 1 : 0));
   return by;
