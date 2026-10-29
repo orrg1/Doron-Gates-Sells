@@ -359,6 +359,160 @@ const KPICard = ({ title, value, formatted, subtext, icon: Icon, color, trend, s
 };
 
 // Overview Dashboard Page
+// ─── STOCK COUNT PAGE ─────────────────────────────────────
+// A plain count list for the warehouse: pick items, type what's on the shelf, see the
+// difference from Priority, and tick each line once it was fixed by hand in Priority.
+// Nothing is sent to Priority. The list is kept in localStorage ('stockCount'), which the
+// cloud layer saves to the server, so a count started on the phone continues on the PC.
+const readJson = (k, d) => { try { const v = JSON.parse(localStorage.getItem(k) || 'null'); return v ?? d; } catch { return d; } };
+// Search: SKU or description, any part of it. '*' = any run of characters ("WOLF*24V").
+// Without '*', every word must appear somewhere (in any order).
+const countMatcher = (q) => {
+  const t = q.trim().toLowerCase();
+  if (!t) return () => false;
+  if (t.includes('*')) {
+    const re = new RegExp(t.split('*').map(x => x.replace(/[.+?^${}()|[\]\\]/g, '\\$&')).join('.*'), 'i');
+    return (sku, name) => re.test(sku) || re.test(name);
+  }
+  const words = t.split(/\s+/).filter(Boolean);
+  return (sku, name) => { const hay = (sku + ' ' + name).toLowerCase(); return words.every(w => hay.includes(w)); };
+};
+const StockCountPage = ({ isDarkMode }) => {
+  const stock = useMemo(() => readJson('procurementStock', {}), []);
+  const names = useMemo(() => readJson('procurementNames', {}), []);
+  const syncAt = useMemo(() => { try { return Number(localStorage.getItem('prioritySyncAt')) || null; } catch { return null; } }, []);
+  const catalog = useMemo(() => {
+    const keys = new Set([...Object.keys(names), ...Object.keys(stock)]);
+    return [...keys].filter(Boolean).map(k => ({ k, n: names[k] || '', q: stock[k] ?? null })).sort((a, b) => a.k.localeCompare(b.k));
+  }, [names, stock]);
+  const [items, setItemsState] = useState(() => readJson('stockCount', { items: [] }).items || []);
+  const setItems = (fn) => setItemsState(prev => {
+    const next = typeof fn === 'function' ? fn(prev) : fn;
+    try { localStorage.setItem('stockCount', JSON.stringify({ items: next })); } catch { /* kept on screen */ }
+    return next;
+  });
+  const [q, setQ] = useState('');
+  const [filter, setFilter] = useState('all'); // all | todo | diff | done
+  const inList = useMemo(() => new Set(items.map(x => x.k)), [items]);
+  const results = useMemo(() => { const m = countMatcher(q); return q.trim() ? catalog.filter(x => m(x.k, x.n)) : []; }, [q, catalog]);
+  const add = (list) => setItems(prev => { const have = new Set(prev.map(x => x.k)); return [...prev, ...list.filter(x => !have.has(x.k)).map(x => ({ k: x.k, n: x.n, addedAt: Date.now() }))]; });
+  const setCount = (k, v) => setItems(prev => prev.map(x => x.k !== k ? x : (v === '' ? { ...x, counted: undefined, sysAtCount: undefined, countedAt: undefined }
+    : { ...x, counted: Number(v), sysAtCount: x.sysAtCount ?? (stock[k] ?? null), countedAt: Date.now() })));
+  const toggleDone = (k) => setItems(prev => prev.map(x => x.k !== k ? x : { ...x, done: !x.done, doneAt: !x.done ? Date.now() : undefined }));
+  const remove = (k) => setItems(prev => prev.filter(x => x.k !== k));
+  const diffOf = (x) => x.counted == null || x.sysAtCount == null ? null : Math.round((x.counted - x.sysAtCount) * 100) / 100;
+  const counts = { all: items.length, todo: items.filter(x => x.counted == null).length, diff: items.filter(x => (diffOf(x) || 0) !== 0 && !x.done).length, done: items.filter(x => x.done).length };
+  const shown = items.filter(x => filter === 'all' ? true : filter === 'todo' ? x.counted == null : filter === 'diff' ? (diffOf(x) || 0) !== 0 && !x.done : x.done)
+    .slice().sort((a, b) => (a.done - b.done));
+  const exportExcel = () => {
+    const rows = items.filter(x => x.counted != null);
+    const aoa = [['מק"ט', 'מוצר', 'רשום ב-Priority', 'נספר', 'הפרש', 'עודכן ב-Priority', 'נספר בתאריך'],
+      ...rows.map(x => [x.k, x.n, x.sysAtCount ?? '', x.counted, diffOf(x) ?? '', x.done ? 'כן' : '', x.countedAt ? new Date(x.countedAt).toLocaleString('he-IL') : ''])];
+    const wb = XLSXLib.utils.book_new(); const ws = XLSXLib.utils.aoa_to_sheet(aoa);
+    ws['!cols'] = [{ wch: 16 }, { wch: 40 }, { wch: 14 }, { wch: 8 }, { wch: 8 }, { wch: 14 }, { wch: 18 }];
+    wb.Workbook = { Views: [{ RTL: true }] };
+    XLSXLib.utils.book_append_sheet(wb, ws, 'ספירת מלאי');
+    XLSXLib.writeFile(wb, `ספירת_מלאי_${new Date().toISOString().slice(0, 10)}.xlsx`);
+  };
+  const muted = isDarkMode ? 'text-slate-400' : 'text-slate-500', strong = isDarkMode ? 'text-slate-100' : 'text-slate-800';
+  const card = `rounded-2xl border ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`;
+  const fmt = (v) => v == null ? '—' : Number(v).toLocaleString();
+  return (
+    <div className="space-y-4 max-w-3xl mx-auto">
+      <div className={`${card} p-4 space-y-3`}>
+        <div>
+          <h2 className={`font-bold ${strong}`}>הוספת מוצרים לספירה</h2>
+          <p className={`text-xs ${muted}`}>חיפוש לפי מק"ט או תיאור, גם חלק ממנו. <b>*</b> = כל רצף תווים, למשל <span dir="ltr" className="font-mono">WOLF*24V</span>. מלאי Priority נכון ל-{syncAt ? new Date(syncAt).toLocaleString('he-IL', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : 'הסנכרון האחרון'}.</p>
+        </div>
+        <div className="relative">
+          <Search className={`w-4 h-4 absolute top-1/2 -translate-y-1/2 right-3 ${muted}`} />
+          <input type="search" value={q} onChange={e => setQ(e.target.value)} placeholder='מק"ט או תיאור (אפשר עם *)' aria-label="חיפוש מוצר לספירה" enterKeyHint="search"
+            className={`w-full pr-9 pl-3 py-3 rounded-xl border text-base focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode ? 'bg-slate-900 border-slate-700 text-white placeholder-slate-500' : 'bg-slate-50 border-slate-200'}`} />
+        </div>
+        {!catalog.length && <p className={`text-sm ${isDarkMode ? 'text-orange-300' : 'text-orange-700'}`}>אין עדיין רשימת פריטים — סנכרן מ-Priority (רכש ← קבצים והגדרות תכנון).</p>}
+        {q.trim() && (
+          <div className={`rounded-xl border ${isDarkMode ? 'border-slate-700' : 'border-slate-200'}`}>
+            <div className={`flex items-center gap-2 px-3 py-2 text-xs border-b ${isDarkMode ? 'border-slate-700' : 'border-slate-100'} ${muted}`}>
+              <span className="flex-1">{results.length.toLocaleString()} תוצאות</span>
+              {results.length > 1 && results.length <= 300 && (
+                <button type="button" onClick={() => add(results)} className={`font-semibold ${isDarkMode ? 'text-blue-300' : 'text-blue-700'}`}>הוסף את כולן ({results.filter(x => !inList.has(x.k)).length})</button>
+              )}
+            </div>
+            <ul className={`max-h-80 overflow-y-auto divide-y ${isDarkMode ? 'divide-slate-700/60' : 'divide-slate-100'}`}>
+              {results.slice(0, 60).map(x => (
+                <li key={x.k}>
+                  <button type="button" disabled={inList.has(x.k)} onClick={() => add([x])}
+                    className={`w-full text-right px-3 py-2.5 flex items-center gap-3 ${inList.has(x.k) ? 'opacity-50' : (isDarkMode ? 'active:bg-slate-700' : 'active:bg-slate-100')}`}>
+                    <span className="flex-1 min-w-0">
+                      <span className={`block text-sm font-semibold leading-snug ${strong}`}>{x.n || x.k}</span>
+                      <span className={`text-xs font-mono ${muted}`}>{x.k}</span>
+                    </span>
+                    <span className={`text-xs ${muted}`}>ב-Priority: <b className={strong}>{fmt(x.q)}</b></span>
+                    <span className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-lg font-bold ${inList.has(x.k) ? (isDarkMode ? 'bg-slate-700 text-slate-400' : 'bg-slate-100 text-slate-400') : 'bg-blue-600 text-white'}`}>{inList.has(x.k) ? '✓' : '+'}</span>
+                  </button>
+                </li>
+              ))}
+              {results.length > 60 && <li className={`px-3 py-2 text-xs ${muted}`}>ועוד {results.length - 60} — צמצם את החיפוש</li>}
+              {!results.length && <li className={`px-3 py-3 text-sm ${muted}`}>לא נמצא מוצר</li>}
+            </ul>
+          </div>
+        )}
+      </div>
+
+      <div className={`${card} overflow-hidden`}>
+        <div className="p-4 flex flex-wrap items-center gap-2">
+          <h2 className={`font-bold flex-1 ${strong}`}>רשימת ספירה</h2>
+          <button type="button" onClick={exportExcel} disabled={!items.some(x => x.counted != null)} className={`px-3 py-1.5 rounded-lg text-xs font-semibold border disabled:opacity-40 ${isDarkMode ? 'border-slate-600 text-slate-200' : 'border-slate-300 text-slate-700'}`}>Excel</button>
+          {counts.done > 0 && <button type="button" onClick={() => { if (window.confirm(`להסיר מהרשימה ${counts.done} פריטים שכבר עודכנו ב-Priority?`)) setItems(prev => prev.filter(x => !x.done)); }} className={`px-3 py-1.5 rounded-lg text-xs font-semibold border ${isDarkMode ? 'border-slate-600 text-slate-200' : 'border-slate-300 text-slate-700'}`}>נקה מה שעודכן</button>}
+        </div>
+        <div role="group" aria-label="סינון" className="px-4 pb-3 flex flex-wrap gap-1.5 text-xs">
+          {[['all', 'הכל'], ['todo', 'לא נספרו'], ['diff', 'עם הפרש — לעדכון'], ['done', 'עודכנו']].map(([k, l]) => (
+            <button key={k} type="button" aria-pressed={filter === k} onClick={() => setFilter(k)}
+              className={`px-3 py-1.5 rounded-full font-semibold ${filter === k ? 'bg-blue-600 text-white' : (isDarkMode ? 'bg-slate-700 text-slate-300' : 'bg-slate-100 text-slate-600')}`}>{l} ({counts[k]})</button>
+          ))}
+        </div>
+        {!items.length ? <p className={`px-4 pb-6 text-sm ${muted}`}>הרשימה ריקה. חפש מוצרים למעלה והוסף אותם.</p> : (
+          <ul className={`divide-y border-t ${isDarkMode ? 'divide-slate-700/60 border-slate-700' : 'divide-slate-100 border-slate-100'}`}>
+            {shown.map(x => {
+              const d = diffOf(x);
+              const now = stock[x.k] ?? null;
+              const prioFixed = x.counted != null && now != null && now === x.counted && d !== 0;
+              return (
+                <li key={x.k} className={`px-4 py-3 ${x.done ? 'opacity-55' : ''}`}>
+                  <div className="flex items-start gap-2">
+                    <div className="flex-1 min-w-0">
+                      <p className={`text-sm font-semibold leading-snug ${strong}`}>{x.n || x.k}</p>
+                      <p className={`text-xs font-mono ${muted}`}>{x.k}</p>
+                    </div>
+                    <button type="button" onClick={() => remove(x.k)} aria-label={`הסר את ${x.n || x.k}`} className={`p-1.5 rounded-lg ${muted}`}><X className="w-4 h-4" /></button>
+                  </div>
+                  <div className="mt-2 flex flex-wrap items-center gap-3">
+                    <div className="text-center min-w-[64px]"><p className={`text-[11px] ${muted}`}>ב-Priority</p><p className={`text-lg font-bold tabular-nums ${strong}`}>{fmt(x.sysAtCount ?? now)}</p></div>
+                    <label className="text-center">
+                      <span className={`block text-[11px] ${muted}`}>נספר</span>
+                      <input type="number" inputMode="decimal" min="0" step="any" value={x.counted ?? ''} onChange={e => setCount(x.k, e.target.value)} aria-label={`כמות שנספרה — ${x.n || x.k}`}
+                        className={`w-24 text-center text-lg font-bold py-1.5 rounded-xl border focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode ? 'bg-slate-900 border-slate-600 text-white' : 'bg-white border-slate-300'}`} />
+                    </label>
+                    <div className="text-center min-w-[64px]"><p className={`text-[11px] ${muted}`}>הפרש</p>
+                      <p className={`text-lg font-bold tabular-nums ${d == null ? muted : d === 0 ? 'text-emerald-500' : 'text-red-500'}`} dir="ltr">{d == null ? '—' : d === 0 ? '✓' : `${d > 0 ? '+' : ''}${d}`}</p></div>
+                    <label className={`mr-auto inline-flex items-center gap-2 text-sm font-semibold cursor-pointer select-none ${x.done ? (isDarkMode ? 'text-emerald-300' : 'text-emerald-700') : strong}`}>
+                      <input type="checkbox" checked={!!x.done} onChange={() => toggleDone(x.k)} className="w-6 h-6 accent-emerald-600" />
+                      עודכן ב-Priority
+                    </label>
+                  </div>
+                  {prioFixed && !x.done && <p className={`mt-1 text-xs ${isDarkMode ? 'text-emerald-300' : 'text-emerald-700'}`}>נראה שכבר עודכן — בסנכרון האחרון Priority מראה {fmt(now)}</p>}
+                  {x.counted != null && x.sysAtCount != null && now != null && now !== x.sysAtCount && !prioFixed && <p className={`mt-1 text-xs ${muted}`}>מאז הספירה Priority השתנה ל-{fmt(now)}</p>}
+                </li>
+              );
+            })}
+            {!shown.length && <li className={`px-4 py-4 text-sm ${muted}`}>אין פריטים בסינון הזה</li>}
+          </ul>
+        )}
+      </div>
+    </div>
+  );
+};
+
 // ─── CUSTOMERS PAGE ─────────────────────────────────────
 const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, excludeCurrentMonth, priorityRange = null, fileCounts = {}, customerCards = {}, onSyncPriority = null, lastSyncAt = null, stoppedPairs = [] }) => {
   const [search, setSearch] = useState('');
@@ -7434,6 +7588,7 @@ const App = () => {
     { id:'customers', label:'לקוחות', icon:User, color:'text-pink-400' },
     // "רכש וספקים" and "תכנון רכש" are one screen now; the old spend analytics stay reachable from "מחירי רכש".
     { id:'procurement', label:'רכש', icon:ShoppingCart, color:'text-orange-400' },
+    { id:'stockcount', label:'ספירת מלאי', icon:ClipboardList, color:'text-emerald-400' },
     { id:'summary', label:'רווח והפסד', icon:BarChart3, color:'text-violet-400' },
   ];
 
@@ -7675,6 +7830,8 @@ const App = () => {
           )}
 
           {/* Summary */}
+          {activeTab==='stockcount' && <StockCountPage isDarkMode={isDarkMode}/>}
+
           {activeTab==='summary' && (
             summaryData ? (
               <div className="space-y-6 animate-in fade-in slide-in-from-bottom-4 duration-500">
