@@ -414,6 +414,46 @@ var matchShipSupplier = (fwdName, candidates) => {
   });
   return bestScore >= 5 ? best : null;
 };
+var linkShipmentsToPOs = ({ shipments = [], orders = [], manual = {} }) => {
+  const posBySup = {};
+  orders.forEach((o) => {
+    if (o.poNumber && o.supplier) (posBySup[o.supplier] ||= /* @__PURE__ */ new Set()).add(o.poNumber);
+  });
+  const active = shipments.filter((s) => s.matched && s.stage?.idx < 2);
+  const activeBySup = {};
+  active.forEach((s) => {
+    (activeBySup[s.matched] ||= []).push(s);
+  });
+  const byShip = {}, howByShip = {};
+  shipments.forEach((s) => {
+    if (manual[s.id]) {
+      byShip[s.id] = manual[s.id].slice();
+      howByShip[s.id] = "manual";
+      return;
+    }
+    const pos = [...posBySup[s.matched] || []];
+    const ref = String(s.ref || "").toUpperCase();
+    const inRef = pos.filter((po) => ref && ref.includes(String(po).toUpperCase()));
+    if (inRef.length) {
+      byShip[s.id] = inRef;
+      howByShip[s.id] = "ref";
+      return;
+    }
+    if (s.stage?.idx < 2 && pos.length === 1 && (activeBySup[s.matched] || []).length === 1) {
+      byShip[s.id] = pos;
+      howByShip[s.id] = "only";
+      return;
+    }
+    byShip[s.id] = [];
+    howByShip[s.id] = null;
+  });
+  const shipByPo = {};
+  shipments.forEach((s) => (byShip[s.id] || []).forEach((po) => {
+    const cur = shipByPo[po];
+    if (!cur || s.arr && (!cur.arr || s.arr < cur.arr)) shipByPo[po] = s;
+  }));
+  return { byShip, howByShip, shipByPo };
+};
 var byDateDesc = (a, b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0;
 var mergeLinesSince = (prev, fresh, since) => (since ? [...fresh, ...(prev || []).filter((l) => l.d < since)] : [...fresh]).sort(byDateDesc);
 var applyInventory = (prev, parsed, { replaceStock = false, today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10) } = {}) => {
@@ -1279,7 +1319,14 @@ function finalizeSync({ prev, payloads, failed = {}, since = {}, sSince, pSince,
 // src/core/procModel.js
 var OWN_MADE = "\u05D9\u05D9\u05E6\u05D5\u05E8 \u05E2\u05E6\u05DE\u05D9";
 var isOwnMadeFamily = (fam) => /ייצור\s*עצמי/.test(String(fam || ""));
+var orderBlockOf = (orderBlock, sku, supplier) => {
+  const pm = orderBlock?.products?.[sku];
+  if (pm === "stop") return "product";
+  if (supplier && orderBlock?.suppliers?.[supplier] === "phasing" && pm !== "keep") return "supplier";
+  return null;
+};
 var procStatus = (p) => {
+  if (p.orderBlocked) return "stopped";
   if (p.currentStock === null) return "unknown";
   if (p.suggestedOrder > 0) return p.risk === "critical" ? "now" : "soon";
   if (p.overdue || p.shortNowCoveredByPO) return "watch";
@@ -1295,7 +1342,7 @@ var procChip = (p) => {
   return null;
 };
 var computeProducts = (ctx) => {
-  const { salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions } = ctx;
+  const { salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions, orderBlock } = ctx;
   if (!salesData.length) return [];
   const map = {};
   salesData.forEach((row) => {
@@ -1456,8 +1503,10 @@ var computeProducts = (ctx) => {
     const effectiveCoverDays = currentStock !== null && avgDaily > 0 ? Math.round(effectiveStock / avgDaily) : null;
     const effectiveCoverMonths = currentStock !== null && avgMonthly > 0 ? effectiveStock / avgMonthly : null;
     const moq = moqMap[key] ?? moqMap[p.sku] ?? moqMap[p.name] ?? null;
+    const orderBlocked = orderBlockOf(orderBlock, p.sku || key, supplier);
     const plan = calcOrderPlan({ avgMonthly, stdDev, abc: p.abc, leadTime: effectiveLeadTime, leadTimeStd: lf.std, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq });
-    const { suggestedOrder, suggestedOrderRaw, suggestedOrderFlat, safetyStock, projectedDemand, serviceLevel, seasonalApplied } = plan;
+    const { suggestedOrderRaw, suggestedOrderFlat, safetyStock, projectedDemand, serviceLevel, seasonalApplied } = plan;
+    const suggestedOrder = orderBlocked ? 0 : plan.suggestedOrder;
     const orderCost = suggestedOrder > 0 && unitCost ? suggestedOrder * unitCost : null;
     const orderCostOriginal = suggestedOrder > 0 && unitCostOriginal ? suggestedOrder * unitCostOriginal : null;
     const riskOf = (stock, covM) => stock <= 0 ? "critical" : covM < effectiveLeadTime ? "critical" : (minStock ? stock < minStock : covM < monthsToStock) ? "low" : "ok";
@@ -1473,8 +1522,10 @@ var computeProducts = (ctx) => {
       coverageRiskScore * 0.4 + volatilityRiskScore * 0.2 + xyzRiskScore * 0.15 + leadTimeRiskScore * 0.15 + supplierRiskScore * 0.1
     );
     const out = { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, serviceLevel, projectedDemand, seasonalApplied, suggestedOrderFlat, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, priceChangePct, prevPrice, priceChangedAt, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, leadTimeSource, leadTimeStd: lf.std, nextMonIdx, coverageMonths, coverageDays, incomingQty, overdue, effectiveStock, effectiveCoverDays, effectiveCoverMonths, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, risk, physicalRisk, shortNowCoveredByPO, riskScore };
+    out.orderBlocked = orderBlocked;
+    out.orderMark = orderBlock?.products?.[p.sku || key] || null;
     out.status = procStatus(out);
-    out.statusRank = { now: 0, soon: 1, watch: 2, unknown: 3, ok: 4 }[out.status];
+    out.statusRank = { now: 0, soon: 1, watch: 2, unknown: 3, ok: 4, stopped: 5 }[out.status];
     out.chip = procChip(out);
     out.costFromPurchase = costFromPurchase;
     out.costFromAvg = costFromAvg;
@@ -1671,7 +1722,8 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
     monthsToStock: Number(app.procMonthsToStock) || 2,
     supplierConcentration: supplierConcentrationOf(supplierMap),
     outliers,
-    outlierDecisions: decisions
+    outlierDecisions: decisions,
+    orderBlock: app.procOrderBlock || {}
   });
   const bySup = {};
   products.filter((p) => p.suggestedOrder > 0 && !p.ownMade).forEach((p) => {
@@ -1741,8 +1793,26 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
       Object.entries(costMap).forEach(([k, v]) => {
         if (v > 0) catalog[k] = { p: v, cur: currencyMap[k] || "ILS" };
       });
-      const pc = Object.values(priceCheck(hist, { now, poPrice, catalog, names }));
-      const arriving = shipments.map((s) => ({ ...s, stage: shipmentStage(s, today) })).filter((s) => s.stage.idx < 2 && s.arr && s.arr >= today && s.arr <= wk);
+      const blocked = new Set(products.filter((p) => p.orderBlocked).map((p) => p.sku));
+      const pc = Object.values(priceCheck(hist, { now, poPrice, catalog, names })).filter((x) => !blocked.has(x.k));
+      const shipsAll = shipments.map((s) => ({ ...s, matched: supOf(s), stage: shipmentStage(s, today), delayDays: s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0 }));
+      const active = shipsAll.filter((s) => s.stage.idx < 2);
+      const links = linkShipmentsToPOs({ shipments: shipsAll, orders: ordersEnriched, manual: app.procShipPoLinks || {} });
+      const arriving = active.filter((s) => s.arr && s.arr >= today && s.arr <= wk);
+      const inTransit = active.map((s) => ({
+        id: s.id,
+        sup: s.matched || s.sup,
+        fwdSup: s.sup,
+        cont: s.cont,
+        arr: s.arr,
+        dep: s.dep,
+        stage: s.stage.label,
+        days: s.arr ? Math.round(daysBetween(today, s.arr)) : null,
+        delayDays: s.delayDays,
+        from: s.change?.from || null,
+        pos: links.byShip[s.id] || [],
+        thisWeek: !!(s.arr && s.arr >= today && s.arr <= wk)
+      })).sort((a, b) => (a.arr || "9999") < (b.arr || "9999") ? -1 : 1);
       return {
         stockValue,
         daysOfInventory: cogs > 0 && stockValue > 0 ? Math.round(stockValue / (cogs / 30)) : null,
@@ -1753,6 +1823,8 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
         toOrderValue: products.filter((p) => p.suggestedOrder > 0 && p.currentStock != null && !p.ownMade).reduce((a, p) => a + (p.orderCost || 0), 0),
         arrivingWeek: arriving.length,
         delayedCount: delayed.length,
+        inTransitCount: active.length,
+        inTransit,
         priceHigh: pc.filter((x) => x.verdict === "high").length,
         priceCheck: pc.filter((x) => x.verdict !== "ok").length
       };

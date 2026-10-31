@@ -1056,7 +1056,7 @@ export const orderCalendar = (products = [], { now = Date.now(), monthsToStock =
   const skip = new Set(skipSuppliers);
   products.forEach(p => {
     const sup = p.supplier || 'ספק לא ידוע';
-    if (skip.has(sup) || !(p.avgMonthly > 0) || p.currentStock == null) return;
+    if (skip.has(sup) || p.orderBlocked || !(p.avgMonthly > 0) || p.currentStock == null) return;
     const daily = p.avgMonthly / 30.4;
     const lead = (p.effectiveLeadTime || 0) * 30.4;
     const safety = (p.safetyStock || 0) / daily;
@@ -1065,7 +1065,9 @@ export const orderCalendar = (products = [], { now = Date.now(), monthsToStock =
     const late = orderAt < t0;
     if (late) orderAt = t0;
     const s = (sups[sup] ||= { name: sup, next: null, nowCount: 0, items: [], lead: p.effectiveLeadTime, value: 0 });
-    s.items.push({ k: p.sku || p.key, n: p.name, orderAt: iso(orderAt), late, qty: p.suggestedOrder > 0 ? p.suggestedOrder : null });
+    const qtyNow = p.suggestedOrder > 0 ? p.suggestedOrder : Math.ceil(p.avgMonthly * monthsToStock);
+    s.items.push({ k: p.sku || p.key, n: p.name, orderAt: iso(orderAt), late, qty: p.suggestedOrder > 0 ? p.suggestedOrder : null, qtyNext: qtyNow,
+      stock: p.currentStock, incoming: p.incomingQty || 0, avg: p.avgMonthly, cover: Math.round(cover), value: p.unitCost ? qtyNow * p.unitCost : null });
     if (late) s.nowCount++;
     if (!s.next || iso(orderAt) < s.next) s.next = iso(orderAt);
     // cash events to the horizon

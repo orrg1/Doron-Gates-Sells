@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { buildDigest } from './core/digest.js';
+import { installResizableColumns } from './resizableColumns.js';
 import * as XLSXLib from 'xlsx';
 import { supabase, flushAll, queueDataset } from './cloud.js';
 import { OWN_MADE, procStatus, PROC_STATUS_LABEL, procChip, computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './core/procModel.js';
@@ -114,8 +115,9 @@ const procStatusCls = (st, dark) => ({
   watch:   dark ? 'bg-orange-500/15 text-orange-300' : 'bg-orange-50 text-orange-800',
   ok:      dark ? 'bg-emerald-500/15 text-emerald-300' : 'bg-emerald-50 text-emerald-700',
   unknown: dark ? 'bg-slate-700 text-slate-300'      : 'bg-slate-100 text-slate-600',
+  stopped: dark ? 'bg-slate-700/60 text-slate-400'   : 'bg-slate-100 text-slate-500',
 }[st]);
-const procDotColor = { now:'#C8322B', soon:'#D9822B', watch:'#D9822B', ok:'#2E8B57', unknown:'#8A919E' };
+const procDotColor = { now:'#C8322B', soon:'#D9822B', watch:'#D9822B', ok:'#2E8B57', unknown:'#8A919E', stopped:'#64748b' };
 const procChipCls = (k, dark) => ({
   now:   dark ? 'bg-red-500/15 text-red-300'       : 'bg-red-50 text-red-700',
   watch: dark ? 'bg-orange-500/15 text-orange-300' : 'bg-orange-50 text-orange-800',
@@ -1205,7 +1207,7 @@ const CustomersPage = ({ monthlyData, productData, isDarkMode, fileNames, exclud
 // Same numbers as the weekly email and the procurement page (buildDigest on the stored data).
 const OVERVIEW_APP_KEYS = ['procurementStock','procurementSupplier','procurementCost','procurementCurrency','exchangeRates','openOrders','procShipSupplierMap',
   'procOutlierDecisions','procurementLeadTime','procLeadAddTransit','excludeCurrentMonth','procSkipStockoutMonths','procurementMinStock','procurementCostHistory',
-  'procurementMOQ','procurementNames','prioritySyncAt','procAvgWindow','procMonthsToStock','procDefaultLeadTime'];
+  'procurementMOQ','procurementNames','prioritySyncAt','procAvgWindow','procMonthsToStock','procDefaultLeadTime','procOrderBlock','procShipPoLinks'];
 const readAppState = (keys) => { const o = {}; keys.forEach(k => { let v = null; try { v = localStorage.getItem(k); } catch { /* none */ } if (v == null) return; try { o[k] = JSON.parse(v); } catch { o[k] = v; } }); return o; };
 const OverviewPage = ({ isDarkMode, setActiveTab, onOpenProc, salesLines = [], stoppedCount = 0, dueCount = 0 }) => {
   const [sets, setSets] = useState(null);
@@ -1251,7 +1253,7 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenProc, salesLines = [], s
     { k: 'order', t: 'להזמין עכשיו', v: o ? o.toOrder : '…', sub: o && o.toOrderValue ? `≈ ${formatShort(o.toOrderValue)}` : 'מוצרים', go: () => onOpenProc('schedule'), tone: o?.toOrder ? 'now' : 'ok' },
     { k: 'make', t: 'לייצור עצמי', v: digest ? digest.toMake : '…', sub: 'מוצרים לייצר', go: () => onOpenProc('suppliers'), tone: digest?.toMake ? 'soon' : 'ok', hide: digest && !digest.toMake },
     { k: 'late', t: 'הזמנות רכש באיחור', v: digest ? digest.latePOLines : '…', sub: 'שורות', go: () => onOpenProc('orders'), tone: digest?.latePOLines ? 'soon' : 'ok' },
-    { k: 'ship', t: 'משלוחים', v: o ? o.arrivingWeek : '…', sub: o ? `מגיעים השבוע${o.delayedCount ? ` · ${o.delayedCount} נדחו` : ''}` : '', go: () => onOpenProc('shipments'), tone: o?.delayedCount ? 'soon' : 'ok' },
+    { k: 'ship', t: 'משלוחים בדרך', v: o ? o.inTransitCount : '…', sub: o ? `${o.arrivingWeek} מגיעים השבוע${o.delayedCount ? ` · ${o.delayedCount} נדחו` : ''}` : '', go: () => onOpenProc('shipments'), tone: o?.delayedCount ? 'soon' : 'ok' },
     { k: 'price', t: 'מחירים לבדיקה', v: o ? o.priceCheck : '…', sub: o ? `${o.priceHigh} במחיר גבוה` : '', go: () => onOpenProc('prices'), tone: o?.priceHigh ? 'soon' : 'ok' },
     { k: 'due', t: 'לקוחות שהגיע זמנם', v: dueCount, sub: 'עברו את הזמן הרגיל שלהם', go: () => setActiveTab('customers'), tone: dueCount ? 'soon' : 'ok' },
     { k: 'stop', t: 'לקוחות שהפסיקו', v: stoppedCount, sub: 'מוצר שהפסיקו לקנות', go: () => setActiveTab('customers'), tone: 'ok' },
@@ -1303,6 +1305,36 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenProc, salesLines = [], s
           ))}
         </div>
       </section>
+
+      {o?.inTransit?.length > 0 && (
+        <section aria-label="משלוחים בדרך" className={`${card} overflow-hidden`}>
+          <div className="px-4 py-3 flex flex-wrap items-baseline gap-x-3">
+            <h2 className={`font-bold ${strong}`}>משלוחים בדרך ({o.inTransit.length})</h2>
+            <span className={`text-xs ${muted}`}>{o.arrivingWeek} מגיעים השבוע{o.delayedCount ? ` · ${o.delayedCount} נדחו` : ''} · מסודר לפי תאריך הגעה</span>
+            <button type="button" onClick={() => onOpenProc('shipments')} className={`mr-auto text-xs font-semibold underline ${isDarkMode ? 'text-blue-300' : 'text-blue-700'}`}>לכל הפרטים</button>
+          </div>
+          <div className="overflow-x-auto">
+            <table className={`w-full text-sm text-right min-w-[720px] ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+              <thead className={`text-[11px] font-semibold ${isDarkMode ? 'bg-slate-900 text-slate-400' : 'bg-slate-50 text-slate-500'}`}>
+                <tr>{['ספק', 'מכולה', 'שלב', 'הגעה משוערת', 'עוד', 'שינוי', 'הזמנות במשלוח'].map(h => <th key={h} className="px-3 py-2">{h}</th>)}</tr>
+              </thead>
+              <tbody className={`divide-y ${isDarkMode ? 'divide-slate-700/50' : 'divide-slate-100'}`}>
+                {o.inTransit.map(x => (
+                  <tr key={x.id} className={x.thisWeek ? (isDarkMode ? 'bg-blue-500/10' : 'bg-blue-50/70') : ''}>
+                    <td className={`px-3 py-2 font-semibold ${strong}`}>{x.sup}</td>
+                    <td className="px-3 py-2 text-xs font-mono">{x.cont || '—'}</td>
+                    <td className="px-3 py-2 text-xs">{x.stage}</td>
+                    <td className={`px-3 py-2 text-xs ${x.thisWeek ? `font-bold ${strong}` : ''}`}>{x.arr ? isoToDisplay(x.arr) : 'לא ידוע'}{x.thisWeek && <span className="mr-1 text-[10px] font-bold text-blue-500">השבוע</span>}</td>
+                    <td className="px-3 py-2 text-xs tabular-nums">{x.days == null ? '—' : x.days <= 0 ? 'היום' : `${x.days} ימים`}</td>
+                    <td className="px-3 py-2 text-xs">{x.delayDays > 0 ? <span className={isDarkMode ? 'text-orange-300 font-semibold' : 'text-orange-700 font-semibold'}>נדחה {x.delayDays} ימים (היה {isoToDisplay(x.from)})</span> : x.delayDays < 0 ? <span className="text-emerald-500 font-semibold">הוקדם {-x.delayDays} ימים</span> : '—'}</td>
+                    <td className="px-3 py-2 text-xs font-mono">{x.pos.length ? x.pos.join(', ') : <span className={muted}>לא שויך</span>}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </section>
+      )}
 
       <section className="grid grid-cols-1 lg:grid-cols-2 gap-4">
         <div className={`${card} p-4`}>
@@ -1741,6 +1773,13 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   const [shipPoManual, setShipPoManual] = useState(() => { try { return JSON.parse(localStorage.getItem('procShipPoLinks')||'{}'); } catch { return {}; } });
   const saveShipPo = (next) => { setShipPoManual(next); try { localStorage.setItem('procShipPoLinks', JSON.stringify(next)); } catch { /* best-effort */ } };
   const [shipSupOverride, setShipSupOverride] = useState(() => { try { return JSON.parse(localStorage.getItem('procShipSupplierMap')||'{}'); } catch { return {}; } });
+  // What is no longer ordered: suppliers being phased out, products marked 'stop' (never again) or 'keep'
+  // (still ordered from a supplier that is being phased out). Saved on the server → the email and alerts follow it.
+  const [orderBlock, setOrderBlockState] = useState(() => { try { const v = JSON.parse(localStorage.getItem('procOrderBlock')||'{}'); return { suppliers: v.suppliers||{}, products: v.products||{} }; } catch { return { suppliers:{}, products:{} }; } });
+  const saveOrderBlock = (next) => { setOrderBlockState(next); try { localStorage.setItem('procOrderBlock', JSON.stringify(next)); } catch { /* kept on screen */ } };
+  const setSupplierPhasing = (name, on) => { const sup = { ...orderBlock.suppliers }; if (on) sup[name] = 'phasing'; else delete sup[name]; saveOrderBlock({ ...orderBlock, suppliers: sup }); };
+  const setProductMark = (sku, mark) => { const pr = { ...orderBlock.products }; if (mark) pr[sku] = mark; else delete pr[sku]; saveOrderBlock({ ...orderBlock, products: pr }); };
+  const setProductMarks = (skus, mark) => { const pr = { ...orderBlock.products }; skus.forEach(k => { if (mark) pr[k] = mark; else delete pr[k]; }); saveOrderBlock({ ...orderBlock, products: pr }); };
   // Order quantities the user typed (SKU → qty), kept until the PO shows up in Priority's open-orders file.
   const [draftQty, setDraftQty] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementDraftQty')||'{}'); } catch { return {}; } });
   const saveDraft = (next) => { setDraftQty(next); try { localStorage.setItem('procurementDraftQty', JSON.stringify(next)); } catch { /* best-effort */ } };
@@ -2430,8 +2469,8 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   // dependency, since this feeds into the risk score computed below. ──
   const supplierConcentration = useMemo(() => supplierConcentrationOf(supplierMap), [supplierMap]);
 
-  const products = useMemo(() => computeProducts({ salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions }),
-    [leadFor, stockouts, skipStockoutMonths, outliers, outlierDecisions, salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, leadStats, leadAddTransit, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku, itemsExtra]);
+  const products = useMemo(() => computeProducts({ salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions, orderBlock }),
+    [leadFor, stockouts, skipStockoutMonths, outliers, outlierDecisions, salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, leadStats, leadAddTransit, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku, itemsExtra, orderBlock]);
 
   const filtered = useMemo(() => {
     let data = products;
@@ -2773,7 +2812,7 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   const etaFor = (p) => productEta[p.key] ?? productEta[p.sku] ?? productEta[p.name] ?? null;
 
   // ── Supplier list ───────────────────────────────────────────────
-  const orderQtyFor = (p) => draftQty[p.key] != null ? draftQty[p.key] : (p.currentStock !== null ? p.suggestedOrder : 0);
+  const orderQtyFor = (p) => draftQty[p.key] != null ? draftQty[p.key] : (p.currentStock !== null && !p.orderBlocked ? p.suggestedOrder : 0);
   const vendors = useMemo(() => {
     const groups = {};
     products.forEach(p => { const s = p.supplier || 'ספק לא ידוע'; (groups[s] ||= []).push(p); });
@@ -2795,11 +2834,11 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
         draftCount: items.filter(p => draftQty[p.key] != null).length,
         ordersCount: orders.length, ordersLate: orders.filter(o => o.isOverdue).length,
         ships, nextShip, shipDelayed: ships.some(s => s.delayDays > 0),
-        pb, rel, lead, leadInfo, lastPo, ownMade: name === OWN_MADE,
+        pb, rel, lead, leadInfo, lastPo, ownMade: name === OWN_MADE, phasing: orderBlock.suppliers[name] === 'phasing',
         actualLeadDays: leadInfo.st?.median ?? rel?.avgLeadDays ?? null,
       };
-    }).sort((a,b) => (b.ownMade - a.ownMade) || a.worstRank - b.worstRank || b.value - a.value || (b.pb?.spend12||0) - (a.pb?.spend12||0));
-  }, [products, draftQty, ordersEnriched, activeShipsBySupplier, purchBySupplier, supplierReliability, leadTimeMap, leadTime, leadStats, leadAddTransit]);
+    }).sort((a,b) => (a.phasing - b.phasing) || (b.ownMade - a.ownMade) || a.worstRank - b.worstRank || b.value - a.value || (b.pb?.spend12||0) - (a.pb?.spend12||0));
+  }, [products, draftQty, ordersEnriched, activeShipsBySupplier, purchBySupplier, supplierReliability, leadTimeMap, leadTime, leadStats, leadAddTransit, orderBlock]);
   const vendorObj = vendor ? vendors.find(v => v.name === vendor) : null;
   const setDraftFor = (p, val) => {
     const next = { ...draftQty };
@@ -3564,6 +3603,17 @@ const renderProductRow = (p) => {
                   )}
                 </dd>
                 <dt className={muted}>מינימום מלאי (Priority)</dt><dd className={`font-semibold ${strong}`}>{p.minStock ?? '—'}</dd>
+                <dt className={muted}>סטטוס הזמנה</dt>
+                <dd>
+                  <select aria-label="סטטוס הזמנה" value={p.orderMark||''} onChange={e=>setProductMark(p.sku||p.key, e.target.value||null)}
+                    style={isDarkMode?{background:'#0f172a',color:'#f1f5f9'}:{}}
+                    className={`px-2 py-1 rounded-lg border text-xs font-semibold ${isDarkMode?'border-slate-600':'border-slate-300 bg-white'}`}>
+                    <option value="">רגיל</option>
+                    <option value="stop">לא להזמין יותר</option>
+                    {(orderBlock.suppliers[p.supplier]==='phasing' || p.orderMark==='keep') && <option value="keep">ממשיכים להזמין</option>}
+                  </select>
+                  {p.orderBlocked && <span className={`mr-2 text-[11px] ${muted}`}>{p.orderBlocked==='supplier' ? 'הספק בהפסקה' : 'לא מזמינים'} — לא נכלל בהמלצות</span>}
+                </dd>
                 {p.family && <><dt className={muted}>משפחת מוצר</dt><dd className={`font-semibold ${strong}`}>{p.family}{p.ownMade && <span className={`mr-2 text-[11px] px-1.5 py-0.5 rounded ${procChipCls('watch',isDarkMode)}`}>ייצור עצמי</span>}</dd></>}
                 {p.avgCostPriority>0 && <><dt className={muted}>עלות ממוצעת (Priority)</dt><dd className={`font-semibold ${strong}`}>{formatUnitCost(p.avgCostPriority, null)}</dd></>}
                 {p.listPrice>0 && <><dt className={muted}>מחיר מחירון</dt><dd className={`font-semibold ${strong}`}>{formatUnitCost(p.listPrice, null)}{p.avgCostPriority>0 && <span className={`mr-2 text-xs ${muted}`}>רווח {Math.round((1 - p.avgCostPriority/p.listPrice)*100)}%</span>}</dd></>}
@@ -4125,6 +4175,71 @@ const renderProductRow = (p) => {
   };
 
   // ══ PRICES FROM SUPPLIER INVOICES: increases + supplier price index ══
+  // ── Everything marked as not ordered, in one place ──
+  const renderBlocked = () => {
+    const muted = isDarkMode?'text-slate-400':'text-slate-500', strong = isDarkMode?'text-slate-100':'text-slate-800';
+    const box = `rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`;
+    const bySku = {}; products.forEach(p => { bySku[p.sku||p.key] = p; });
+    const phasing = Object.keys(orderBlock.suppliers);
+    const marked = Object.entries(orderBlock.products).map(([k, m]) => ({ k, m, p: bySku[k] }));
+    const btn = `text-xs font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`;
+    const list = (title, items, note) => (
+      <div className={box}>
+        <div className="px-5 py-3"><p className={`font-bold text-sm ${strong}`}>{title} ({items.length})</p>{note && <p className={`text-xs mt-0.5 ${muted}`}>{note}</p>}</div>
+        {!items.length ? <p className={`px-5 pb-4 text-xs ${muted}`}>אין</p> : (
+          <div className="overflow-x-auto max-h-[28rem] overflow-y-auto">
+            <table className={`w-full text-sm text-right min-w-[640px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+              <thead className={`text-[11px] font-semibold sticky top-0 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-50 text-slate-500'}`}>
+                <tr>{['מק"ט','מוצר','ספק','מלאי','נמכר בחודש',''].map((h,i) => <th key={i} className="px-3 py-2">{h}</th>)}</tr>
+              </thead>
+              <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                {items.map(({ k, p }) => (
+                  <tr key={k}>
+                    <td className={`px-3 py-2 text-xs font-mono ${muted}`}>{k}</td>
+                    <td className={`px-3 py-2 ${strong}`}>{p ? <button type="button" onClick={()=>setDrawerKey(p.key)} className="text-right hover:underline">{p.name}</button> : (nameMap[k] || '—')}</td>
+                    <td className="px-3 py-2 text-xs">{p?.supplier || '—'}</td>
+                    <td className="px-3 py-2 text-xs tabular-nums">{p?.currentStock ?? '—'}</td>
+                    <td className="px-3 py-2 text-xs tabular-nums">{p?.avgMonthly ? p.avgMonthly.toFixed(p.avgMonthly<10?1:0) : '—'}</td>
+                    <td className="px-3 py-2"><button type="button" onClick={()=>setProductMark(k, null)} className={btn}>בטל סימון</button></td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+      </div>
+    );
+    return (
+      <div className="space-y-4 animate-in fade-in duration-300">
+        <div className={`${box} p-5`}>
+          <p className={`font-bold ${strong}`}>ספקים ומוצרים שלא מזמינים</p>
+          <p className={`text-xs mt-0.5 ${muted}`}>מה שמסומן כאן לא מופיע בהמלצות, בלוח ההזמנות, בתחזית התזרים, ב"מחירים לבדיקה", בהתראות ובמייל השבועי. מכירות, מלאי, הזמנות פתוחות ומשלוחים ממשיכים להופיע כרגיל. מסמנים בעמוד הספק או בכרטיס המוצר.</p>
+        </div>
+        <div className={box}>
+          <div className="px-5 py-3"><p className={`font-bold text-sm ${strong}`}>ספקים בהפסקה ({phasing.length})</p></div>
+          {!phasing.length ? <p className={`px-5 pb-4 text-xs ${muted}`}>אין</p> : (
+            <ul className={`divide-y border-t ${isDarkMode?'divide-slate-700/60 border-slate-700':'divide-slate-100 border-slate-100'}`}>
+              {phasing.map(name => {
+                const items = products.filter(p => p.supplier === name);
+                const keep = items.filter(p => p.orderMark === 'keep').length;
+                return (
+                  <li key={name} className="px-5 py-2.5 flex flex-wrap items-center gap-3 text-sm">
+                    <button type="button" onClick={()=>{ setVendor(name); setViewMode('suppliers'); }} className={`font-semibold hover:underline ${strong}`}>{name}</button>
+                    <span className={`text-xs ${muted}`}>{items.length} מוצרים · {keep} "ממשיכים להזמין"</span>
+                    <div className="flex-1"/>
+                    <button type="button" onClick={()=>{ if (window.confirm(`להחזיר את "${name}" לספק פעיל?`)) setSupplierPhasing(name, false); }} className={btn}>החזר לפעיל</button>
+                  </li>
+                );
+              })}
+            </ul>
+          )}
+        </div>
+        {list('מוצרים "לא להזמין יותר"', marked.filter(x => x.m === 'stop'), 'יוצאים מהרכש אצל כל ספק. נשארים במלאי עד שנגמרים.')}
+        {list('מוצרים "ממשיכים להזמין"', marked.filter(x => x.m === 'keep'), 'החריגים: עדיין מזמינים אותם, גם שהספק שלהם בהפסקה.')}
+      </div>
+    );
+  };
+
   // ── Supplier scorecard: price trend + customer returns on the supplier's products (+ on time) ──
   const supOfSku = useMemo(() => { const m = {}; products.forEach(p => { if (p.sku && p.supplier) m[p.sku] = p.supplier; }); return m; }, [products]);
   const supReturns = useMemo(() => supplierReturns(salesLines, k => supOfSku[k]), [salesLines, supOfSku]);
@@ -4217,7 +4332,7 @@ const renderProductRow = (p) => {
                     <button type="button" onClick={()=>setCalOpen(open ? null : s.name)} aria-expanded={open} className={`w-full text-right px-5 py-3 flex flex-wrap items-center gap-x-4 gap-y-1 ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}`}>
                       <span className="flex-1 min-w-[200px]">
                         <span className={`block font-semibold ${strong}`}>{s.name}</span>
-                        <span className={`text-xs ${muted}`}>זמן אספקה {s.lead} ח׳ · {s.join} מוצרים בהזמנה{s.nowCount ? ` · ${s.nowCount} כבר באיחור` : ''}</span>
+                        <span className={`text-xs ${muted}`}>זמן אספקה {s.lead} ח׳ · {s.join} מוצרים בהזמנה{s.nowCount ? ` · ל-${s.nowCount} היה צריך להזמין כבר` : ''}</span>
                       </span>
                       <span className="text-left">
                         <span className={`block text-xs ${muted}`}>להזמין עד</span>
@@ -4229,16 +4344,35 @@ const renderProductRow = (p) => {
                     </button>
                     {open && (
                       <div className={`px-5 pb-4 space-y-2 ${isDarkMode?'bg-slate-900/30':'bg-slate-50/60'}`}>
-                        <ul className="pt-2 space-y-1">
-                          {s.joinItems.map(i => (
-                            <li key={i.k} className="flex items-center gap-2 text-sm">
-                              <span className={`text-xs font-mono w-28 shrink-0 ${muted}`}>{i.k}</span>
-                              <span className={`flex-1 min-w-0 truncate ${strong}`} title={i.n}>{i.n}</span>
-                              <span className={`text-xs ${i.late?'text-red-500 font-bold':muted}`}>{i.late ? 'באיחור' : `עד ${isoToDisplay(i.orderAt)}`}</span>
-                              <span className={`text-xs tabular-nums w-16 text-left ${strong}`}>{i.qty ? `${i.qty.toLocaleString()} יח׳` : ''}</span>
-                            </li>
-                          ))}
-                        </ul>
+                        <div className={`mt-2 overflow-x-auto rounded-xl border ${isDarkMode?'border-slate-700':'border-slate-200'}`}>
+                          <table className={`w-full text-sm text-right min-w-[860px] ${isDarkMode?'text-slate-300 bg-slate-800':'text-slate-600 bg-white'}`}>
+                            <thead className={`text-[11px] font-semibold ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-50 text-slate-500'}`}>
+                              <tr>
+                                {sortTh('cal','k','מק"ט',{className:'px-3 py-2'})}{sortTh('cal','n','מוצר',{className:'px-3 py-2'})}
+                                {sortTh('cal','stock','מלאי',{className:'px-3 py-2',firstDir:'desc'})}{sortTh('cal','incoming','בדרך',{className:'px-3 py-2',firstDir:'desc'})}
+                                {sortTh('cal','avg','ממוצע לחודש',{className:'px-3 py-2',firstDir:'desc'})}{sortTh('cal','cover','מספיק ל (ימים)',{className:'px-3 py-2'})}
+                                {sortTh('cal','orderAt','להזמין עד',{className:'px-3 py-2'})}{sortTh('cal','qtyNext','כמות',{className:'px-3 py-2',firstDir:'desc'})}
+                                {sortTh('cal','value','שווי',{className:'px-3 py-2',firstDir:'desc'})}
+                              </tr>
+                            </thead>
+                            <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                              {sortRows('cal', s.joinItems).map(i => (
+                                <tr key={i.k} className={i.late ? (isDarkMode?'bg-red-500/5':'bg-red-50/40') : ''}>
+                                  <td className={`px-3 py-1.5 text-xs font-mono whitespace-nowrap ${muted}`}>{i.k}</td>
+                                  <td className={`px-3 py-1.5 ${strong}`}>{i.n}</td>
+                                  <td className={`px-3 py-1.5 text-xs tabular-nums ${i.stock<=0?'text-red-500 font-bold':''}`}>{i.stock?.toLocaleString() ?? '—'}</td>
+                                  <td className="px-3 py-1.5 text-xs tabular-nums">{i.incoming ? i.incoming.toLocaleString() : '—'}</td>
+                                  <td className="px-3 py-1.5 text-xs tabular-nums">{i.avg ? i.avg.toFixed(i.avg<10?1:0) : '—'}</td>
+                                  <td className="px-3 py-1.5 text-xs tabular-nums">{i.cover}</td>
+                                  <td className={`px-3 py-1.5 text-xs whitespace-nowrap ${i.late?'text-red-500 font-bold':''}`}>{i.late ? 'עכשיו' : isoToDisplay(i.orderAt)}</td>
+                                  <td className={`px-3 py-1.5 text-xs tabular-nums font-bold ${strong}`}>{i.qtyNext.toLocaleString()}{!i.qty && <span className={`font-normal text-[10px] ${muted}`}> (הבאה)</span>}</td>
+                                  <td className="px-3 py-1.5 text-xs tabular-nums">{i.value ? formatShort(i.value) : '—'}</td>
+                                </tr>
+                              ))}
+                            </tbody>
+                          </table>
+                        </div>
+                        <p className={`text-[11px] ${muted}`}>"מספיק ל" = מלאי + בדרך, בקצב המכירות. "(הבאה)" = עוד לא דחוף — כמות של {monthsToStock} חודשי מלאי יעד, כדי לצרף לאותה הזמנה.</p>
                         <button type="button" onClick={()=>{ setVendor(s.name); setViewMode('suppliers'); }} className={`text-xs font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>פתח את עמוד הספק עם הכמויות</button>
                       </div>
                     )}
@@ -4297,8 +4431,11 @@ const renderProductRow = (p) => {
     const poPrice = {}, catalog = {};
     ordersEnriched.forEach(o => { if (o.unitPriceOriginal > 0) poPrice[o.productKey] = { p: o.unitPriceOriginal, cur: o.currency || 'ILS', po: o.poNumber || '' }; });
     Object.entries(costMap).forEach(([k, v]) => { if (v > 0) catalog[k] = { p: v, cur: currencyMap[k] || 'ILS' }; });
-    return priceCheck(priceHist, { poPrice, catalog, names: nameMap });
-  }, [priceHist, ordersEnriched, costMap, currencyMap, nameMap]);
+    const blocked = new Set(products.filter(p => p.orderBlocked).map(p => p.sku));
+    const all = priceCheck(priceHist, { poPrice, catalog, names: nameMap });
+    Object.keys(all).forEach(k => { if (blocked.has(k)) all[k].blocked = true; });
+    return all;
+  }, [priceHist, ordersEnriched, costMap, currencyMap, nameMap, products]);
   const priceTopRef = useRef(null);
   const openPrice = (k) => { setPriceSku(k); setPriceSearch(''); setTimeout(() => priceTopRef.current?.scrollIntoView({ behavior:'smooth', block:'start' }), 50); };
   const renderPriceTracker = () => {
@@ -4318,7 +4455,7 @@ const renderProductRow = (p) => {
     const series = [...new Set(pts.map(x => useIls ? x.s : `${x.s}|${x.cur}`))];
     const chartData = pts.map(x => ({ d: x.d, [useIls ? x.s : `${x.s}|${x.cur}`]: Math.round((useIls ? x.ils : x.p) * 100) / 100, q: x.q, inv: x.inv }));
     const COLORS = ['#2563eb','#d97706','#059669','#db2777','#7c3aed','#0891b2'];
-    const rows = sortRows('priceCheck', all.filter(x => priceFilter==='all' ? true : priceFilter==='high' ? x.verdict==='high' : x.verdict!=='ok')
+    const rows = sortRows('priceCheck', all.filter(x => priceFilter==='all' ? true : !x.blocked && (priceFilter==='high' ? x.verdict==='high' : x.verdict!=='ok'))
       .map(x => ({ ...x, lastD: x.last.d, s: x.last.s, reason: x.reasons.find(r => r.lvl!=='good')?.text || '' })), { verdict: x => ({high:0,check:1,ok:2})[x.verdict] });
     const histRows = [...pts].reverse().map((x, i, arr) => {
       const prevSame = arr.slice(i+1).find(y => y.s === x.s && y.cur === x.cur && y.inv !== x.inv);
@@ -4441,7 +4578,7 @@ const renderProductRow = (p) => {
               <p className={`text-[11px] mt-0.5 ${muted}`}>המחיר האחרון מעל הרגיל, עלייה מהחשבונית הקודמת, ספק אחר זול יותר, הזמנה פתוחה במחיר גבוה, או כרטיס פריט לא מעודכן. לחיצה פותחת את כל ההיסטוריה.</p>
             </div>
             <div role="group" aria-label="סינון" className={`flex rounded-lg p-1 text-xs ${isDarkMode?'bg-slate-700':'bg-slate-100'}`}>
-              {[['issues',`לבדיקה (${all.filter(x=>x.verdict!=='ok').length})`],['high',`גבוה (${all.filter(x=>x.verdict==='high').length})`],['all',`הכל (${all.length})`]].map(([k,l]) => (
+              {[['issues',`לבדיקה (${all.filter(x=>!x.blocked && x.verdict!=='ok').length})`],['high',`גבוה (${all.filter(x=>!x.blocked && x.verdict==='high').length})`],['all',`הכל (${all.length})`]].map(([k,l]) => (
                 <button key={k} type="button" aria-pressed={priceFilter===k} onClick={()=>setPriceFilter(k)} className={`px-2.5 py-1 rounded-md font-semibold ${priceFilter===k?(isDarkMode?'bg-slate-600 text-white':'bg-white shadow text-slate-800'):(isDarkMode?'text-slate-300':'text-slate-500')}`}>{l}</button>
               ))}
             </div>
@@ -4639,7 +4776,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
         spend12: v => v.pb?.spend12 || null,
         lead: v => v.actualLeadDays ?? v.lead * 30,
       });
-      const grid = { gridTemplateColumns:'minmax(170px,1.6fr) 120px 130px 170px 110px 110px 130px 20px' };
+      const grid = { gridTemplateColumns:'var(--rz-cols, minmax(170px,1.6fr) 120px 130px 170px 110px 110px 130px 20px)' };
       const stickyBg = isDarkMode?'bg-slate-800':'bg-white';
       return (
         <div className={cardCls}>
@@ -4652,16 +4789,19 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
           </div>
           <div className="overflow-x-auto">
             <div className="min-w-[1080px]">
-              <div className={`grid gap-4 px-5 py-2.5 ${headCls}`} style={grid}>
+              <div data-rz-grid="vendors" className={`grid gap-4 px-5 py-2.5 ${headCls}`} style={grid}>
                 <div className={`sticky right-0 z-[1] -mr-5 pr-5 ${isDarkMode?'bg-slate-900':'bg-slate-50'}`}>{sortHead('vendors','name','ספק')}</div>{sortHead('vendors','toOrder','להזמין',{firstDir:'desc'})}{sortHead('vendors','worst','מצב')}{sortHead('vendors','incoming','בדרך',{firstDir:'desc'})}{sortHead('vendors','lastPo','הזמנה אחרונה',{firstDir:'desc'})}{sortHead('vendors','spend12','קניות 12 ח׳',{firstDir:'desc'})}{sortHead('vendors','lead','זמן אספקה',{firstDir:'desc'})}<div/>
               </div>
-              {list.map(v => {
+              {list.map((v, vi) => {
                 const st = v.worst;
+                const firstPhasing = v.phasing && !(list[vi-1]?.phasing);
                 return (
-                  <button key={v.name} type="button" onClick={()=>{ setVendor(v.name); setDrawerKey(null); }}
+                  <React.Fragment key={v.name}>
+                  {firstPhasing && <div className={`px-5 py-2 text-xs font-bold border-t ${isDarkMode?'bg-slate-900/60 text-slate-400 border-slate-700':'bg-slate-50 text-slate-500 border-slate-200'}`}>ספקים בהפסקה — לא נכללים בהמלצות ובהתראות</div>}
+                  <button type="button" onClick={()=>{ setVendor(v.name); setDrawerKey(null); }}
                     className={`w-full text-right grid gap-4 items-center px-5 py-3.5 border-t transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${isDarkMode?'border-slate-700 hover:bg-slate-700/40':'border-slate-100 hover:bg-slate-50'}`} style={grid}>
                     <div className={`min-w-0 sticky right-0 z-[1] -mr-5 pr-5 py-1 ${stickyBg}`}>
-                      <p className={`font-bold text-sm truncate flex items-center gap-1.5 ${strong}`} title={v.name}>{v.ownMade && <Factory className="w-4 h-4 shrink-0 text-violet-500" aria-hidden="true"/>}{v.name}</p>
+                      <p className={`font-bold text-sm truncate flex items-center gap-1.5 ${strong}`} title={v.name}>{v.ownMade && <Factory className="w-4 h-4 shrink-0 text-violet-500" aria-hidden="true"/>}<span className={v.phasing?'opacity-60':''}>{v.name}</span>{v.phasing && <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${procStatusCls('stopped', isDarkMode)}`}>בהפסקה</span>}</p>
                       <p className={`text-xs ${muted}`}>{v.items.length} מוצרים{v.draftCount?` · ${v.draftCount} כמויות שקבעת`:''}</p>
                     </div>
                     <div>
@@ -4687,6 +4827,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                     </div>
                     <ChevronLeft className={`w-4 h-4 ${muted}`}/>
                   </button>
+                  </React.Fragment>
                 );
               })}
               {!list.length && <p className={`px-5 py-10 text-center text-sm ${muted}`}>לא נמצאו ספקים</p>}
@@ -4703,7 +4844,11 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
     const toOrder = rows.filter(p => orderQtyFor(p) > 0);
     const totalByCur = {};
     toOrder.forEach(p => { if (p.unitCostOriginal) { const c = p.currency||'ILS'; totalByCur[c] = (totalByCur[c]||0) + orderQtyFor(p)*p.unitCostOriginal; } });
-    const grid = { gridTemplateColumns:`minmax(220px,1.4fr) ${months.length*24}px 70px 76px 170px 80px 110px` };
+    const grid = { gridTemplateColumns:`var(--rz-cols, minmax(220px,1.4fr) ${months.length*24}px 70px 76px 170px 80px 110px 150px)` };
+    const markOpts = (p) => [['', 'רגיל'], ['stop', 'לא להזמין יותר'], ...((v.phasing || p.orderMark==='keep') ? [['keep', 'ממשיכים להזמין']] : [])];
+    const needAlt = v.phasing ? rows.filter(p => p.orderMark !== 'keep' && p.orderMark !== 'stop' && p.avgMonthly > 0)
+      .sort((a, b) => (b.avgMonthly*(b.unitCost||1)) - (a.avgMonthly*(a.unitCost||1))) : [];
+    const markedHere = rows.filter(p => p.orderMark);
     return (
       <div className="space-y-4">
         <div className="flex flex-wrap items-end gap-4">
@@ -4711,7 +4856,17 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
             <button type="button" onClick={()=>setVendor(null)} className={`inline-flex items-center gap-1 text-sm font-semibold ${isDarkMode?'text-blue-300':'text-blue-700'} hover:underline`}>
               <ChevronRight className="w-4 h-4"/> כל הספקים
             </button>
-            <h3 className={`text-2xl font-bold flex items-center gap-2 ${strong}`}>{v.ownMade && <Factory className="w-6 h-6 text-violet-500" aria-hidden="true"/>}{v.name}</h3>
+            <h3 className={`text-2xl font-bold flex items-center gap-2 ${strong}`}>{v.ownMade && <Factory className="w-6 h-6 text-violet-500" aria-hidden="true"/>}{v.name}
+              {v.phasing && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${procStatusCls('stopped', isDarkMode)}`}>ספק בהפסקה</span>}</h3>
+            {!v.ownMade && v.name !== 'ספק לא ידוע' && (
+              <div className="flex flex-wrap items-center gap-3 text-xs">
+                <label className={`inline-flex items-center gap-2 font-semibold cursor-pointer ${strong}`}>
+                  <input type="checkbox" checked={v.phasing} onChange={e=>{ if (!e.target.checked || window.confirm(`לסמן את "${v.name}" כספק בהפסקה?\nכל המוצרים שלו ייצאו מההמלצות ומההתראות, חוץ ממה שתסמן "ממשיכים להזמין".`)) setSupplierPhasing(v.name, e.target.checked); }} className="w-4 h-4 accent-slate-600"/>
+                  ספק בהפסקה
+                </label>
+                <span className={muted}>{v.phasing ? 'המוצרים שלו לא מופיעים בהמלצות, בלוח ההזמנות ובהתראות — חוץ ממה שמסומן "ממשיכים להזמין".' : 'מסמנים כשמפסיקים לעבוד עם הספק.'}</span>
+              </div>
+            )}
             {v.ownMade && <p className={`text-sm ${muted}`}>מוצרים שמשפחת המוצר שלהם ב-Priority היא "ייצור עצמי" — כאן רואים כמה לייצר, לא להזמין מספק.</p>}
             <p className={`text-sm ${muted}`}>{v.items.length} מוצרים · {v.ownMade ? 'זמן ייצור' : 'זמן אספקה'} {v.lead} ח׳ ({{manual:'ידני',computed:'מחושב מההזמנות',global:'ברירת מחדל'}[v.leadInfo.source]}){v.pb?.mainCur && v.pb.mainCur!=='ILS' ? ` · מטבע ${v.pb.mainCur}` : ''}</p>
           </div>
@@ -4774,14 +4929,55 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
           </div>
         )}
 
+        {!v.ownMade && (
+          <div className={`rounded-2xl border px-5 py-3 flex flex-wrap items-center gap-x-4 gap-y-2 text-xs ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+            <span className={`font-semibold ${strong}`}>סטטוס הזמנה למוצרים:</span>
+            <span className={muted}>{markedHere.length ? `${markedHere.filter(p=>p.orderMark==='stop').length} "לא להזמין יותר" · ${markedHere.filter(p=>p.orderMark==='keep').length} "ממשיכים להזמין"` : 'אין סימונים'}</span>
+            <div className="flex-1"/>
+            <button type="button" onClick={()=>{ const ks = rows.filter(p=>!p.orderMark).map(p=>p.sku||p.key); if (ks.length && window.confirm(`לסמן ${ks.length} מוצרים "לא להזמין יותר"?`)) setProductMarks(ks, 'stop'); }} className={`px-2.5 py-1.5 rounded-lg border font-semibold ${isDarkMode?'border-slate-600 text-slate-200':'border-slate-300 text-slate-700'}`}>סמן את כל השאר "לא להזמין יותר"</button>
+            {markedHere.length > 0 && <button type="button" onClick={()=>{ if (window.confirm(`לנקות ${markedHere.length} סימונים של מוצרים אצל "${v.name}"?`)) setProductMarks(markedHere.map(p=>p.sku||p.key), null); }} className={`px-2.5 py-1.5 rounded-lg border font-semibold ${isDarkMode?'border-slate-600 text-slate-200':'border-slate-300 text-slate-700'}`}>נקה סימונים</button>}
+          </div>
+        )}
+        {v.phasing && needAlt.length > 0 && (
+          <div className={`rounded-2xl border overflow-hidden ${isDarkMode?'bg-slate-800 border-orange-500/30':'bg-white border-orange-200'}`}>
+            <div className="px-5 py-3">
+              <p className={`font-bold text-sm ${strong}`}>מוצרים שצריך להם ספק חלופי ({needAlt.length})</p>
+              <p className={`text-xs mt-0.5 ${muted}`}>עדיין נמכרים, והספק בהפסקה. כשתעדכן ב-Priority ספק אחר בכרטיס הפריט — המוצר יעבור אליו בסנכרון הבא. אם עדיין מזמינים אותו מכאן, סמן "ממשיכים להזמין".</p>
+            </div>
+            <div className="overflow-x-auto max-h-96 overflow-y-auto">
+              <table className={`w-full text-sm text-right min-w-[640px] ${isDarkMode?'text-slate-300':'text-slate-600'}`}>
+                <thead className={`text-[11px] font-semibold sticky top-0 ${isDarkMode?'bg-slate-900 text-slate-400':'bg-slate-50 text-slate-500'}`}>
+                  <tr>{['מק"ט','מוצר','נמכר בחודש','מלאי','בדרך','מספיק עד',''].map((h,i) => <th key={i} className="px-3 py-2">{h}</th>)}</tr>
+                </thead>
+                <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
+                  {needAlt.map(p => {
+                    const until = p.effectiveCoverDays != null ? new Date(Date.now() + p.effectiveCoverDays*DAY_MS) : null;
+                    const soon = p.effectiveCoverDays != null && p.effectiveCoverDays < 60;
+                    return (
+                      <tr key={p.key}>
+                        <td className={`px-3 py-2 text-xs font-mono ${muted}`}>{p.sku}</td>
+                        <td className={`px-3 py-2 ${strong}`}>{p.name}</td>
+                        <td className="px-3 py-2 text-xs tabular-nums">{p.avgMonthly.toFixed(p.avgMonthly<10?1:0)}</td>
+                        <td className="px-3 py-2 text-xs tabular-nums">{p.currentStock ?? '—'}</td>
+                        <td className="px-3 py-2 text-xs tabular-nums">{p.incomingQty || '—'}</td>
+                        <td className={`px-3 py-2 text-xs font-semibold ${soon?'text-red-500':''}`}>{until ? until.toLocaleDateString('he-IL') : '—'}</td>
+                        <td className="px-3 py-2"><button type="button" onClick={()=>setProductMark(p.sku||p.key, 'keep')} className={`text-xs font-semibold underline ${isDarkMode?'text-emerald-300':'text-emerald-700'}`}>ממשיכים להזמין</button></td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
         <div className="grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_300px] gap-4 items-start">
           <div className={cardCls}>
             <div className="overflow-x-auto">
-              <div style={{minWidth: 220 + months.length*24 + 600}}>
-                <div className={`grid gap-3 items-center px-4 py-2.5 ${headCls}`} style={grid}>
+              <div style={{minWidth: 220 + months.length*24 + 760}}>
+                <div data-rz-grid="vendorItems" className={`grid gap-3 items-center px-4 py-2.5 ${headCls}`} style={grid}>
                   <div className={`sticky right-0 z-[1] -mr-4 pr-4 ${isDarkMode?'bg-slate-900':'bg-slate-50'}`}>{sortHead('vendorItems','name','מוצר')}</div>
                   <div className="flex gap-0.5">{months.map(m => <span key={m} className="text-[10px] text-center" style={{width:22}}>{m.split('-')[0]}</span>)}</div>
-                  {sortHead('vendorItems','avgMonthly','ממוצע',{firstDir:'desc'})}{sortHead('vendorItems','currentStock','מלאי',{firstDir:'desc'})}{sortHead('vendorItems','incomingQty','בדרך · הגעה',{firstDir:'desc'})}{sortHead('vendorItems','suggestedOrder','מומלץ',{firstDir:'desc'})}{sortHead('vendorItems','qty','להזמין',{firstDir:'desc'})}
+                  {sortHead('vendorItems','avgMonthly','ממוצע',{firstDir:'desc'})}{sortHead('vendorItems','currentStock','מלאי',{firstDir:'desc'})}{sortHead('vendorItems','incomingQty','בדרך · הגעה',{firstDir:'desc'})}{sortHead('vendorItems','suggestedOrder','מומלץ',{firstDir:'desc'})}{sortHead('vendorItems','qty','להזמין',{firstDir:'desc'})}<div>סטטוס הזמנה</div>
                 </div>
                 {sortRows('vendorItems', rows, { incomingQty: p => p.incomingQty || null, qty: p => orderQtyFor(p) || null, suggestedOrder: p => p.currentStock!=null && p.suggestedOrder>0 ? p.suggestedOrder : null }).map(p => {
                   const eta = etaFor(p);
@@ -4810,6 +5006,14 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                           onChange={e=>setDraftFor(p, e.target.value)}
                           className={`w-20 px-2 py-1.5 rounded-lg border-2 text-center text-sm font-bold tabular-nums focus:outline-none focus:border-blue-500 ${edited?(isDarkMode?'border-blue-500 bg-blue-500/10 text-white':'border-blue-500 bg-blue-50 text-slate-900'):(isDarkMode?'border-slate-600 bg-slate-900 text-white':'border-slate-300 bg-white text-slate-900')}`}/>
                         {edited && <button type="button" onClick={()=>setDraftFor(p,'')} title="חזור לכמות המומלצת" aria-label="חזור לכמות המומלצת" className={`p-1 rounded ${muted} hover:text-blue-500`}><RefreshCw className="w-3.5 h-3.5"/></button>}
+                      </div>
+                      <div>
+                        <label htmlFor={`om-${p.key}`} className="sr-only">סטטוס הזמנה — {p.name}</label>
+                        <select id={`om-${p.key}`} value={p.orderMark||''} onChange={e=>setProductMark(p.sku||p.key, e.target.value||null)}
+                          style={isDarkMode?{background:'#0f172a',color:'#f1f5f9'}:{}}
+                          className={`w-full px-2 py-1.5 rounded-lg border text-xs font-semibold ${p.orderMark==='stop'?(isDarkMode?'border-slate-500 text-slate-300':'border-slate-400 text-slate-600 bg-slate-100'):p.orderMark==='keep'?(isDarkMode?'border-emerald-600 text-emerald-300':'border-emerald-400 text-emerald-700 bg-emerald-50'):(isDarkMode?'border-slate-600':'border-slate-300 bg-white')}`}>
+                          {markOpts(p).map(([k,l]) => <option key={k} value={k}>{l}</option>)}
+                        </select>
                       </div>
                     </div>
                   );
@@ -5341,7 +5545,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
             const groups = [
               ['החלטות', [['suppliers','ספקים',null], ['products','כל המוצרים',null], ['schedule','לוח הזמנות', urgentSched>0?{n:urgentSched,k:'now'}:null]]],
               ['מעקב', [['shipments','משלוחים בדרך', shipDelayedCount>0?{n:`${shipDelayedCount} נדחו`,k:'watch'}:(activeShipCount?{n:activeShipCount,k:'muted'}:null)], ['orders','הזמנות פתוחות', lateCount>0?{n:`${lateCount} באיחור`,k:'now'}:(openOrders.length?{n:openOrders.length,k:'muted'}:null)], ['prices','מחירי רכש', priceUp>0?{n:`${priceUp} עליות`,k:'watch'}:null]]],
-              ['ניתוח', [['scorecard','ציון ספקים',null], ['whatif','תרחיש',null], ['dead','מלאי תקוע', deadStockData.length?{n:deadStockData.length,k:'muted'}:null], ['stockouts','חוסרים', null], ['excess','מלאי עודף', excessSummary.poCount?{n:`${excessSummary.poCount} עם הזמנה`,k:'watch'}:(excessData.length?{n:excessData.length,k:'muted'}:null)]]],
+              ['ניתוח', [['scorecard','ציון ספקים',null], ['blocked','לא מזמינים', (Object.keys(orderBlock.suppliers).length+Object.keys(orderBlock.products).length)?{n:Object.keys(orderBlock.suppliers).length+Object.values(orderBlock.products).filter(x=>x==='stop').length,k:'muted'}:null], ['whatif','תרחיש',null], ['dead','מלאי תקוע', deadStockData.length?{n:deadStockData.length,k:'muted'}:null], ['stockouts','חוסרים', null], ['excess','מלאי עודף', excessSummary.poCount?{n:`${excessSummary.poCount} עם הזמנה`,k:'watch'}:(excessData.length?{n:excessData.length,k:'muted'}:null)]]],
             ];
             return groups.map(([gLabel, tabs], gi) => (
               <React.Fragment key={gLabel}>
@@ -5622,6 +5826,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
       {/* ══ SCHEDULE VIEW ══ */}
       {viewMode==='schedule' && renderCalendar()}
       {viewMode==='scorecard' && renderScorecard()}
+      {viewMode==='blocked' && renderBlocked()}
 
       {/* ══ WHAT-IF VIEW ══ */}
       {viewMode==='whatif' && (
@@ -6665,6 +6870,9 @@ const App = () => {
 
   // Toggle theme
   const toggleTheme = () => { const n=!isDarkMode; setIsDarkMode(n); localStorage.setItem('theme',n?'dark':'light'); };
+  // Chart tooltips (and anything else styled from CSS) follow the theme
+  useEffect(() => { try { document.documentElement.dataset.theme = isDarkMode ? 'dark' : 'light'; } catch { /* cosmetic */ } }, [isDarkMode]);
+  useEffect(() => installResizableColumns(), []); // drag column edges in every table
 
   // XLSX + ExcelJS loader
   useEffect(() => {

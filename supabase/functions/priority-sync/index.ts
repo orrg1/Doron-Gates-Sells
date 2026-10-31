@@ -235,7 +235,7 @@ const SITE_URL = 'https://orrg1.github.io/Doron-Gates-Sells/';
 async function digestData() {
   const app = await readState(['procurementStock', 'procurementSupplier', 'procurementCost', 'procurementCurrency', 'exchangeRates', 'openOrders', 'procShipSupplierMap',
     'procOutlierDecisions', 'procurementLeadTime', 'procLeadAddTransit', 'excludeCurrentMonth', 'procSkipStockoutMonths', 'procurementMinStock', 'procurementCostHistory',
-    'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime']);
+    'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime', 'procOrderBlock', 'procShipPoLinks']);
   const sets: Record<string, unknown> = {};
   for (const k of ['procSalesLines', 'procPurchaseLines', 'procShipments', 'stockHistory', 'procPoMeta', 'procItemsExtra', 'dashboardSalesData']) sets[k] = await readDataset(k);
   return buildDigest({ app, sets });

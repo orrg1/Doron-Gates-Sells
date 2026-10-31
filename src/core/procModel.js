@@ -8,13 +8,23 @@ import { getDateVal, calcOrderPlan, isoToMonthKey, parseFlexDate, startOfToday, 
 // under one pseudo-supplier of that name ("what to produce"), not ordered from a supplier.
 export const OWN_MADE = 'ייצור עצמי';
 export const isOwnMadeFamily = (fam) => /ייצור\s*עצמי/.test(String(fam || ''));
+// What is no longer ordered. orderBlock = { suppliers: { name: 'phasing' }, products: { sku: 'stop' | 'keep' } }
+// A product is out of purchasing when marked 'stop', or when its supplier is being phased out and
+// the product was not marked 'keep' (still ordered from that supplier).
+export const orderBlockOf = (orderBlock, sku, supplier) => {
+  const pm = orderBlock?.products?.[sku];
+  if (pm === 'stop') return 'product';
+  if (supplier && orderBlock?.suppliers?.[supplier] === 'phasing' && pm !== 'keep') return 'supplier';
+  return null;
+};
 export const procStatus = (p) => {
+  if (p.orderBlocked) return 'stopped';
   if (p.currentStock === null) return 'unknown';
   if (p.suggestedOrder > 0) return p.risk === 'critical' ? 'now' : 'soon';
   if (p.overdue || p.shortNowCoveredByPO) return 'watch';
   return 'ok';
 };
-export const PROC_STATUS_LABEL = { now:'להזמין עכשיו', soon:'להזמין בקרוב', watch:'לעקוב', ok:'תקין', unknown:'אין נתוני מלאי' };
+export const PROC_STATUS_LABEL = { now:'להזמין עכשיו', soon:'להזמין בקרוב', watch:'לעקוב', ok:'תקין', unknown:'אין נתוני מלאי', stopped:'לא מזמינים' };
 // The single note shown under a product name — the most important one wins.
 export const procChip = (p) => {
   if (p.overdue) return { t:`הזמנה באיחור ${p.overdue.maxDays} ימים`, k:'now' };
@@ -29,7 +39,7 @@ export const procChip = (p) => {
 // ─── The product plan (one row per product) — used by the procurement page AND the server (weekly email) ───
 // Pure: everything it needs comes in `ctx`; the same numbers wherever it runs.
 export const computeProducts = (ctx) => {
-  const { salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions } = ctx;
+  const { salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions, orderBlock } = ctx;
   if (!salesData.length) return [];
   const map = {};
   salesData.forEach(row => {
@@ -226,8 +236,10 @@ export const computeProducts = (ctx) => {
 
     // ── Suggested order (shared with the what-if scenario) ──
     const moq = moqMap[key] ?? moqMap[p.sku] ?? moqMap[p.name] ?? null;
+    const orderBlocked = orderBlockOf(orderBlock, p.sku || key, supplier);
     const plan = calcOrderPlan({ avgMonthly, stdDev, abc:p.abc, leadTime:effectiveLeadTime, leadTimeStd: lf.std, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq });
-    const { suggestedOrder, suggestedOrderRaw, suggestedOrderFlat, safetyStock, projectedDemand, serviceLevel, seasonalApplied } = plan;
+    const { suggestedOrderRaw, suggestedOrderFlat, safetyStock, projectedDemand, serviceLevel, seasonalApplied } = plan;
+    const suggestedOrder = orderBlocked ? 0 : plan.suggestedOrder; // not ordered any more → no recommendation
     const orderCost = (suggestedOrder>0&&unitCost)?suggestedOrder*unitCost:null;
     const orderCostOriginal = (suggestedOrder>0&&unitCostOriginal)?suggestedOrder*unitCostOriginal:null;
 
@@ -258,8 +270,9 @@ export const computeProducts = (ctx) => {
     );
 
     const out = { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, serviceLevel, projectedDemand, seasonalApplied, suggestedOrderFlat, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, priceChangePct, prevPrice, priceChangedAt, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, leadTimeSource, leadTimeStd: lf.std, nextMonIdx, coverageMonths, coverageDays, incomingQty, overdue, effectiveStock, effectiveCoverDays, effectiveCoverMonths, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, risk, physicalRisk, shortNowCoveredByPO, riskScore };
+    out.orderBlocked = orderBlocked; out.orderMark = orderBlock?.products?.[p.sku || key] || null;
     out.status = procStatus(out);
-    out.statusRank = { now:0, soon:1, watch:2, unknown:3, ok:4 }[out.status];
+    out.statusRank = { now:0, soon:1, watch:2, unknown:3, ok:4, stopped:5 }[out.status];
     out.chip = procChip(out);
     out.costFromPurchase = costFromPurchase; out.costFromAvg = costFromAvg; out.lastPurchase = lastP;
     out.family = ex?.fam || ''; out.ownMade = ownMade; out.avgCostPriority = ex?.avgCost ?? null; out.listPrice = ex?.listPrice ?? null;

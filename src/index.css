@@ -8,3 +8,17 @@
    and reaching a table's edge doesn't drag the whole page with it. */
 html, body, #root { overflow-x: hidden; overscroll-behavior-x: none; }
 .overflow-x-auto { overscroll-behavior-x: contain; }
+
+/* Chart tooltips: readable in both themes (the label used to inherit the page's light text on a white box). */
+.recharts-default-tooltip { border-radius: 10px; }
+html[data-theme="light"] .recharts-default-tooltip { background: #ffffff !important; border-color: #e2e8f0 !important; color: #0f172a; }
+html[data-theme="light"] .recharts-default-tooltip .recharts-tooltip-label { color: #334155 !important; font-weight: 600; }
+html[data-theme="dark"] .recharts-default-tooltip { background: #1e293b !important; border-color: #334155 !important; color: #f1f5f9; }
+html[data-theme="dark"] .recharts-default-tooltip .recharts-tooltip-label { color: #e2e8f0 !important; font-weight: 600; }
+
+/* Column resize handle (see src/resizableColumns.js) — sits on the column's end edge (left in RTL). */
+.rz-handle { position: absolute; top: 0; bottom: 0; inset-inline-end: -4px; width: 8px; cursor: col-resize; z-index: 3; touch-action: none; }
+.rz-handle::after { content: ''; position: absolute; top: 20%; bottom: 20%; left: 3px; width: 2px; border-radius: 1px; background: transparent; transition: background .15s; }
+th:hover > .rz-handle::after, [data-rz-grid] > *:hover > .rz-handle::after, .rz-handle:hover::after { background: #60a5fa; }
+body.rz-dragging, body.rz-dragging * { cursor: col-resize !important; user-select: none !important; }
+table[data-rz-fixed] th, table[data-rz-fixed] td { overflow: hidden; text-overflow: ellipsis; overflow-wrap: anywhere; }

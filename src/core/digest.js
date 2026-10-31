@@ -2,7 +2,7 @@
 // Uses the same model as the procurement page (procModel.js), so the numbers
 // in the email match the website.
 import { mergeLinesIntoMonthly, detectOutliers, saleLineId, supplierLeadTimes, matchShipSupplier, shipmentStage, daysBetween, stockTimelines, stockoutSummary,
-  purchasePriceHistory, priceIncreases, priceCheck, returnsAnalysis, productStartDates, DAY_MS, isoToDisplay } from './data.js';
+  purchasePriceHistory, priceIncreases, priceCheck, linkShipmentsToPOs, returnsAnalysis, productStartDates, DAY_MS, isoToDisplay } from './data.js';
 import { computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './procModel.js';
 
 // Items that sell but whose stock + incoming is well beyond the plan's need.
@@ -88,7 +88,7 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
   const products = computeProducts({ salesData, excludeCurrentMonth: app.excludeCurrentMonth !== false, avgWindowMonths: Number.isFinite(Number(app.procAvgWindow)) && app.procAvgWindow != null ? Number(app.procAvgWindow) : 12, stockouts, skipStockoutMonths: app.procSkipStockoutMonths !== '0' && app.procSkipStockoutMonths !== 0,
     stockMap, minStockMap: app.procurementMinStock || {}, lastSupBySku, supplierMap, costMap, itemsExtra: sets.procItemsExtra || {}, currencyMap, exchangeRates,
     costHistory: app.procurementCostHistory || {}, purchBySku, leadFor, incomingMap: incomingMapOf(openOrders), overdueByProduct: overdueByProductOf(ordersEnriched),
-    moqMap: app.procurementMOQ || {}, monthsToStock: Number(app.procMonthsToStock) || 2, supplierConcentration: supplierConcentrationOf(supplierMap), outliers, outlierDecisions: decisions });
+    moqMap: app.procurementMOQ || {}, monthsToStock: Number(app.procMonthsToStock) || 2, supplierConcentration: supplierConcentrationOf(supplierMap), outliers, outlierDecisions: decisions, orderBlock: app.procOrderBlock || {} });
 
   // 1. what to order, by supplier
   const bySup = {};
@@ -143,13 +143,20 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
       const poPrice = {}, catalog = {};
       ordersEnriched.forEach(o => { if (o.unitPriceOriginal > 0) poPrice[o.productKey] = { p: o.unitPriceOriginal, cur: o.currency || 'ILS', po: o.poNumber || '' }; });
       Object.entries(costMap).forEach(([k, v]) => { if (v > 0) catalog[k] = { p: v, cur: currencyMap[k] || 'ILS' }; });
-      const pc = Object.values(priceCheck(hist, { now, poPrice, catalog, names }));
-      const arriving = shipments.map(s => ({ ...s, stage: shipmentStage(s, today) })).filter(s => s.stage.idx < 2 && s.arr && s.arr >= today && s.arr <= wk);
+      const blocked = new Set(products.filter(p => p.orderBlocked).map(p => p.sku));
+      const pc = Object.values(priceCheck(hist, { now, poPrice, catalog, names })).filter(x => !blocked.has(x.k));
+      const shipsAll = shipments.map(s => ({ ...s, matched: supOf(s), stage: shipmentStage(s, today), delayDays: s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0 }));
+      const active = shipsAll.filter(s => s.stage.idx < 2);
+      const links = linkShipmentsToPOs({ shipments: shipsAll, orders: ordersEnriched, manual: app.procShipPoLinks || {} });
+      const arriving = active.filter(s => s.arr && s.arr >= today && s.arr <= wk);
+      const inTransit = active.map(s => ({ id: s.id, sup: s.matched || s.sup, fwdSup: s.sup, cont: s.cont, arr: s.arr, dep: s.dep, stage: s.stage.label,
+        days: s.arr ? Math.round(daysBetween(today, s.arr)) : null, delayDays: s.delayDays, from: s.change?.from || null, pos: links.byShip[s.id] || [], thisWeek: !!(s.arr && s.arr >= today && s.arr <= wk) }))
+        .sort((a, b) => (a.arr || '9999') < (b.arr || '9999') ? -1 : 1);
       return {
         stockValue, daysOfInventory: cogs > 0 && stockValue > 0 ? Math.round(stockValue / (cogs / 30)) : null, deadValue, deadCount, excessValue,
         toOrder: products.filter(p => p.suggestedOrder > 0 && p.currentStock != null && !p.ownMade).length,
         toOrderValue: products.filter(p => p.suggestedOrder > 0 && p.currentStock != null && !p.ownMade).reduce((a, p) => a + (p.orderCost || 0), 0),
-        arrivingWeek: arriving.length, delayedCount: delayed.length,
+        arrivingWeek: arriving.length, delayedCount: delayed.length, inTransitCount: active.length, inTransit,
         priceHigh: pc.filter(x => x.verdict === 'high').length, priceCheck: pc.filter(x => x.verdict !== 'ok').length,
       };
     })(),
