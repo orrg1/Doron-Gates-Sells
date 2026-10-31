@@ -2,7 +2,7 @@
 // Uses the same model as the procurement page (procModel.js), so the numbers
 // in the email match the website.
 import { mergeLinesIntoMonthly, detectOutliers, saleLineId, supplierLeadTimes, matchShipSupplier, shipmentStage, daysBetween, stockTimelines, stockoutSummary,
-  purchasePriceHistory, priceIncreases, returnsAnalysis, productStartDates, DAY_MS, isoToDisplay } from './data.js';
+  purchasePriceHistory, priceIncreases, priceCheck, returnsAnalysis, productStartDates, DAY_MS, isoToDisplay } from './data.js';
 import { computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './procModel.js';
 
 // Items that sell but whose stock + incoming is well beyond the plan's need.
@@ -131,6 +131,28 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
     latePOs: Object.values(lateBySup).map(s => ({ ...s, pos: [...s.pos] })).sort((a, b) => b.maxDays - a.maxDays), latePOLines: latePOs.length,
     delayed: delayed.slice(0, 10).map(s => ({ cont: s.cont, sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays })),
     priceUps: priceUps.slice(0, 15), excessValue, excessPOs: excessPOs.slice(0, 10).map(p => ({ name: p.name, sku: p.sku, supplier: p.supplier, poExcess: p.poExcess, value: p.poExcessValue })), excessPOCount: excessPOs.length,
+    overview: (() => {
+      const lastSale = {}; salesLinesAll.forEach(l => { if (!l.x && l.k && l.q > 0 && (!lastSale[l.k] || l.d > lastSale[l.k])) lastSale[l.k] = l.d; });
+      const d90 = iso(now - 90 * DAY_MS), wk = iso(now + 7 * DAY_MS);
+      let stockValue = 0, cogs = 0, deadValue = 0, deadCount = 0;
+      products.forEach(p => {
+        const v = p.unitCost != null ? Math.max(0, p.currentStock || 0) * p.unitCost : 0;
+        stockValue += v; if (p.unitCost != null) cogs += (p.avgMonthly || 0) * p.unitCost;
+        if ((p.currentStock || 0) > 0 && (!lastSale[p.sku] || lastSale[p.sku] < d90)) { deadValue += v; deadCount++; }
+      });
+      const poPrice = {}, catalog = {};
+      ordersEnriched.forEach(o => { if (o.unitPriceOriginal > 0) poPrice[o.productKey] = { p: o.unitPriceOriginal, cur: o.currency || 'ILS', po: o.poNumber || '' }; });
+      Object.entries(costMap).forEach(([k, v]) => { if (v > 0) catalog[k] = { p: v, cur: currencyMap[k] || 'ILS' }; });
+      const pc = Object.values(priceCheck(hist, { now, poPrice, catalog, names }));
+      const arriving = shipments.map(s => ({ ...s, stage: shipmentStage(s, today) })).filter(s => s.stage.idx < 2 && s.arr && s.arr >= today && s.arr <= wk);
+      return {
+        stockValue, daysOfInventory: cogs > 0 && stockValue > 0 ? Math.round(stockValue / (cogs / 30)) : null, deadValue, deadCount, excessValue,
+        toOrder: products.filter(p => p.suggestedOrder > 0 && p.currentStock != null && !p.ownMade).length,
+        toOrderValue: products.filter(p => p.suggestedOrder > 0 && p.currentStock != null && !p.ownMade).reduce((a, p) => a + (p.orderCost || 0), 0),
+        arrivingWeek: arriving.length, delayedCount: delayed.length,
+        priceHigh: pc.filter(x => x.verdict === 'high').length, priceCheck: pc.filter(x => x.verdict !== 'ok').length,
+      };
+    })(),
     alertSource: {
       stock: products.filter(p => p.status === 'now' && /^[AB]/.test(p.abc || '') && p.avgMonthly > 0)
         .map(p => ({ k: p.sku || p.key, name: p.name, supplier: p.supplier || '', ownMade: !!p.ownMade, stock: p.currentStock, incoming: p.incomingQty || 0,

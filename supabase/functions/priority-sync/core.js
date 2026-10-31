@@ -553,6 +553,90 @@ var purchasePriceHistory = (purchaseLines = []) => {
   Object.values(by).forEach((a) => a.sort((x, y) => x.d < y.d ? -1 : x.d > y.d ? 1 : 0));
   return by;
 };
+var wMedian = (pts) => {
+  const a = pts.slice().sort((x, y) => x.p - y.p);
+  const tot = a.reduce((s, x) => s + (x.q || 1), 0);
+  let acc = 0;
+  for (const x of a) {
+    acc += x.q || 1;
+    if (acc >= tot / 2) return x.p;
+  }
+  return a.length ? a[a.length - 1].p : null;
+};
+var priceCheck = (hist, { now = Date.now(), poPrice = {}, catalog = {}, names = {} } = {}) => {
+  const iso2 = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const y1 = iso2(now - 365 * 864e5);
+  const out = {};
+  Object.entries(hist).forEach(([k, pts]) => {
+    if (!pts.length) return;
+    const last = pts[pts.length - 1];
+    if (/^\s*(משלוח|הובלה|שילוח|עמלה|דמי)/.test(last.n || "")) return;
+    const same = pts.filter((x) => x.s === last.s && x.cur === last.cur);
+    const prev = [...same].reverse().find((x) => x.inv !== last.inv && x.d <= last.d && x !== last) || null;
+    const yr = same.filter((x) => x.d >= y1);
+    const base = yr.filter((x) => x !== last);
+    const med = base.length >= 2 ? wMedian(base) : null;
+    const ps = yr.map((x) => x.p);
+    const qtys = base.map((x) => x.q).sort((a, b) => a - b);
+    const medQ = qtys.length ? qtys[Math.floor(qtys.length / 2)] : null;
+    const allYr = pts.filter((x) => x.d >= y1);
+    const spend12 = allYr.reduce((a, x) => a + x.ils * x.q, 0), qty12 = allYr.reduce((a, x) => a + x.q, 0);
+    const bySup = {};
+    allYr.forEach((x) => {
+      if (x.s !== last.s) bySup[x.s] = x;
+    });
+    const others = Object.values(bySup).map((x) => ({ s: x.s, d: x.d, p: x.p, cur: x.cur, ils: x.ils })).sort((a, b) => a.ils - b.ils);
+    const r = {
+      k,
+      name: names[k] || last.n || k,
+      last,
+      prev,
+      med,
+      min: ps.length ? Math.min(...ps) : last.p,
+      max: ps.length ? Math.max(...ps) : last.p,
+      n12: yr.length,
+      nAll: pts.length,
+      spend12,
+      qty12,
+      others,
+      reasons: [],
+      verdict: "ok",
+      score: 0
+    };
+    r.vsPrev = prev ? (last.p / prev.p - 1) * 100 : null;
+    r.vsMed = med ? (last.p / med - 1) * 100 : null;
+    r.ilsVsPrev = prev && last.cur !== "ILS" ? (last.ils / prev.ils - 1) * 100 : null;
+    const smallBuy = medQ && last.q < medQ / 2;
+    const add = (lvl, text, score) => {
+      r.reasons.push({ lvl, text });
+      r.score += score;
+      if (lvl === "high") r.verdict = "high";
+      else if (r.verdict === "ok") r.verdict = "check";
+    };
+    const f = (v) => `${v > 0 ? "+" : ""}${v.toFixed(0)}%`;
+    if (r.vsMed != null && r.vsMed >= 10) add(smallBuy ? "check" : "high", `\u05D4\u05DE\u05D7\u05D9\u05E8 \u05D4\u05D0\u05D7\u05E8\u05D5\u05DF ${f(r.vsMed)} \u05DE\u05E2\u05DC \u05D4\u05DE\u05D7\u05D9\u05E8 \u05D4\u05E8\u05D2\u05D9\u05DC (\u05D7\u05E6\u05D9\u05D5\u05DF 12 \u05D7\u05F3)${smallBuy ? ` \u2014 \u05D0\u05D1\u05DC \u05E0\u05E7\u05E0\u05EA\u05D4 \u05DB\u05DE\u05D5\u05EA \u05E7\u05D8\u05E0\u05D4 \u05DE\u05D4\u05E8\u05D2\u05D9\u05DC (${last.q} \u05DE\u05D5\u05DC ~${medQ})` : ""}`, r.vsMed);
+    else if (r.vsPrev != null && r.vsPrev >= 10) add(smallBuy ? "check" : "high", `\u05E2\u05DC\u05D4 ${f(r.vsPrev)} \u05DE\u05D4\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05EA \u05D4\u05E7\u05D5\u05D3\u05DE\u05EA`, r.vsPrev);
+    else if (r.vsPrev != null && r.vsPrev >= 5) add("check", `\u05E2\u05DC\u05D4 ${f(r.vsPrev)} \u05DE\u05D4\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05EA \u05D4\u05E7\u05D5\u05D3\u05DE\u05EA`, r.vsPrev);
+    if (r.ilsVsPrev != null && r.vsPrev != null && Math.abs(r.vsPrev) < 3 && r.ilsVsPrev >= 5) add("check", `\u05DE\u05D7\u05D9\u05E8 \u05D4\u05E1\u05E4\u05E7 \u05DC\u05D0 \u05D4\u05E9\u05EA\u05E0\u05D4, \u05D0\u05D1\u05DC \u05D1\u05E9\u05E7\u05DC\u05D9\u05DD \u05D9\u05E7\u05E8 \u05D1-${f(r.ilsVsPrev)} \u05D1\u05D2\u05DC\u05DC \u05D4\u05E9\u05E2\u05E8`, r.ilsVsPrev / 2);
+    const cheaper = others.find((o) => o.ils < last.ils * 0.9);
+    if (cheaper) add("check", `\u05E1\u05E4\u05E7 \u05D0\u05D7\u05E8 \u05D6\u05D5\u05DC \u05D1-${Math.round((1 - cheaper.ils / last.ils) * 100)}% (\u05D1\u05E9\u05E7\u05DC\u05D9\u05DD) \u2014 ${cheaper.s}, ${cheaper.d.split("-").reverse().join(".")}`, 8);
+    const po = poPrice[k];
+    if (po && po.cur === last.cur && po.p > 0) {
+      r.poP = po;
+      r.poVsLast = (po.p / last.p - 1) * 100;
+      if (r.poVsLast >= 5) add(r.poVsLast >= 10 ? "high" : "check", `\u05D1\u05D4\u05D6\u05DE\u05E0\u05D4 \u05D4\u05E4\u05EA\u05D5\u05D7\u05D4 ${po.po} \u05D4\u05DE\u05D7\u05D9\u05E8 ${f(r.poVsLast)} \u05DE\u05E2\u05DC \u05D4\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05EA \u05D4\u05D0\u05D7\u05E8\u05D5\u05E0\u05D4`, r.poVsLast);
+    }
+    const cat = catalog[k];
+    if (cat && cat.p > 0 && cat.cur === last.cur) {
+      r.catP = cat;
+      r.catVsLast = (cat.p / last.p - 1) * 100;
+      if (Math.abs(r.catVsLast) >= 10) add("check", `\u05D4\u05DE\u05D7\u05D9\u05E8 \u05D1\u05DB\u05E8\u05D8\u05D9\u05E1 \u05D4\u05E4\u05E8\u05D9\u05D8 (${cat.p}) \u05E9\u05D5\u05E0\u05D4 \u05D1-${f(-r.catVsLast)} \u05DE\u05D4\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05EA \u05D4\u05D0\u05D7\u05E8\u05D5\u05E0\u05D4 \u2014 \u05DB\u05D3\u05D0\u05D9 \u05DC\u05E2\u05D3\u05DB\u05DF`, 3);
+    }
+    if (r.vsMed != null && r.vsMed <= -10) r.reasons.push({ lvl: "good", text: `\u05D4\u05DE\u05D7\u05D9\u05E8 \u05D4\u05D0\u05D7\u05E8\u05D5\u05DF ${f(r.vsMed)} \u05DE\u05EA\u05D7\u05EA \u05DC\u05E8\u05D2\u05D9\u05DC` });
+    out[k] = r;
+  });
+  return out;
+};
 var priceIncreases = (hist, { sinceIso, minPct = 5 } = {}) => {
   const out = [];
   Object.entries(hist).forEach(([k, pts]) => {
@@ -1634,6 +1718,45 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
     excessValue,
     excessPOs: excessPOs.slice(0, 10).map((p) => ({ name: p.name, sku: p.sku, supplier: p.supplier, poExcess: p.poExcess, value: p.poExcessValue })),
     excessPOCount: excessPOs.length,
+    overview: (() => {
+      const lastSale = {};
+      salesLinesAll.forEach((l) => {
+        if (!l.x && l.k && l.q > 0 && (!lastSale[l.k] || l.d > lastSale[l.k])) lastSale[l.k] = l.d;
+      });
+      const d90 = iso2(now - 90 * DAY_MS), wk = iso2(now + 7 * DAY_MS);
+      let stockValue = 0, cogs = 0, deadValue = 0, deadCount = 0;
+      products.forEach((p) => {
+        const v = p.unitCost != null ? Math.max(0, p.currentStock || 0) * p.unitCost : 0;
+        stockValue += v;
+        if (p.unitCost != null) cogs += (p.avgMonthly || 0) * p.unitCost;
+        if ((p.currentStock || 0) > 0 && (!lastSale[p.sku] || lastSale[p.sku] < d90)) {
+          deadValue += v;
+          deadCount++;
+        }
+      });
+      const poPrice = {}, catalog = {};
+      ordersEnriched.forEach((o) => {
+        if (o.unitPriceOriginal > 0) poPrice[o.productKey] = { p: o.unitPriceOriginal, cur: o.currency || "ILS", po: o.poNumber || "" };
+      });
+      Object.entries(costMap).forEach(([k, v]) => {
+        if (v > 0) catalog[k] = { p: v, cur: currencyMap[k] || "ILS" };
+      });
+      const pc = Object.values(priceCheck(hist, { now, poPrice, catalog, names }));
+      const arriving = shipments.map((s) => ({ ...s, stage: shipmentStage(s, today) })).filter((s) => s.stage.idx < 2 && s.arr && s.arr >= today && s.arr <= wk);
+      return {
+        stockValue,
+        daysOfInventory: cogs > 0 && stockValue > 0 ? Math.round(stockValue / (cogs / 30)) : null,
+        deadValue,
+        deadCount,
+        excessValue,
+        toOrder: products.filter((p) => p.suggestedOrder > 0 && p.currentStock != null && !p.ownMade).length,
+        toOrderValue: products.filter((p) => p.suggestedOrder > 0 && p.currentStock != null && !p.ownMade).reduce((a, p) => a + (p.orderCost || 0), 0),
+        arrivingWeek: arriving.length,
+        delayedCount: delayed.length,
+        priceHigh: pc.filter((x) => x.verdict === "high").length,
+        priceCheck: pc.filter((x) => x.verdict !== "ok").length
+      };
+    })(),
     alertSource: {
       stock: products.filter((p) => p.status === "now" && /^[AB]/.test(p.abc || "") && p.avgMonthly > 0).map((p) => ({
         k: p.sku || p.key,

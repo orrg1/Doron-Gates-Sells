@@ -933,7 +933,9 @@ export const stockoutSummary = (timelines) => {
 // year before the last purchase. It has stopped when the silence since the last purchase is well
 // beyond the usual gap: more than max(60 days, 2.5 × the median gap) — and less than a year
 // (older than that is a lost customer, a different conversation).
-export const stoppedBuying = (lines = [], { now = Date.now(), minMonths = 4 } = {}) => {
+// Regular (customer, product) pairs: bought on minMonths+ different months in the year before
+// the last purchase. Shared by "stopped buying" and "due to reorder".
+export const regularPairs = (lines = [], { now = Date.now(), minMonths = 4 } = {}) => {
   const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
   const today = iso(now), yearAgo = iso(now - 365 * 86400000), lookFrom = iso(now - 730 * 86400000);
   const pairs = {}, custLast = {};
@@ -941,7 +943,7 @@ export const stoppedBuying = (lines = [], { now = Date.now(), minMonths = 4 } = 
     if (l.x || !l.k || !(l.q > 0) || l.d < lookFrom || l.d > today) return;
     const ck = l.cid || l.c; if (!ck) return;
     if (!custLast[ck] || l.d > custLast[ck]) custLast[ck] = l.d;
-    const p = (pairs[ck + '|' + l.k] ||= { cid: l.cid, c: l.c, k: l.k, n: l.n, days: new Set(), q: 0, v: 0, lines: [] });
+    const p = (pairs[ck + '|' + l.k] ||= { cid: l.cid, c: l.c, k: l.k, n: l.n, days: new Set(), lines: [] });
     p.days.add(l.d); p.lines.push(l);
   });
   const DAY = 86400000, out = [];
@@ -956,17 +958,139 @@ export const stoppedBuying = (lines = [], { now = Date.now(), minMonths = 4 } = 
     const gaps = []; for (let i = 1; i < recent.length; i++) gaps.push((Date.parse(recent[i]) - Date.parse(recent[i - 1])) / DAY);
     gaps.sort((a, b) => a - b);
     const medGap = gaps.length ? gaps[Math.floor(gaps.length / 2)] : 30;
-    const silence = Math.round((now - Date.parse(last)) / DAY);
-    const limit = Math.max(60, medGap * 2.5);
-    if (silence <= limit) return;
-    let q = 0, v = 0; p.lines.forEach(l => { if (l.d >= fromIso) { q += l.q; v += l.v || 0; } });
+    let q = 0, v = 0, lastQ = 0; p.lines.forEach(l => { if (l.d >= fromIso) { q += l.q; v += l.v || 0; } if (l.d === last) lastQ += l.q; });
     const spanMonths = Math.max(1, (Date.parse(last) - Date.parse(recent[0])) / DAY / 30.4);
     const ck = p.cid || p.c;
-    out.push({ cid: p.cid, c: p.c, k: p.k, n: p.n, last, silence, everyDays: Math.round(medGap), timesBought: recent.length, months: months.size,
+    out.push({ cid: p.cid, c: p.c, k: p.k, n: p.n, last, lastQ, silence: Math.round((now - Date.parse(last)) / DAY), medGap, everyDays: Math.round(medGap),
+      timesBought: recent.length, months: months.size, avgQty: Math.round(q / recent.length * 10) / 10,
       monthlyQty: Math.round(q / spanMonths * 10) / 10, yearlyValue: Math.round(v / spanMonths * 12),
-      customerLast: custLast[ck], customerActive: custLast[ck] && (now - Date.parse(custLast[ck])) / DAY <= 60 });
+      customerLast: custLast[ck], customerActive: !!custLast[ck] && (now - Date.parse(custLast[ck])) / DAY <= 60 });
   });
-  return out.sort((a, b) => b.yearlyValue - a.yearlyValue);
+  return out;
+};
+// Stopped: silence well beyond the usual gap — more than max(60 days, 2.5 × median gap) — and under a year.
+export const stoppedBuying = (lines = [], opts = {}) =>
+  regularPairs(lines, opts).filter(p => p.silence > Math.max(60, p.medGap * 2.5)).sort((a, b) => b.yearlyValue - a.yearlyValue);
+// Due to reorder: past the usual gap (plus a little slack) but not yet "stopped" — time to call.
+export const dueToReorder = (lines = [], opts = {}) => {
+  const DAY = 86400000;
+  return regularPairs(lines, opts)
+    .filter(p => p.silence >= p.medGap + Math.max(5, p.medGap * 0.2) && p.silence <= Math.max(60, p.medGap * 2.5))
+    .map(p => ({ ...p, expected: new Date(Date.parse(p.last) + Math.round(p.medGap) * DAY).toISOString().slice(0, 10), daysLate: Math.round(p.silence - p.medGap) }))
+    .sort((a, b) => b.yearlyValue - a.yearlyValue);
+};
+
+// ─── Sales at a glance (overview screen) ───
+// Month to date, year to date and last 7 days against the same days a year earlier; customers this
+// month (and how many bought for the first time in the data); monthly this year vs last; last 12 weeks.
+export const salesOverview = (lines = [], { now = Date.now() } = {}) => {
+  const DAY = 86400000, iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const today = iso(now), ly = (d) => `${Number(d.slice(0, 4)) - 1}${d.slice(4)}`;
+  const mStart = today.slice(0, 8) + '01', yStart = today.slice(0, 5) + '01-01';
+  const w0 = iso(now - 6 * DAY);
+  const sum = (a, b) => { let v = 0; for (const l of lines) if (l.d >= a && l.d <= b) v += l.v || 0; return v; };
+  const firstBuy = {}, monthCust = new Set(), year = Number(today.slice(0, 4));
+  const byMonth = {}, byWeek = {}, cust30 = {};
+  const d30 = iso(now - 29 * DAY);
+  const weekStart = (d) => { const t = new Date(d + 'T00:00:00Z'); t.setUTCDate(t.getUTCDate() - t.getUTCDay()); return t.toISOString().slice(0, 10); };
+  const w12 = weekStart(iso(now - 11 * 7 * DAY));
+  for (const l of lines) {
+    const ck = l.cid || l.c;
+    if (ck && l.v > 0 && (!firstBuy[ck] || l.d < firstBuy[ck])) firstBuy[ck] = l.d;
+    if (ck && l.d >= mStart && l.d <= today && l.v > 0) monthCust.add(ck);
+    const y = Number(l.d.slice(0, 4));
+    if (y === year || y === year - 1) { const k = l.d.slice(5, 7); (byMonth[k] ||= { cur: 0, prev: 0 })[y === year ? 'cur' : 'prev'] += l.v || 0; }
+    if (l.d >= w12 && l.d <= today) { const w = weekStart(l.d); byWeek[w] = (byWeek[w] || 0) + (l.v || 0); }
+    if (ck && l.d >= d30 && l.d <= today) { const c = (cust30[ck] ||= { c: l.c, v: 0 }); c.v += l.v || 0; }
+  }
+  const newCust = [...monthCust].filter(c => firstBuy[c] >= mStart).length;
+  const thisMonth = Number(today.slice(5, 7));
+  const months = Array.from({ length: 12 }, (_, i) => { const k = String(i + 1).padStart(2, '0'); const b = byMonth[k] || { cur: 0, prev: 0 }; return { m: i + 1, cur: i + 1 <= thisMonth ? Math.round(b.cur) : null, prev: Math.round(b.prev) }; });
+  const weeks = []; for (let t = Date.parse(w12); t <= now; t += 7 * DAY) { const w = iso(t); weeks.push({ w, v: Math.round(byWeek[w] || 0) }); }
+  return {
+    mtd: sum(mStart, today), mtdLY: sum(ly(mStart), ly(today)),
+    ytd: sum(yStart, today), ytdLY: sum(ly(yStart), ly(today)),
+    week: sum(w0, today), weekLY: sum(ly(w0), ly(today)),
+    customersMonth: monthCust.size, newCustomers: newCust,
+    months, weeks, topCustomers: Object.values(cust30).sort((a, b) => b.v - a.v).slice(0, 8),
+    hasLastYear: lines.some(l => l.d <= ly(mStart)),
+    newReliable: lines.some(l => l.d <= ly(mStart)), // 'first purchase' only means something with a year of history before it
+  };
+};
+
+// ─── Customer returns per supplier (goods returns on sales invoices, last 12 months) ───
+// supplierOf(sku) → supplier name. rate = returned units / sold units.
+export const supplierReturns = (lines = [], supplierOf, { now = Date.now(), days = 365 } = {}) => {
+  const from = new Date(now - days * 86400000).toISOString().slice(0, 10);
+  const by = {};
+  lines.forEach(l => {
+    if (l.x || !l.k || !l.q || l.d < from) return;
+    const s = supplierOf(l.k); if (!s) return;
+    const x = (by[s] ||= { name: s, soldQ: 0, soldV: 0, retQ: 0, retV: 0, prods: {} });
+    const p = (x.prods[l.k] ||= { k: l.k, n: l.n, soldQ: 0, retQ: 0, retV: 0 });
+    if (l.q > 0) { x.soldQ += l.q; x.soldV += l.v || 0; p.soldQ += l.q; if (!p.n) p.n = l.n; }
+    else { x.retQ += -l.q; x.retV += -(l.v || 0); p.retQ += -l.q; p.retV += -(l.v || 0); }
+  });
+  const out = {};
+  Object.values(by).forEach(x => {
+    const products = Object.values(x.prods).filter(p => p.retQ > 0).map(p => ({ ...p, rate: p.soldQ > 0 ? p.retQ / p.soldQ * 100 : null })).sort((a, b) => b.retV - a.retV);
+    out[x.name] = { name: x.name, soldQ: x.soldQ, soldV: x.soldV, retQ: x.retQ, retV: x.retV, rate: x.soldQ > 0 ? x.retQ / x.soldQ * 100 : null, valueRate: x.soldV > 0 ? x.retV / x.soldV * 100 : null, products };
+  });
+  return out;
+};
+
+// ─── Order calendar & spend forecast ───
+// Per product: the day it must be ordered = when (stock + on order − safety stock) runs out, minus
+// the supplier's lead time. Then repeat every `monthsToStock` months to the horizon, each time for
+// monthsToStock months of sales. Gives each supplier's next order date and a monthly ₪ forecast.
+// Open POs count in the month they are due. An estimate for planning, not a commitment.
+export const orderCalendar = (products = [], { now = Date.now(), monthsToStock = 2, horizonMonths = 6, openOrders = [], skipSuppliers = [] } = {}) => {
+  const DAY = 86400000, iso = (ms) => new Date(ms).toISOString().slice(0, 10);
+  const today = new Date(now); today.setHours(0, 0, 0, 0);
+  const t0 = today.getTime();
+  const end = new Date(today.getFullYear(), today.getMonth() + horizonMonths, 1).getTime();
+  const months = []; for (let i = 0; i < horizonMonths; i++) { const d = new Date(today.getFullYear(), today.getMonth() + i, 1); months.push(`${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`); }
+  const mOf = (ms) => iso(ms).slice(0, 7);
+  const cash = Object.fromEntries(months.map(m => [m, { m, open: 0, planned: 0, bySup: {} }]));
+  const sups = {};
+  const skip = new Set(skipSuppliers);
+  products.forEach(p => {
+    const sup = p.supplier || 'ספק לא ידוע';
+    if (skip.has(sup) || !(p.avgMonthly > 0) || p.currentStock == null) return;
+    const daily = p.avgMonthly / 30.4;
+    const lead = (p.effectiveLeadTime || 0) * 30.4;
+    const safety = (p.safetyStock || 0) / daily;
+    const cover = ((p.currentStock || 0) + (p.incomingQty || 0)) / daily;
+    let orderAt = t0 + Math.round(cover - safety - lead) * DAY;
+    const late = orderAt < t0;
+    if (late) orderAt = t0;
+    const s = (sups[sup] ||= { name: sup, next: null, nowCount: 0, items: [], lead: p.effectiveLeadTime, value: 0 });
+    s.items.push({ k: p.sku || p.key, n: p.name, orderAt: iso(orderAt), late, qty: p.suggestedOrder > 0 ? p.suggestedOrder : null });
+    if (late) s.nowCount++;
+    if (!s.next || iso(orderAt) < s.next) s.next = iso(orderAt);
+    // cash events to the horizon
+    const unit = p.unitCost || 0;
+    let t = orderAt, first = true;
+    while (t < end && unit > 0) {
+      const qty = first && p.suggestedOrder > 0 ? p.suggestedOrder : Math.ceil(p.avgMonthly * monthsToStock);
+      const v = qty * unit, m = mOf(t);
+      if (cash[m]) { cash[m].planned += v; cash[m].bySup[sup] = (cash[m].bySup[sup] || 0) + v; }
+      if (first) s.value += v;
+      first = false; t += monthsToStock * 30.4 * DAY;
+    }
+  });
+  openOrders.forEach(o => {
+    const v = o.valueILS || 0; if (!v) return;
+    const due = o.expectedDate ? Date.parse(o.expectedDate.split('/').reverse().join('-')) : NaN;
+    const m = Number.isFinite(due) && due >= t0 ? mOf(due) : months[0];
+    if (cash[m]) { cash[m].open += v; const k = o.supplier || 'ספק לא ידוע'; cash[m].bySup[k] = (cash[m].bySup[k] || 0) + v; }
+  });
+  const list = Object.values(sups).map(s => {
+    const nextT = Date.parse(s.next);
+    const join = s.items.filter(i => Date.parse(i.orderAt) <= nextT + 30 * DAY);
+    return { ...s, daysToNext: Math.round((nextT - t0) / DAY), join: join.length, joinItems: join.sort((a, b) => a.orderAt < b.orderAt ? -1 : 1) };
+  }).sort((a, b) => a.next < b.next ? -1 : a.next > b.next ? 1 : b.value - a.value);
+  return { suppliers: list, months: months.map(m => cash[m]) };
 };
 
 // ─── Returns & credits (sales invoice lines) ───
