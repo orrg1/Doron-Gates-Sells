@@ -29,6 +29,12 @@ function CloudBadge({ email, isAdmin, onSignOut }) {
   const [newEmail, setNewEmail] = useState('');
   const [err, setErr] = useState('');
   useEffect(() => subscribeStatus(setSt), []);
+  // Phones hide the floating badge; the ⋯ menu opens this panel instead.
+  useEffect(() => {
+    const onOpen = () => { setOpen(true); if (isAdmin) loadUsers(); };
+    window.addEventListener('bizdata:open-account', onOpen);
+    return () => window.removeEventListener('bizdata:open-account', onOpen);
+  });
   useEffect(() => {
     const warn = (e) => { if (st.pending > 0) { e.preventDefault(); e.returnValue = ''; } };
     const hide = () => { if (document.visibilityState === 'hidden') flushAll(); };
@@ -47,16 +53,19 @@ function CloudBadge({ email, isAdmin, onSignOut }) {
   const dot = st.state === 'saving' ? '#D9822B' : st.state === 'error' ? '#C8322B' : st.state === 'saved' ? '#2E8B57' : '#8A919E';
   const d = dark();
   return (
-    <div dir="rtl" className="fixed bottom-7 left-24 max-sm:bottom-9 max-sm:left-[5.5rem] z-40 max-w-[220px]">
+    <div dir="rtl" className="fixed bottom-7 left-24 z-40 max-w-[220px] max-md:max-w-none max-md:inset-x-0 max-md:top-0 max-md:bottom-auto max-md:left-0">
       <button type="button" onClick={() => { setOpen(o => !o); if (!open && isAdmin) loadUsers(); }} aria-expanded={open} aria-label={`מצב שמירה: ${label}`} title={st.message || label}
-        className={`flex items-center gap-2 px-3 py-2 rounded-full border text-xs font-semibold shadow-sm ${d ? 'bg-slate-800 border-slate-600 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}>
+        className={`max-md:hidden flex items-center gap-2 px-3 py-2 rounded-full border text-xs font-semibold shadow-sm ${d ? 'bg-slate-800 border-slate-600 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}>
         <span className="w-2 h-2 rounded-full" style={{ background: dot }} /><span className="max-sm:hidden">{label}</span>
       </button>
       {open && (
-        <div className={`absolute bottom-12 left-0 w-80 rounded-xl border shadow-2xl p-4 space-y-3 text-sm ${d ? 'bg-slate-800 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}>
+        <>
+        <div className="md:hidden fixed inset-0 bg-black/40 z-40" onClick={() => setOpen(false)} />
+        <div className={`absolute bottom-12 left-0 w-80 max-md:fixed max-md:top-16 max-md:bottom-auto max-md:left-3 max-md:right-3 max-md:w-auto z-50 rounded-xl border shadow-2xl p-4 space-y-3 text-sm ${d ? 'bg-slate-800 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}>
           <div>
             <p className="font-bold">{email}</p>
             <p className="text-xs opacity-70">הנתונים נשמרים בשרת ומסונכרנים בין המחשבים</p>
+            <p className="md:hidden text-xs mt-1 flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{ background: dot }} />{label}</p>
             {st.state === 'error' && <p className="text-xs mt-1 font-semibold text-red-600">{st.message}</p>}
           </div>
           {isAdmin && users && (
@@ -80,6 +89,7 @@ function CloudBadge({ email, isAdmin, onSignOut }) {
           )}
           <button type="button" onClick={onSignOut} className={`w-full py-2 rounded-lg border text-xs font-semibold ${d ? 'border-slate-600 hover:bg-slate-700' : 'border-slate-300 hover:bg-slate-50'}`}>{email ? 'התנתק' : 'התחבר עם Google'}</button>
         </div>
+        </>
       )}
     </div>
   );
