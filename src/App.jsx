@@ -3,6 +3,8 @@ import { createPortal } from 'react-dom';
 import { buildDigest } from './core/digest.js';
 import { installResizableColumns } from './resizableColumns.js';
 import { installMobileTables } from './mobileTables.js';
+import ClothingPage from './ClothingPage.jsx';
+import { loadClothing, dueCount as clothingDueCount } from './clothingModel.js';
 import * as XLSXLib from 'xlsx';
 import { supabase, flushAll, queueDataset, subscribeStatus } from './cloud.js';
 import { OWN_MADE, procStatus, PROC_STATUS_LABEL, procChip, computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './core/procModel.js';
@@ -21,7 +23,7 @@ import {
   PieChart as PieChartIcon, Target, ArrowUpRight, ArrowDownRight, Home,
   ShoppingCart, ClipboardList, Sliders, TriangleAlert, Star, CircleDot,
   Minus, RefreshCw, SlidersHorizontal, MoreHorizontal, Factory,
-  Menu,
+  Menu, RotateCcw, CheckCircle2, ExternalLink, Shirt, Plus, Pencil, Printer, UserPlus, History,
 } from 'lucide-react';
 import {
   ComposedChart, Line, Bar, XAxis, YAxis, CartesianGrid,
@@ -1396,7 +1398,7 @@ const CustomersPage = ({ requestedTab = null, onRequestedTabHandled = null, mont
 // Same numbers as the weekly email and the procurement page (buildDigest on the stored data).
 const OVERVIEW_APP_KEYS = ['procurementStock','procurementSupplier','procurementCost','procurementCurrency','exchangeRates','openOrders','procShipSupplierMap',
   'procOutlierDecisions','procurementLeadTime','procLeadAddTransit','excludeCurrentMonth','procSkipStockoutMonths','procurementMinStock','procurementCostHistory',
-  'procurementMOQ','procurementNames','prioritySyncAt','procAvgWindow','procMonthsToStock','procDefaultLeadTime','procOrderBlock','procShipPoLinks'];
+  'procurementMOQ','procurementNames','prioritySyncAt','procAvgWindow','procMonthsToStock','procDefaultLeadTime','procOrderBlock','procShipPoLinks','procShipReceived'];
 const readAppState = (keys) => { const o = {}; keys.forEach(k => { let v = null; try { v = localStorage.getItem(k); } catch { /* none */ } if (v == null) return; try { o[k] = JSON.parse(v); } catch { o[k] = v; } }); return o; };
 const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpenProc, salesLines = [], stoppedCount = 0, dueCount = 0 }) => {
   const [sets, setSets] = useState(null);
@@ -1414,6 +1416,7 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
     if (!sets || !salesLines.length) return null;
     try { return buildDigest({ app: readAppState(OVERVIEW_APP_KEYS), sets: { ...sets, procSalesLines: salesLines } }); } catch (e) { console.error('overview', e); return null; }
   }, [sets, salesLines]);
+  const clothingDue = useMemo(() => { try { return clothingDueCount(loadClothing()); } catch { return 0; } }, []);
   const countPending = useMemo(() => { try { return (JSON.parse(localStorage.getItem('stockCount') || '{}').items || []).filter(x => x.counted != null && x.sysAtCount != null && x.counted !== x.sysAtCount && !x.done).length; } catch { return 0; } }, []);
   const muted = isDarkMode ? 'text-slate-400' : 'text-slate-500', strong = isDarkMode ? 'text-slate-100' : 'text-slate-800';
   const card = `rounded-2xl border ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`;
@@ -1446,6 +1449,7 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
     { k: 'price', t: 'מחירים לבדיקה', v: o ? o.priceCheck : '…', sub: o ? `${o.priceHigh} במחיר גבוה` : '', go: () => onOpenProc('prices'), tone: o?.priceHigh ? 'soon' : 'ok' },
     { k: 'due', t: 'לקוחות שהגיע זמנם', v: dueCount, sub: 'עברו את הזמן הרגיל שלהם', go: () => onOpenCustomers ? onOpenCustomers('due') : setActiveTab('customers'), tone: dueCount ? 'soon' : 'ok' },
     { k: 'stop', t: 'לקוחות שהפסיקו', v: stoppedCount, sub: 'מוצר שהפסיקו לקנות', go: () => onOpenCustomers ? onOpenCustomers('stopped') : setActiveTab('customers'), tone: 'ok' },
+    { k: 'clothing', t: 'סבב ביגוד', v: clothingDue, sub: 'עובדים שהגיע מועד הסבב שלהם', go: () => setActiveTab('clothing'), tone: clothingDue ? 'soon' : 'ok', hide: !clothingDue },
     { k: 'count', t: 'ספירות לעדכון', v: countPending, sub: 'הפרשים שעוד לא עודכנו ב-Priority', go: () => setActiveTab('stockcount'), tone: countPending ? 'soon' : 'ok', hide: !countPending },
   ].filter(a => !a.hide);
   const toneDot = { now: '#C8322B', soon: '#D9822B', ok: '#2E8B57' };
@@ -1921,6 +1925,30 @@ const useIsNarrow = () => {
   return n;
 };
 
+// ─── Container tracking links (free): the carrier is known from the container's 4-letter owner code ───
+const CARRIERS = [
+  ['MSC', ['MSCU','MEDU','MSDU','MSMU','MSNU'], n => `https://www.msc.com/en/track-a-shipment?trackingNumber=${n}&trackingMode=0`],
+  ['Maersk', ['MAEU','MSKU','MRKU','MRSU','MSAU','SEAU','SUDU','MCPU','MNBU'], n => `https://www.maersk.com/tracking/${n}`],
+  ['Hapag-Lloyd', ['HLCU','HLXU','HAMU','UACU','HLBU'], n => `https://www.hapag-lloyd.com/en/online-business/track/track-by-container-solution.html?container=${n}`],
+  ['ZIM', ['ZIMU','ZCSU','ZWFU'], n => `https://www.zim.com/tools/track-a-shipment?consnumber=${n}`],
+  ['CMA CGM', ['CMAU','CGMU','APLU','APHU','ANNU','CNIU'], n => `https://www.cma-cgm.com/ebusiness/tracking/search?SearchBy=Container&Reference=${n}`],
+  ['COSCO', ['COSU','CSNU','CBHU','CCLU','CSLU','OOLU','OOCU'], n => `https://elines.coscoshipping.com/ebusiness/cargoTracking?trackingType=CONTAINER&number=${n}`],
+  ['ONE', ['ONEU','NYKU','MOLU','KKFU','KKLU'], null],
+  ['Evergreen', ['EGHU','EISU','EMCU','EGSU','EITU'], null],
+  ['Yang Ming', ['YMLU','YMMU'], null],
+  ['HMM', ['HDMU','HMMU'], null],
+  ['Wan Hai', ['WHLU','WHSU'], null],
+  ['PIL', ['PCIU'], null],
+];
+const genericTrackUrl = (n) => `https://www.searates.com/container/tracking/?number=${n}`;
+const containerLinks = (contText) => {
+  const nums = [...new Set((String(contText||'').toUpperCase().match(/[A-Z]{4}\s?\d{7}/g) || []).map(x => x.replace(/\s/g,'')))];
+  return nums.map(n => {
+    const c = CARRIERS.find(([, codes]) => codes.includes(n.slice(0,4)));
+    return { n, carrier: c ? c[0] : null, url: c && c[2] ? c[2](n) : genericTrackUrl(n) };
+  });
+};
+
 const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncRequest = null, onSyncRequestHandled, onSyncDone, onSalesLinesChange, onCustomersChange, salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
   // SKU → product name, captured from the inventory file. Needed so items
@@ -1959,6 +1987,14 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   const [fileBusy, setFileBusy] = useState(null);   // slot key being loaded
   const [fileMsg, setFileMsg] = useState(null);     // {slot, kind:'ok'|'error', text}
   // Shipment → POs it carries, as the person set it ({ shipId: [poNumber, …] }).
+  // Shipments the person marked as received: { shipmentId: ISO date } (saved to the server like every setting).
+  const [shipReceived, setShipReceived] = useState(() => { try { return JSON.parse(localStorage.getItem('procShipReceived')||'{}'); } catch { return {}; } });
+  const markShipReceived = (id, on) => setShipReceived(prev => {
+    const next = { ...prev }; if (on) next[id] = new Date().toISOString().slice(0,10); else delete next[id];
+    try { localStorage.setItem('procShipReceived', JSON.stringify(next)); } catch { /* best-effort */ }
+    return next;
+  });
+  const [shipFilter, setShipFilter] = useState('active');
   const [shipPoManual, setShipPoManual] = useState(() => { try { return JSON.parse(localStorage.getItem('procShipPoLinks')||'{}'); } catch { return {}; } });
   const saveShipPo = (next) => { setShipPoManual(next); try { localStorage.setItem('procShipPoLinks', JSON.stringify(next)); } catch { /* best-effort */ } };
   const [shipSupOverride, setShipSupOverride] = useState(() => { try { return JSON.parse(localStorage.getItem('procShipSupplierMap')||'{}'); } catch { return {}; } });
@@ -2033,17 +2069,21 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
         // Track arrival-date changes between the daily files.
         const prev = Object.fromEntries(shipments.map(s => [s.id, s]));
         const today = new Date().toISOString().slice(0,10);
-        const merged = parsed.map(s => {
+        const fresh = parsed.map(s => {
           const old = prev[s.id];
           let change = old?.change || null;
           if (old && old.arr && s.arr && old.arr !== s.arr) change = { from: old.arr, to: s.arr, at: today };
-          return { ...s, change, firstSeen: old?.firstSeen || today };
+          return { ...s, change, firstSeen: old?.firstSeen || today, lastSeen: today };
         });
+        // Shipments the forwarder dropped from today's file (usually delivered) stay — marked, not deleted.
+        const inFile = new Set(fresh.map(s => s.id));
+        const kept = shipments.filter(s => !inFile.has(s.id)).map(s => s.gone ? s : { ...s, gone: today });
+        const merged = [...fresh, ...kept];
         await idbSet('procShipments', merged);
         setShipments(merged);
         const changed = merged.filter(s => s.change && s.change.at === today).length;
         saveFileMeta(slot, { name:file.name, rows:merged.length });
-        setFileMsg({ slot, kind:'ok', text:`נטענו ${merged.length} משלוחים${changed?` · ${changed} שינו תאריך הגעה`:''}` });
+        setFileMsg({ slot, kind:'ok', text:`נטענו ${fresh.length} משלוחים מהקובץ${changed?` · ${changed} שינו תאריך הגעה`:''}${kept.length?` · ${kept.length} שכבר לא בדוח נשמרו`:''}` });
         // a pushed-back arrival date → let the server email an alert (after the file reached the server)
         if (merged.some(s => s.change && s.change.at === today && s.change.to > s.change.from)) {
           flushAll().then(() => supabase.functions.invoke('priority-sync', { body: { action: 'alerts' } })).catch(() => { /* alerts are best-effort */ });
@@ -2277,14 +2317,15 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
     return [...set].sort((a,b)=>a.localeCompare(b,'he'));
   }, [purchaseLines, supplierMap, openOrders]);
   const todayIso = new Date().toISOString().slice(0,10);
-  const shipmentsEnriched = useMemo(() => shipments.map(s => {
+  const shipmentsEnriched = useMemo(() => shipments.map(s0 => {
+    const s = shipReceived[s0.id] ? { ...s0, received: shipReceived[s0.id] } : s0;
     const override = shipSupOverride[s.sup];
     const matched = override === '' ? null : (override ?? matchShipSupplier(s.sup, knownSuppliers));
     const stage = shipmentStage(s, todayIso);
     const delayDays = s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0;
     const daysToArrival = s.arr ? Math.round(daysBetween(todayIso, s.arr)) : null;
     return { ...s, matched, manual: override !== undefined, stage, delayDays, daysToArrival };
-  }).sort((a,b) => (a.stage.idx===2) - (b.stage.idx===2) || (a.arr||'9999').localeCompare(b.arr||'9999')), [shipments, shipSupOverride, knownSuppliers, todayIso]);
+  }).sort((a,b) => (a.stage.idx>=2) - (b.stage.idx>=2) || (a.stage.idx===3) - (b.stage.idx===3) || (a.stage.idx===3 ? (b.received||'').localeCompare(a.received||'') : (a.arr||'9999').localeCompare(b.arr||'9999'))), [shipments, shipReceived, shipSupOverride, knownSuppliers, todayIso]);
 
   // ── Supplier lead time from real orders (PO sent → supplier invoice) ──
   const [poMeta, setPoMeta] = useState({});
@@ -5249,7 +5290,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
     const muted = isDarkMode?'text-slate-400':'text-slate-500';
     const strong = isDarkMode?'text-slate-100':'text-slate-800';
     const meta = filesMeta.shipments;
-    const STAGES = ['בהכנה / ממתין', 'בדרך', 'בנמל'];
+    const STAGES = ['בהכנה / ממתין', 'בדרך', 'בנמל', 'התקבל'];
     return (
       <div className="space-y-4">
         <div className={`rounded-2xl border px-5 py-4 flex flex-wrap items-center gap-4 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
@@ -5280,16 +5321,37 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
           )}
           {fileMsg?.slot==='shipments' && <p className={`w-full text-xs font-semibold ${fileMsg.kind==='ok'?(isDarkMode?'text-emerald-300':'text-emerald-700'):(isDarkMode?'text-red-300':'text-red-700')}`}>{fileMsg.text}</p>}
         </div>
-        {sortRows('ships', shipmentsEnriched, { stage: s => s.stage.idx, delayDays: s => s.delayDays || null }).map(s => {
+        {(() => {
+          const cnt = { open: shipmentsEnriched.filter(x => x.stage.idx<2).length, port: shipmentsEnriched.filter(x => x.stage.idx===2).length, done: shipmentsEnriched.filter(x => x.stage.idx===3).length, all: shipmentsEnriched.length };
+          const chips = [['open','בדרך',cnt.open],['port','ממתין לאישור קבלה',cnt.port],['done','התקבלו',cnt.done],['all','הכל',cnt.all]];
+          return shipmentsEnriched.length > 0 && (
+            <div role="group" aria-label="סינון משלוחים" className="flex flex-wrap gap-2">
+              <button type="button" aria-pressed={shipFilter==='active'} onClick={()=>setShipFilter('active')}
+                className={`px-3 py-2 rounded-xl text-sm font-semibold border ${shipFilter==='active'?(isDarkMode?'bg-slate-200 text-slate-900 border-slate-200':'bg-slate-900 text-white border-slate-900'):(isDarkMode?'border-slate-600 text-slate-300':'border-slate-300 text-slate-700 bg-white')}`}>
+                בדרך + ממתין לאישור ({cnt.open+cnt.port})
+              </button>
+              {chips.map(([k,l,n]) => (
+                <button key={k} type="button" aria-pressed={shipFilter===k} onClick={()=>setShipFilter(k)}
+                  className={`px-3 py-2 rounded-xl text-sm font-semibold border ${shipFilter===k?(isDarkMode?'bg-slate-200 text-slate-900 border-slate-200':'bg-slate-900 text-white border-slate-900'):(isDarkMode?'border-slate-600 text-slate-300':'border-slate-300 text-slate-700 bg-white')} ${k==='port'&&n>0&&shipFilter!==k?(isDarkMode?'!border-orange-400/60 !text-orange-300':'!border-orange-300 !text-orange-800'):''}`}>
+                  {l} ({n})
+                </button>
+              ))}
+            </div>
+          );
+        })()}
+        {sortRows('ships', shipmentsEnriched.filter(x => shipFilter==='all' ? true : shipFilter==='active' ? x.stage.idx<=2 : shipFilter==='open' ? x.stage.idx<2 : shipFilter==='port' ? x.stage.idx===2 : shipFilter==='done' ? x.stage.idx===3 : true), { stage: s => s.stage.idx, delayDays: s => s.delayDays || null }).map(s => {
           const orders = s.matched ? ordersEnriched.filter(o => o.supplier === s.matched) : [];
           const supPos = [...new Set(orders.map(o => o.poNumber).filter(Boolean))].sort();
           const linkedPos = shipLinks.byShip[s.id] || [];
           const how = shipLinks.howByShip[s.id];
           const shownOrders = linkedPos.length ? orders.filter(o => linkedPos.includes(o.poNumber)) : orders;
           return (
-            <section key={s.id} className={`rounded-2xl border p-5 space-y-4 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'} ${s.stage.idx===2?'opacity-75':''}`}>
+            <section key={s.id} className={`rounded-2xl border p-5 space-y-4 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'} ${s.stage.idx===3?'opacity-70':''}`}>
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                 <span className={`font-mono text-lg font-bold ${strong}`}>{s.cont || 'ללא מספר מכולה'}</span>
+                {s.stage.idx===3 && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${isDarkMode?'bg-emerald-500/15 text-emerald-300':'bg-emerald-50 text-emerald-800'}`}>✓ התקבל {isoToDisplay(s.received)}</span>}
+                {s.stage.idx===2 && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${procChipCls('soon',isDarkMode)}`}>הגיע לנמל — לאשר קבלה</span>}
+                {s.gone && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-100 text-slate-600'}`} title={`לא הופיע בקובץ המשלח מאז ${isoToDisplay(s.gone)}`}>לא מופיע יותר בדוח המשלח</span>}
                 <span className={`text-sm ${muted}`}>{s.sup}</span>
                 <span className={`text-sm ${muted}`}>{[s.mode, s.qty?`${s.qty} ${s.pkg||''}`.trim():'', s.from&&s.to?`מ-${s.from} ל-${s.to}`:''].filter(Boolean).join(' · ')}</span>
                 {s.delayDays>0 && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${procChipCls('watch',isDarkMode)}`}>נדחה ב-{s.delayDays} ימים (היה {isoToDisplay(s.change.from)})</span>}
@@ -5299,6 +5361,18 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                   <p className={`text-xs ${muted}`}>הגעה משוערת</p>
                   <p className={`text-lg font-bold ${strong}`}>{s.arr ? isoToDisplay(s.arr) : 'לא ידוע'}{s.daysToArrival!=null && s.daysToArrival>=0 && s.stage.idx<2 ? <span className={`text-xs font-normal mr-1 ${muted}`}>(עוד {s.daysToArrival} ימים)</span> : null}</p>
                 </div>
+              </div>
+              <div className="flex flex-wrap items-center gap-2">
+                <button type="button" onClick={()=>markShipReceived(s.id, s.stage.idx!==3)}
+                  className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-semibold border ${s.stage.idx===3?(isDarkMode?'border-slate-600 text-slate-300 hover:bg-slate-700':'border-slate-300 text-slate-600 hover:bg-slate-50'):'bg-emerald-600 border-emerald-600 text-white hover:bg-emerald-700'}`}>
+                  {s.stage.idx===3 ? <><RotateCcw className="w-4 h-4"/>בטל סימון "הגיע"</> : <><CheckCircle2 className="w-4 h-4"/>סמן שהגיע</>}
+                </button>
+                {containerLinks(s.cont).map(l => (
+                  <a key={l.n} href={l.url} target="_blank" rel="noopener noreferrer"
+                    className={`inline-flex items-center gap-1.5 px-3 py-2 rounded-xl text-sm font-semibold border ${isDarkMode?'border-blue-500/40 text-blue-300 hover:bg-blue-500/10':'border-blue-200 text-blue-700 hover:bg-blue-50'}`}>
+                    <ExternalLink className="w-4 h-4"/>מעקב {l.carrier ? `ב-${l.carrier}` : 'מכולה'}{containerLinks(s.cont).length>1 ? ` · ${l.n}` : ''}
+                  </a>
+                ))}
               </div>
               <div className="flex items-center" aria-label={`שלב: ${s.stage.label}`}>
                 {STAGES.map((l,i) => (
@@ -5365,6 +5439,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
           );
         })}
         {!shipmentsEnriched.length && meta && <p className={`text-center py-10 text-sm ${muted}`}>אין משלוחים בקובץ</p>}
+        {shipmentsEnriched.length>0 && shipFilter==='done' && !shipmentsEnriched.some(x=>x.stage.idx===3) && <p className={`text-center py-10 text-sm ${muted}`}>עוד לא סימנת משלוחים שהגיעו</p>}
       </div>
     );
   };
@@ -8106,6 +8181,7 @@ const App = () => {
     // "רכש וספקים" and "תכנון רכש" are one screen now; the old spend analytics stay reachable from "מחירי רכש".
     { id:'procurement', label:'רכש', icon:ShoppingCart, color:'text-orange-400' },
     { id:'stockcount', label:'ספירת מלאי', icon:ClipboardList, color:'text-emerald-400' },
+    { id:'clothing', label:'ביגוד עובדים', icon:Shirt, color:'text-teal-400' },
     { id:'summary', label:'רווח והפסד', icon:BarChart3, color:'text-violet-400' },
   ];
 
@@ -8264,7 +8340,7 @@ const App = () => {
               )}
             </div>
             {/* Quick date filters (the overview and stock count use their own fixed periods) */}
-            {availableDates.length>0 && activeTab!=='overview' && activeTab!=='stockcount' && (
+            {availableDates.length>0 && activeTab!=='overview' && activeTab!=='stockcount' && activeTab!=='clothing' && (
               <div className={`hidden xl:flex items-center p-1 rounded-lg border gap-0.5 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-slate-100 border-slate-200'}`}>
                 {[[3,'3 חודשים'],['year','השנה'],[null,'הכל']].map(([f,l])=>(
                   <button key={l} onClick={()=>setQuickDate(f)} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${isDarkMode?'text-slate-400 hover:bg-slate-700 hover:text-white':'text-slate-600 hover:bg-white hover:text-slate-900 hover:shadow-sm'}`}>{l}</button>
@@ -8378,6 +8454,7 @@ const App = () => {
 
           {/* Summary */}
           {activeTab==='stockcount' && <StockCountPage isDarkMode={isDarkMode}/>}
+          {activeTab==='clothing' && <ClothingPage isDarkMode={isDarkMode}/>}
 
           {activeTab==='summary' && (
             summaryData ? (

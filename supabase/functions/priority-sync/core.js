@@ -382,6 +382,7 @@ var parsePurchaseLines = (rows) => {
   return out;
 };
 var shipmentStage = (s, todayIso) => {
+  if (s.received) return { idx: 3, label: "\u05D4\u05EA\u05E7\u05D1\u05DC" };
   if (!s.dep) return { idx: 0, label: "\u05D1\u05D4\u05DB\u05E0\u05D4" };
   if (s.dep > todayIso) return { idx: 0, label: "\u05DE\u05DE\u05EA\u05D9\u05DF \u05DC\u05D4\u05E4\u05DC\u05D2\u05D4" };
   if (!s.arr || s.arr > todayIso) return { idx: 1, label: "\u05D1\u05D3\u05E8\u05DA" };
@@ -1659,7 +1660,8 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
   const salesLinesAll = sets.procSalesLines || [];
   const salesLines = salesLinesAll.filter((l) => !l.x);
   const purchaseLines = sets.procPurchaseLines || [];
-  const shipments = sets.procShipments || [];
+  const shipReceived = app.procShipReceived || {};
+  const shipments = (sets.procShipments || []).map((s) => shipReceived[s.id] ? { ...s, received: shipReceived[s.id] } : s);
   const stockMap = app.procurementStock || {};
   const supplierMap = app.procurementSupplier || {};
   const costMap = app.procurementCost || {}, currencyMap = app.procurementCurrency || {};

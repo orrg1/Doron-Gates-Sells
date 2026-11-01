@@ -54,7 +54,9 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
   const salesLinesAll = sets.procSalesLines || [];
   const salesLines = salesLinesAll.filter(l => !l.x);
   const purchaseLines = sets.procPurchaseLines || [];
-  const shipments = sets.procShipments || [];
+  // shipments the person marked as received are done — not "on the way" anymore
+  const shipReceived = app.procShipReceived || {};
+  const shipments = (sets.procShipments || []).map(s => shipReceived[s.id] ? { ...s, received: shipReceived[s.id] } : s);
   const stockMap = app.procurementStock || {};
   const supplierMap = app.procurementSupplier || {};
   const costMap = app.procurementCost || {}, currencyMap = app.procurementCurrency || {};

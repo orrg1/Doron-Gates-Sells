@@ -561,6 +561,7 @@ export const parseShipments = (rows) => {
 
 // Where a shipment is, in plain words — from its dates (the event text is free-form).
 export const shipmentStage = (s, todayIso) => {
+  if (s.received) return { idx:3, label:'התקבל' };
   if (!s.dep) return { idx:0, label:'בהכנה' };
   if (s.dep > todayIso) return { idx:0, label:'ממתין להפלגה' };
   if (!s.arr || s.arr > todayIso) return { idx:1, label:'בדרך' };
