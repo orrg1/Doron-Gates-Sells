@@ -27,6 +27,7 @@ export const procStatus = (p) => {
 export const PROC_STATUS_LABEL = { now:'להזמין עכשיו', soon:'להזמין בקרוב', watch:'לעקוב', ok:'תקין', unknown:'אין נתוני מלאי', stopped:'לא מזמינים' };
 // The single note shown under a product name — the most important one wins.
 export const procChip = (p) => {
+  if (p.inactive) return { t:'מוצר לא פעיל בפריוריטי', k:'muted' };
   if (p.overdue) return { t:`הזמנה באיחור ${p.overdue.maxDays} ימים`, k:'now' };
   if (p.shortNowCoveredByPO) return { t:'חסר עכשיו · מכוסה בהזמנה', k:'watch' };
   if (p.priceChangePct!=null && Math.abs(p.priceChangePct) >= 3) return { t:`מחיר קניה ${p.priceChangePct>0?'עלה':'ירד'} ${Math.abs(p.priceChangePct).toFixed(0)}%`, k: p.priceChangePct>0 ? 'watch' : 'muted' };
@@ -72,10 +73,13 @@ export const computeProducts = (ctx) => {
     p.windowRev = Object.entries(p.monthlyRev).reduce((s,[d,v]) => windowMonthSet.has(d) ? s+v : s, 0);
     p.monthlyDataWindow = Object.fromEntries(Object.entries(p.monthlyData).filter(([d]) => windowMonthSet.has(d)));
   });
-  const totalWindowRev = Object.values(map).reduce((a,c)=>a+Math.max(0,c.windowRev),0);
+  // Inactive products (Priority item status) are marked; the ABC ranking is among active ones only.
+  Object.values(map).forEach(p => { const ex = itemsExtra?.[p.sku]; p.inactive = !!(ex && ex.inactive); });
+  const totalWindowRev = Object.values(map).reduce((a,c)=>a+(c.inactive?0:Math.max(0,c.windowRev)),0);
   let cumulative = 0;
   const sorted = Object.values(map).sort((a,b)=>b.windowRev-a.windowRev || b.totalRev-a.totalRev);
   sorted.forEach(p => {
+    if (p.inactive) { p.revPct = 0; p.abc = 'C'; return; }
     const pct = totalWindowRev>0 ? (Math.max(0,p.windowRev)/totalWindowRev)*100 : 0;
     // Classify by the running share BEFORE this product — so the product
     // that crosses the 80% line is still an A (otherwise a dominant best
@@ -271,6 +275,7 @@ export const computeProducts = (ctx) => {
 
     const out = { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, serviceLevel, projectedDemand, seasonalApplied, suggestedOrderFlat, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, priceChangePct, prevPrice, priceChangedAt, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, leadTimeSource, leadTimeStd: lf.std, nextMonIdx, coverageMonths, coverageDays, incomingQty, overdue, effectiveStock, effectiveCoverDays, effectiveCoverMonths, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, risk, physicalRisk, shortNowCoveredByPO, riskScore };
     out.orderBlocked = orderBlocked; out.orderMark = orderBlock?.products?.[p.sku || key] || null;
+    if (p.inactive) { out.suggestedOrder = 0; out.orderCost = 0; out.orderBlocked = out.orderBlocked || 'inactive'; }
     out.status = procStatus(out);
     out.statusRank = { now:0, soon:1, watch:2, unknown:3, ok:4, stopped:5 }[out.status];
     out.chip = procChip(out);

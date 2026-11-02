@@ -1,6 +1,6 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
-import { buildDigest } from './core/digest.js';
+import { buildDigest, moveNoteText } from './core/digest.js';
 import { installResizableColumns } from './resizableColumns.js';
 import { installMobileTables } from './mobileTables.js';
 import ClothingPage from './ClothingPage.jsx';
@@ -8,7 +8,7 @@ import { loadClothing, dueCount as clothingDueCount } from './clothingModel.js';
 import * as XLSXLib from 'xlsx';
 import { supabase, flushAll, queueDataset, subscribeStatus } from './cloud.js';
 import { OWN_MADE, procStatus, PROC_STATUS_LABEL, procChip, computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './core/procModel.js';
-import { salesOverview, dueToReorder, supplierReturns, orderCalendar, priceCheck, stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
+import { inactiveSkusOf, inactiveWithStock, salesOverview, dueToReorder, supplierReturns, orderCalendar, priceCheck, stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
@@ -1402,6 +1402,7 @@ const OVERVIEW_APP_KEYS = ['procurementStock','procurementSupplier','procurement
 const readAppState = (keys) => { const o = {}; keys.forEach(k => { let v = null; try { v = localStorage.getItem(k); } catch { /* none */ } if (v == null) return; try { o[k] = JSON.parse(v); } catch { o[k] = v; } }); return o; };
 const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpenProc, salesLines = [], stoppedCount = 0, dueCount = 0 }) => {
   const [sets, setSets] = useState(null);
+  const [openMove, setOpenMove] = useState(null);
   useEffect(() => {
     let off = false;
     (async () => {
@@ -1458,18 +1459,29 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
   const monthData = sales.months.map(m => ({ ...m, label: MONTHS_HE[m.m - 1] }));
   const weekData = sales.weeks.map(w => ({ ...w, label: `${w.w.slice(8, 10)}/${w.w.slice(5, 7)}` }));
   const axisColor = isDarkMode ? '#94a3b8' : '#64748b';
-  const moverList = (title, list, up) => (
+  const moverList = (title, hint, list, up) => ( // a tap on a row shows the calculation (phones have no hover)
     <div className={`${card} p-4`}>
-      <h3 className={`font-bold text-sm mb-2 ${strong}`}>{title}</h3>
+      <h3 className={`font-bold text-sm ${strong}`}>{title}</h3>
+      <p className={`text-[11px] mb-2 ${muted}`}>{hint}</p>
       {!list?.length ? <p className={`text-xs ${muted}`}>{digest ? 'אין' : 'טוען…'}</p> : (
-        <ul className="space-y-1.5">
-          {list.map(x => (
-            <li key={x.k} className="flex items-center gap-2 text-sm">
-              <span className={`flex-1 min-w-0 truncate ${strong}`} title={x.name}>{x.name}</span>
-              <span className={`text-xs tabular-nums ${muted}`}>{x.q} מול {x.prevQ || 0}</span>
-              <span className={`text-xs font-bold w-14 text-left ${up ? 'text-emerald-500' : 'text-red-500'}`} dir="ltr">{x.pct == null ? 'חדש' : `${x.pct > 0 ? '+' : ''}${x.pct.toFixed(0)}%`}</span>
-            </li>
-          ))}
+        <ul className="space-y-2">
+          {list.map(x => {
+            const note = moveNoteText(x);
+            const usual = x.isNew ? 'חדש' : x.noPrev ? 'לא נמכר קודם' : x.prevQ;
+            const how = x.isNew ? `${x.q} יח' ב-30 יום. המוצר במלאי פחות מחודש לפני כן — אין עם מה להשוות.`
+              : `${x.q} יח' ב-30 הימים האחרונים, מול ממוצע של ${x.prevQ} לחודש ב-${x.prevDays} ימים שהמוצר היה במלאי לפני כן${x.prevOut ? ` (${x.prevOut} ימים שהיה חסר לא נספרו)` : ''}.`;
+            return (
+              <li key={x.k} className="text-sm" title={how}>
+                <div role="button" tabIndex={0} aria-expanded={openMove === x.k} onClick={() => setOpenMove(openMove === x.k ? null : x.k)} onKeyDown={e => { if (e.key === 'Enter') setOpenMove(openMove === x.k ? null : x.k); }} className="flex items-center gap-2 cursor-pointer">
+                  <span className={`flex-1 min-w-0 truncate ${strong}`}>{x.name}</span>
+                  <span className={`text-xs tabular-nums whitespace-nowrap ${muted}`}>{x.q} מול {usual}</span>
+                  <span className={`text-xs font-bold w-14 text-left ${x.pct == null ? muted : up ? 'text-emerald-500' : 'text-red-500'}`} dir="ltr">{x.pct == null ? '—' : `${x.pct > 0 ? '+' : ''}${x.pct.toFixed(0)}%`}</span>
+                </div>
+                {note && <p className={`text-[11px] ${x.single ? 'text-amber-600' : muted}`}>{note}</p>}
+                {openMove === x.k && <p className={`text-[11px] mt-0.5 ${muted}`}>{how}</p>}
+              </li>
+            );
+          })}
         </ul>
       )}
     </div>
@@ -1564,8 +1576,8 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
       </section>
 
       <section className="grid grid-cols-1 lg:grid-cols-3 gap-4">
-        {moverList('מוצרים בעלייה — 30 יום מול הקצב הקודם', digest?.productsUp?.slice(0, 6), true)}
-        {moverList('מוצרים בירידה', digest?.productsDown?.slice(0, 6), false)}
+        {moverList('מוצרים בעלייה', 'נמכר ב-30 הימים האחרונים מול הממוצע החודשי הרגיל שלו בשנה שלפני — מאז שהגיע למלאי, בלי ימים שהיה חסר. לחיצה על שורה מציגה את החישוב.', digest?.productsUp?.slice(0, 6), true)}
+        {moverList('מוצרים בירידה', 'אותו חישוב. מוצר שהיה חסר במלאי שבוע או יותר החודש לא מופיע כאן — זה חוסר, לא ירידה בביקוש.', digest?.productsDown?.slice(0, 6), false)}
         <div className={`${card} p-4`}>
           <h3 className={`font-bold text-sm mb-2 ${strong}`}>לקוחות מובילים — 30 יום</h3>
           <ul className="space-y-1.5">
@@ -1793,6 +1805,10 @@ const ChatWindow = ({ isOpen, onClose, onSend, messages, thinking, isDarkMode })
 };
 
 // Sort indicator
+// Grey tag for a product whose Priority item card is not active (shown only in search results).
+const InactiveBadge = ({ isDarkMode }) => (
+  <span className={`mr-2 inline-block align-middle text-[10px] font-medium px-1.5 py-0.5 rounded ${isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-200 text-slate-500'}`}>לא פעיל</span>
+);
 const SortIcon = ({ colKey, sortConfig }) => {
   if (sortConfig.key !== colKey) return <ArrowDown className="w-3 h-3 opacity-20 inline ml-1"/>;
   return sortConfig.direction === 'asc' ? <ArrowDown className="w-3 h-3 inline ml-1 text-blue-500 rotate-180"/> : <ArrowDown className="w-3 h-3 inline ml-1 text-blue-500"/>;
@@ -2106,7 +2122,10 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   const stockouts = useMemo(() => stockoutSummary(stockTl), [stockTl]);
   const firstSnapshot = stockHistory.days?.length ? stockHistory.days.map(d => d.d).sort()[0] : null;
   // ── Purchase prices over time (supplier invoices) ──
-  const priceHist = useMemo(() => purchasePriceHistory(purchaseLines), [purchaseLines]);
+  // Inactive products (status on the Priority item card): hidden from every list, shown only when searched
+  const inactiveSet = useMemo(() => inactiveSkusOf(itemsExtra), [itemsExtra]);
+  const inactiveStock = useMemo(() => inactiveWithStock(itemsExtra, { exchangeRates }), [itemsExtra, exchangeRates]);
+  const priceHist = useMemo(() => purchasePriceHistory(inactiveSet.size ? purchaseLines.filter(l => !inactiveSet.has(l.k)) : purchaseLines), [purchaseLines, inactiveSet]);
   const invoicePriceUps = useMemo(() => priceIncreases(priceHist, { sinceIso: new Date(Date.now() - 120*DAY_MS).toISOString().slice(0,10) }), [priceHist]);
   const supIndex = useMemo(() => supplierPriceIndex(priceHist), [priceHist]);
 
@@ -2699,11 +2718,12 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   // dependency, since this feeds into the risk score computed below. ──
   const supplierConcentration = useMemo(() => supplierConcentrationOf(supplierMap), [supplierMap]);
 
-  const products = useMemo(() => computeProducts({ salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions, orderBlock }),
+  const productsAll = useMemo(() => computeProducts({ salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions, orderBlock }),
     [leadFor, stockouts, skipStockoutMonths, outliers, outlierDecisions, salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, leadStats, leadAddTransit, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku, itemsExtra, orderBlock]);
+  const products = useMemo(() => productsAll.filter(p => !p.inactive), [productsAll]);
 
   const filtered = useMemo(() => {
-    let data = products;
+    let data = searchTerm ? productsAll : products; // inactive products only when searched for
     if (abcFilter!=='all') data=data.filter(p=>p.abc===abcFilter);
     if (familyFilter) data=data.filter(p=>(p.family||'ללא משפחה')===familyFilter);
     if (riskFilter!=='all') data=data.filter(p=>p.risk===riskFilter);
@@ -2727,7 +2747,7 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
       const cmp = sortConfig.direction==='asc'?(va<vb?-1:va>vb?1:0):(va>vb?-1:va<vb?1:0);
       return cmp || (b.orderCost||0)-(a.orderCost||0) || (b.totalRev||0)-(a.totalRev||0);
     });
-  }, [products, abcFilter, familyFilter, outlierOnly, riskFilter, actionFilter, searchTerm, sortConfig]);
+  }, [products, productsAll, abcFilter, familyFilter, outlierOnly, riskFilter, actionFilter, searchTerm, sortConfig]);
   const outlierPendingCount = useMemo(() => products.filter(p => p.outlierPending > 0).length, [products]);
   const familyOptions = useMemo(() => {
     const m = {}; products.forEach(p => { if (Object.keys(itemsExtra).length) { const f = p.family || 'ללא משפחה'; m[f] = (m[f]||0) + 1; } });
@@ -2825,6 +2845,13 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
     // is built from sales only, so these never existed anywhere in the page —
     // yet they're usually the most expensive dead stock. Pull them straight
     // from the inventory maps.
+    // Inactive products (Priority item status) that still have stock — money on a shelf, to clear out.
+    const inactiveDead = inactiveStock.map(x => {
+      const lastSaleDate = x.lastSale ? new Date(x.lastSale) : null;
+      return { key:x.k, sku:x.k, name:x.n, abc:'C', xyz:'', abcXyz:'C', currentStock:x.bal, unitCost:x.unit, unitCostOriginal:x.unit, currency:'ILS', family:x.fam,
+        supplier: supplierMap[x.k] ?? null, lastSaleDate, daysSince: lastSaleDate ? Math.round((Date.now()-lastSaleDate)/DAY_MS) : null, neverSold: !lastSaleDate,
+        stockValue: x.bal * (x.unit ?? 0), inactive: true, inactiveStatus: x.status };
+    });
     const known = new Set();
     products.forEach(p => { known.add(p.key); if (p.sku) known.add(p.sku); if (p.name) known.add(p.name); });
     const neverSold = Object.entries(stockMap)
@@ -2873,9 +2900,9 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
           : fromCard ? Math.round((Date.now()-fromCard)/(24*60*60*1000)) : null;
         const stockValue = (p.currentStock??0) * (p.unitCost??0);
         return { ...p, lastSaleDate, daysSince, stockValue, neverSold: !lastSaleDate };
-      }), ...neverSold]
+      }), ...neverSold, ...inactiveDead]
       .sort((a,b) => (b.stockValue||0)-(a.stockValue||0));
-  }, [products, salesData, deadStockDays, stockMap, nameMap, costMap, currencyMap, supplierMap, exchangeRates, itemsExtra]);
+  }, [products, salesData, deadStockDays, stockMap, nameMap, costMap, currencyMap, supplierMap, exchangeRates, itemsExtra, inactiveStock]);
 
   // ── Excess stock: items that DO sell, but stock (+ what's on the way) is far
   // beyond what the plan needs: demand over lead time + target months, plus the
@@ -3537,7 +3564,7 @@ const renderProductRow = (p) => {
 
   // ── Product drawer — every detail that used to crowd the row ──
   const renderProductDrawer = () => {
-    const p = drawerKey ? products.find(x=>x.key===drawerKey) : null;
+    const p = drawerKey ? productsAll.find(x=>x.key===drawerKey) : null;
     if (!p) return null;
     const st = p.status || procStatus(p);
     const buffer = Math.max(p.safetyStock||0, p.minStock||0);
@@ -6328,6 +6355,11 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                   <h3 className={`font-bold flex items-center gap-2 ${isDarkMode?'text-white':'text-slate-800'}`}>
                     <Trash2 className="w-4 h-4 text-red-400"/> {deadStockData.length} פריטים לא זזים
                   </h3>
+                  {inactiveStock.length > 0 && (
+                    <span title="מוצרים שמסומנים בפריוריטי כלא פעילים ועדיין יש להם מלאי במחסן — מלאי למימוש" className={`text-[11px] font-medium px-2 py-1 rounded-lg ${isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-100 text-slate-600'}`}>
+                      מתוכם {inactiveStock.length} לא פעילים עם מלאי{inactiveStock.some(x=>x.value) ? ` · ${formatShort(inactiveStock.reduce((a,x)=>a+(x.value||0),0))}` : ''}
+                    </span>
+                  )}
                   {deadStockData.some(p=>p.costCurrencyBlocked) && (
                     <span title="חלק מהפריטים בעלות במטבע זר בלי שער מוגדר — הערך שלהם לא נכלל בסה״כ" className={`flex items-center gap-1 text-[11px] font-medium px-2 py-1 rounded-lg ${isDarkMode?'bg-orange-500/15 text-orange-300':'bg-orange-50 text-orange-700'}`}>
                       <TriangleAlert className="w-3 h-3"/> יש פריטים בערך לא ידוע (מטבע זר)
@@ -6375,7 +6407,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                       <tr key={p.key} className={`transition-all ${isDarkMode?'hover:bg-red-900/10':'hover:bg-red-50/50'}`}>
                         <td className="px-4 py-3.5">
                           <p className={`font-medium text-sm truncate max-w-[200px] ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{p.name}</p>
-                          {p.sku&&p.sku!==p.name&&<p className={`text-xs font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}</p>}
+                          {p.sku&&p.sku!==p.name&&<p className={`text-xs font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}{p.inactive && <InactiveBadge isDarkMode={isDarkMode}/>}</p>}
                         </td>
                         <td className="px-4 py-3.5"><ABCBadge cls={p.abc} xyz={p.xyz} abcXyz={p.abcXyz}/></td>
                         <td className="px-4 py-3.5">
@@ -6942,8 +6974,6 @@ const App = () => {
   const [salesFileData, setSalesData] = useState([]); // rows from uploaded monthly files only
   // Sales-invoice lines saved by the procurement page (Priority sync or uploaded lines file).
   const [procSalesLines, setProcSalesLines] = useState([]);
-  const stoppedPairs = useMemo(() => stoppedBuying(procSalesLines), [procSalesLines]);
-  const duePairs = useMemo(() => dueToReorder(procSalesLines), [procSalesLines]);
   const isNarrowApp = useIsNarrow();
   const [custView, setCustView] = useState(null); // customers list asked for from the overview (phones)
   const [procView, setProcView] = useState(null); // a procurement view asked for from another screen (overview cards)
@@ -6955,7 +6985,14 @@ const App = () => {
   const [priorityCustomers, setPriorityCustomers] = useState({});
   // Item-card extras (family, average cost) for the brands view in "מכירות"
   const [itemsExtraApp, setItemsExtraApp] = useState({});
-  useEffect(() => { idbGet('procItemsExtra').then(v => { if (v && typeof v === 'object') setItemsExtraApp(v); }).catch(() => {}); }, []);
+  const reloadItemsExtra = () => idbGet('procItemsExtra').then(v => { if (v && typeof v === 'object') setItemsExtraApp(v); }).catch(() => {});
+  useEffect(() => { reloadItemsExtra(); }, []);
+  // Inactive products (status on the Priority item card) — out of every product-level list and analysis;
+  // money totals keep their past sales. They show up only when searched for.
+  const inactiveSetApp = useMemo(() => inactiveSkusOf(itemsExtraApp), [itemsExtraApp]);
+  const activeSalesLines = useMemo(() => inactiveSetApp.size ? procSalesLines.filter(l => !inactiveSetApp.has(l.k)) : procSalesLines, [procSalesLines, inactiveSetApp]);
+  const stoppedPairs = useMemo(() => stoppedBuying(activeSalesLines), [activeSalesLines]);
+  const duePairs = useMemo(() => dueToReorder(activeSalesLines), [activeSalesLines]);
   const [syncRequest, setSyncRequest] = useState(null);
   const [lastSyncAt, setLastSyncAt] = useState(() => { try { return Number(localStorage.getItem('prioritySyncAt')) || null; } catch { return null; } });
   const requestPrioritySync = () => { setSyncRequest({ ts: Date.now() }); setActiveTab('procurement'); };
@@ -6965,7 +7002,7 @@ const App = () => {
   const [customerMonthlyData, setCustomerMonthlyData] = useState([]);
   const [customerProductData, setCustomerProductData] = useState([]);
   const customerMonthlyEff = useMemo(() => customerMonthlyFromLines(customerMonthlyData, procSalesLines), [customerMonthlyData, procSalesLines]);
-  const customerProductEff = useMemo(() => { const fromLines = customerProductsFromLines(procSalesLines); return fromLines.length ? fromLines : customerProductData; }, [customerProductData, procSalesLines]);
+  const customerProductEff = useMemo(() => { const fromLines = customerProductsFromLines(activeSalesLines); return fromLines.length ? fromLines : customerProductData; }, [customerProductData, activeSalesLines]);
   const [customerMonthlyFileName, setCustomerMonthlyFileName] = useState(() => localStorage.getItem('customerMonthlyFileName')||'');
   const [customerProductFileName, setCustomerProductFileName] = useState(() => localStorage.getItem('customerProductFileName')||'');
   // Cost & currency per SKU — owned here (not inside ProcurementPage) so the
@@ -7059,6 +7096,7 @@ const App = () => {
       suppliers: supplierNames.filter(n=>smartMatch(n,q)).slice(0,5),
     };
   }, [globalQuery, salesData, suppliersData]);
+  const inactiveNamesApp = useMemo(() => { const s = new Set(); if (inactiveSetApp.size) salesData.forEach(d => { if (d.description && inactiveSetApp.has(d.sku)) s.add(d.description); }); return s; }, [salesData, inactiveSetApp]);
   useEffect(() => {
     if (!globalSearchOpen) return;
     const close = (e) => { if (!e.target.closest('[data-global-search]')) setGlobalSearchOpen(false); };
@@ -7563,8 +7601,13 @@ const App = () => {
     return { chart, totalIncome, totalExpenses, totalProfit, profitMargin };
   }, [activeTab, salesData, suppliersData, dateFilter]);
 
-  const paginatedData = useMemo(() => filteredData.slice((currentPage-1)*itemsPerPage, currentPage*itemsPerPage), [filteredData, currentPage]);
-  const totalPages = Math.ceil(filteredData.length / itemsPerPage);
+  // Product-level views (the rows table, the pie, "by product"): inactive products only when searched for.
+  // KPIs and the monthly chart keep using filteredData — past sales are real money.
+  const showInactiveSales = !!(searchTerm || selectedProduct.length || selectedSku);
+  const filteredDataProducts = useMemo(() => (activeTab!=='sales' || !inactiveSetApp.size || showInactiveSales) ? filteredData : filteredData.filter(d => !inactiveSetApp.has(d.sku)), [filteredData, activeTab, inactiveSetApp, showInactiveSales]);
+  const hiddenInactiveCount = useMemo(() => activeTab==='sales' && !showInactiveSales && inactiveSetApp.size ? new Set(filteredData.filter(d => inactiveSetApp.has(d.sku)).map(d => d.sku)).size : 0, [filteredData, activeTab, inactiveSetApp, showInactiveSales]);
+  const paginatedData = useMemo(() => filteredDataProducts.slice((currentPage-1)*itemsPerPage, currentPage*itemsPerPage), [filteredDataProducts, currentPage]);
+  const totalPages = Math.ceil(filteredDataProducts.length / itemsPerPage);
   useEffect(() => setCurrentPage(1), [activeTab, searchTerm, dateFilter, selectedProduct, selectedSku, selectedSupplier, drillDownMonth]);
 
   const calcTrend = (data) => {
@@ -7615,12 +7658,12 @@ const App = () => {
     const avgTotal = monthly.length ? monthly.reduce((s,m)=>s+m.total,0)/monthly.length : 0;
     const em={};
     const kf=activeTab==='sales'?'description':'supplier';
-    filteredData.forEach(d=>{ const n=d[kf]; em[n]=em[n]||{total:0,quantity:0}; em[n].total+=d.total; em[n].quantity+=d.quantity; });
+    filteredDataProducts.forEach(d=>{ const n=d[kf]; em[n]=em[n]||{total:0,quantity:0}; em[n].total+=d.total; em[n].quantity+=d.quantity; });
     const vk=(activeTab==='suppliers'||pieMetric==='total')?'total':'quantity';
     let pie=Object.entries(em).map(([name,v])=>({name,...v,value:v[vk]})).sort((a,b)=>b.value-a.value);
     if(!selectedProduct.length&&!selectedSupplier) pie=pie.slice(0,5);
     return { monthly, pie, avgTotal };
-  }, [filteredData, activeTab, selectedProduct, selectedSupplier, pieMetric, costMap, currencyMap]);
+  }, [filteredData, filteredDataProducts, activeTab, selectedProduct, selectedSupplier, pieMetric, costMap, currencyMap]);
 
   // Main trend chart can show monthly or quarterly grouping (selected products
   // breakdown only really makes sense monthly, so quarterly falls back to the
@@ -7808,7 +7851,7 @@ const App = () => {
   const productAggregates = useMemo(() => {
     if (activeTab !== 'sales') return [];
     const map = {};
-    filteredData.forEach(row => {
+    filteredDataProducts.forEach(row => {
       const key = row.sku||row.description; if (!key) return;
       if (!map[key]) map[key] = { sku:row.sku||'', name:row.description||key, monthlyData:{}, totalQty:0, totalRev:0 };
       map[key].totalQty += row.quantity||0;
@@ -7850,7 +7893,7 @@ const App = () => {
       p.marginPct = (costUsable && p.totalRev>0) ? (p.margin/p.totalRev*100) : null;
     });
     return sorted;
-  }, [activeTab, filteredData, costMap, currencyMap, exchangeRates]);
+  }, [activeTab, filteredDataProducts, costMap, currencyMap, exchangeRates]);
 
   const [salesViewMode, setSalesViewMode] = useState('transactions'); // 'transactions' | 'byProduct' | 'returns' | 'brands'
   const [openBrand, setOpenBrand] = useState(null);
@@ -8315,7 +8358,7 @@ const App = () => {
                           <p className={`text-[10px] font-bold px-2 mb-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>מוצרים</p>
                           {globalSearchResults.products.map(name => (
                             <div key={name} className={`flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-xs group ${isDarkMode?'hover:bg-slate-700/50':'hover:bg-slate-50'}`}>
-                              <span className={`flex-1 truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{name}</span>
+                              <span className={`flex-1 truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{name}{inactiveNamesApp.has(name) && <InactiveBadge isDarkMode={isDarkMode}/>}</span>
                               <button onClick={()=>{jumpToSales(name); setGlobalSearchOpen(false); setGlobalQuery('');}} className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-50 text-blue-700'}`}>מכירות</button>
                               <button onClick={()=>{jumpToProcurement(name); setGlobalSearchOpen(false); setGlobalQuery('');}} className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${isDarkMode?'bg-orange-500/20 text-orange-300':'bg-orange-50 text-orange-700'}`}>רכש</button>
                             </div>
@@ -8449,7 +8492,7 @@ const App = () => {
 
           {/* Procurement Planning */}
           {activeTab==='procurement' && (
-            <ProcurementPage requestedView={procView} onRequestedViewHandled={()=>setProcView(null)} syncRequest={syncRequest} onSyncRequestHandled={()=>setSyncRequest(null)} onSyncDone={setLastSyncAt} onSalesLinesChange={setProcSalesLines} onCustomersChange={setPriorityCustomers} salesData={salesFileData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
+            <ProcurementPage requestedView={procView} onRequestedViewHandled={()=>setProcView(null)} syncRequest={syncRequest} onSyncRequestHandled={()=>setSyncRequest(null)} onSyncDone={(at)=>{ setLastSyncAt(at); reloadItemsExtra(); }} onSalesLinesChange={setProcSalesLines} onCustomersChange={setPriorityCustomers} salesData={salesFileData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
           )}
 
           {/* Summary */}
@@ -8914,7 +8957,7 @@ const App = () => {
                           <tr key={row.id} className={`transition-colors ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50/80'}`}>
                             {visibleColumns.date && <td className={`px-5 py-3.5 text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{row.date}</td>}
                             {visibleColumns.sku && activeTab==='sales' && <td className={`px-5 py-3.5 font-mono text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{row.sku}</td>}
-                            {visibleColumns.description && <td className={`px-5 py-3.5 font-medium ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{activeTab==='sales'?row.description:row.supplier}</td>}
+                            {visibleColumns.description && <td className={`px-5 py-3.5 font-medium ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{activeTab==='sales'?row.description:row.supplier}{activeTab==='sales' && inactiveSetApp.has(row.sku) && <InactiveBadge isDarkMode={isDarkMode}/>}</td>}
                             {visibleColumns.quantity && <td className="px-5 py-3.5"><span className={`px-2 py-0.5 rounded-md text-xs font-medium ${isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-100 text-slate-600'}`}>{row.quantity}</span></td>}
                             {visibleColumns.total && <td className={`px-5 py-3.5 font-bold tabular-nums ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>{formatCurrency(row.total)}</td>}
                           </tr>
@@ -8923,7 +8966,7 @@ const App = () => {
                     </table>
                   </div>
                   <div className={`px-5 py-3.5 border-t flex justify-between items-center text-xs ${isDarkMode?'bg-slate-900/30 border-slate-700 text-slate-500':'bg-slate-50 border-slate-100 text-slate-500'}`}>
-                    <span>מציג {filteredData.length>0?(currentPage-1)*itemsPerPage+1:0}–{Math.min(currentPage*itemsPerPage,filteredData.length)} מתוך {filteredData.length.toLocaleString()}</span>
+                    <span>מציג {filteredDataProducts.length>0?(currentPage-1)*itemsPerPage+1:0}–{Math.min(currentPage*itemsPerPage,filteredDataProducts.length)} מתוך {filteredDataProducts.length.toLocaleString()}{hiddenInactiveCount>0 && <> · {hiddenInactiveCount} מוצרים לא פעילים מוסתרים (חיפוש מציג אותם)</>}</span>
                     <div className="flex items-center gap-2">
                       <button onClick={()=>setCurrentPage(p=>Math.max(1,p-1))} disabled={currentPage===1} className={`p-1.5 rounded-lg disabled:opacity-30 ${isDarkMode?'hover:bg-slate-700':'hover:bg-slate-200'}`}><ChevronRight className="w-3.5 h-3.5"/></button>
                       <span className="font-mono px-2">{currentPage}/{totalPages||1}</span>
@@ -8983,6 +9026,7 @@ const App = () => {
                             <td className={`px-5 py-3.5 font-medium ${isDarkMode?'text-slate-100':'text-slate-800'}`}>
                               {p.name}
                               {p.sku && <span className={`ml-2 text-xs font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.sku}</span>}
+                              {inactiveSetApp.has(p.sku) && <InactiveBadge isDarkMode={isDarkMode}/>}
                             </td>
                             <td className="px-5 py-3.5">
                               <span className={`inline-flex items-center justify-center px-1.5 h-6 rounded-lg text-xs font-bold ${p.abc==='A'?(isDarkMode?'bg-orange-500/20 text-orange-400':'bg-orange-100 text-orange-700'):p.abc==='B'?(isDarkMode?'bg-blue-500/20 text-blue-400':'bg-blue-100 text-blue-700'):(isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-100 text-slate-500')}`} title={`${p.revPct.toFixed(1)}% מההכנסות · ${p.xyz==='X'?'ביקוש יציב':p.xyz==='Y'?'ביקוש משתנה':'ביקוש לא צפוי'} (CV)`}>{p.abc}{p.xyz}</span>

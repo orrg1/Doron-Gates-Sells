@@ -690,6 +690,11 @@ var priceIncreases = (hist, { sinceIso, minPct = 5 } = {}) => {
   });
   return out.sort((x, y) => x.d < y.d ? 1 : -1);
 };
+var inactiveSkusOf = (itemsExtra = {}) => {
+  const s = /* @__PURE__ */ new Set();
+  for (const [k, x] of Object.entries(itemsExtra || {})) if (x && x.inactive) s.add(k);
+  return s;
+};
 var productStartDates = ({ itemsExtra = {}, purchaseLines = [] } = {}) => {
   const out = {};
   let firstAny = null;
@@ -968,7 +973,21 @@ async function pullItems(forms, query) {
   });
   const out = [], extra = {};
   for (const r of rows) {
-    if (st && r[st] && r[st] !== "\u05E4\u05E2\u05D9\u05DC") continue;
+    if (st && r[st] && r[st] !== "\u05E4\u05E2\u05D9\u05DC") {
+      if (!r[sku]) continue;
+      const bal2 = balSub && balField && (!inv || !r[inv] || r[inv] === "Y") ? (r[balSub] || []).reduce((s, b) => s + numv(b[balField]), 0) : 0;
+      extra[r[sku]] = {
+        inactive: true,
+        status: String(r[st]),
+        name: r[des] || "",
+        fam: fam ? r[fam] || "" : "",
+        famCode: famCode ? r[famCode] || "" : "",
+        lastSale: lastSale ? iso(r[lastSale]) : "",
+        lastBuy: lastBuy ? iso(r[lastBuy]) : "",
+        ...bal2 ? { bal: bal2, cost: price ? numv(r[price]) || null : null, cur: cur ? r[cur] || "" : "" } : {}
+      };
+      continue;
+    }
     extra[r[sku]] = {
       fam: fam ? r[fam] || "" : "",
       famCode: famCode ? r[famCode] || "" : "",
@@ -1334,6 +1353,7 @@ var procStatus = (p) => {
   return "ok";
 };
 var procChip = (p) => {
+  if (p.inactive) return { t: "\u05DE\u05D5\u05E6\u05E8 \u05DC\u05D0 \u05E4\u05E2\u05D9\u05DC \u05D1\u05E4\u05E8\u05D9\u05D5\u05E8\u05D9\u05D8\u05D9", k: "muted" };
   if (p.overdue) return { t: `\u05D4\u05D6\u05DE\u05E0\u05D4 \u05D1\u05D0\u05D9\u05D7\u05D5\u05E8 ${p.overdue.maxDays} \u05D9\u05DE\u05D9\u05DD`, k: "now" };
   if (p.shortNowCoveredByPO) return { t: "\u05D7\u05E1\u05E8 \u05E2\u05DB\u05E9\u05D9\u05D5 \xB7 \u05DE\u05DB\u05D5\u05E1\u05D4 \u05D1\u05D4\u05D6\u05DE\u05E0\u05D4", k: "watch" };
   if (p.priceChangePct != null && Math.abs(p.priceChangePct) >= 3) return { t: `\u05DE\u05D7\u05D9\u05E8 \u05E7\u05E0\u05D9\u05D4 ${p.priceChangePct > 0 ? "\u05E2\u05DC\u05D4" : "\u05D9\u05E8\u05D3"} ${Math.abs(p.priceChangePct).toFixed(0)}%`, k: p.priceChangePct > 0 ? "watch" : "muted" };
@@ -1365,10 +1385,19 @@ var computeProducts = (ctx) => {
     p.windowRev = Object.entries(p.monthlyRev).reduce((s, [d, v]) => windowMonthSet.has(d) ? s + v : s, 0);
     p.monthlyDataWindow = Object.fromEntries(Object.entries(p.monthlyData).filter(([d]) => windowMonthSet.has(d)));
   });
-  const totalWindowRev = Object.values(map).reduce((a, c) => a + Math.max(0, c.windowRev), 0);
+  Object.values(map).forEach((p) => {
+    const ex = itemsExtra?.[p.sku];
+    p.inactive = !!(ex && ex.inactive);
+  });
+  const totalWindowRev = Object.values(map).reduce((a, c) => a + (c.inactive ? 0 : Math.max(0, c.windowRev)), 0);
   let cumulative = 0;
   const sorted = Object.values(map).sort((a, b) => b.windowRev - a.windowRev || b.totalRev - a.totalRev);
   sorted.forEach((p) => {
+    if (p.inactive) {
+      p.revPct = 0;
+      p.abc = "C";
+      return;
+    }
     const pct = totalWindowRev > 0 ? Math.max(0, p.windowRev) / totalWindowRev * 100 : 0;
     const before = cumulative;
     cumulative += pct;
@@ -1525,6 +1554,11 @@ var computeProducts = (ctx) => {
     const out = { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, serviceLevel, projectedDemand, seasonalApplied, suggestedOrderFlat, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, priceChangePct, prevPrice, priceChangedAt, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, leadTimeSource, leadTimeStd: lf.std, nextMonIdx, coverageMonths, coverageDays, incomingQty, overdue, effectiveStock, effectiveCoverDays, effectiveCoverMonths, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, risk, physicalRisk, shortNowCoveredByPO, riskScore };
     out.orderBlocked = orderBlocked;
     out.orderMark = orderBlock?.products?.[p.sku || key] || null;
+    if (p.inactive) {
+      out.suggestedOrder = 0;
+      out.orderCost = 0;
+      out.orderBlocked = out.orderBlocked || "inactive";
+    }
     out.status = procStatus(out);
     out.statusRank = { now: 0, soon: 1, watch: 2, unknown: 3, ok: 4, stopped: 5 }[out.status];
     out.chip = procChip(out);
@@ -1625,33 +1659,97 @@ var excessOf = (products, marginMonths = 3) => {
   });
   return rows.sort((a, b) => (b.excessValue || 0) - (a.excessValue || 0));
 };
-var trendingProducts = (lines, { now = Date.now(), products = [], names = {} } = {}) => {
+var trendingProducts = (lines, { now = Date.now(), products = [], names = {}, purchaseLines = [], stockHistory = null, currentStock = {}, inactive = null } = {}) => {
   const iso2 = (ms) => new Date(ms).toISOString().slice(0, 10);
-  const a0 = iso2(now - 29 * DAY_MS), b0 = iso2(now - 119 * DAY_MS);
-  const by = {};
+  const today = iso2(now), a0 = iso2(now - 29 * DAY_MS), b0 = iso2(now - (29 + 365) * DAY_MS);
+  const skip = (k) => inactive && inactive.has(k);
+  const by = {}, firstSale = {}, firstBuy = {};
+  let dataStart = today;
   lines.forEach((l) => {
-    if (l.x || l.junk || !l.k || !(l.q > 0) || l.d < b0) return;
-    const x = by[l.k] ||= { k: l.k, name: names[l.k] || l.n || l.k, q: 0, v: 0, pq: 0, pv: 0 };
+    if (l.d && l.d < dataStart) dataStart = l.d;
+    if (l.x || l.junk || !l.k || !l.q) return;
+    if (l.q > 0 && (!firstSale[l.k] || l.d < firstSale[l.k])) firstSale[l.k] = l.d;
+    if (l.d < b0 || l.d > today || skip(l.k)) return;
+    const x = by[l.k] ||= { k: l.k, name: names[l.k] || l.n || l.k, q: 0, v: 0, pq: 0, pv: 0, inv: {}, soldDays: /* @__PURE__ */ new Set() };
+    if (l.q > 0) x.soldDays.add(l.d);
     if (l.d >= a0) {
       x.q += l.q;
       x.v += l.v || 0;
+      if (l.q > 0) {
+        const key = l.inv || l.d + "|" + (l.cid || l.c);
+        const iv = x.inv[key] ||= { q: 0, c: l.c || "" };
+        iv.q += l.q;
+      }
     } else {
       x.pq += l.q;
       x.pv += l.v || 0;
     }
   });
+  purchaseLines.forEach((l) => {
+    if (!l.junk && l.k && l.q > 0 && l.d && (!firstBuy[l.k] || l.d < firstBuy[l.k])) firstBuy[l.k] = l.d;
+  });
+  const ks = Object.keys(by);
+  const tl = ks.length ? stockTimelines({ stockHistory, currentStock, salesLines: lines, purchaseLines, skus: ks, fromIso: b0, toIso: today }) : {};
   const prodBy = {};
   products.forEach((p) => {
     if (p.sku) prodBy[p.sku] = p;
   });
-  const rows = Object.values(by).map((x) => {
-    const prevQ = Math.round(x.pq / 3), prevV = x.pv / 3;
-    const p = prodBy[x.k];
-    const coverWeeks = p && p.currentStock != null && x.q > 0 ? Math.max(0, Math.round((p.currentStock + (p.incomingQty || 0)) / (x.q / 30) / 7)) : null;
-    return { k: x.k, name: x.name, q: Math.round(x.q), prevQ, pct: prevQ ? (x.q / (x.pq / 3) - 1) * 100 : null, delta: x.v - prevV, coverWeeks };
+  const rows = ks.map((k) => {
+    const x = by[k];
+    const fs = firstSale[k], fb = firstBuy[k];
+    const first = fs && fb ? fs < fb ? fs : fb : fs || fb || "";
+    const histStart = dataStart > b0 ? dataStart : b0;
+    const arrived = first && Date.parse(first) - Date.parse(dataStart) > 60 * DAY_MS ? first : "";
+    const start = arrived && arrived > histStart ? arrived : histStart;
+    const startPrev = start;
+    const outDay = {};
+    (tl[k] || []).forEach((t) => {
+      if (t.q <= 0 && !t.neg && !x.soldDays.has(t.d)) outDay[t.d] = 1;
+    });
+    let prevDays = 0, prevOut = 0, recentDays = 0, recentOut = 0;
+    for (let t = Date.parse(startPrev); t <= now; t += DAY_MS) {
+      const d = iso2(t);
+      if (d > today) break;
+      if (d < a0) {
+        if (outDay[d]) prevOut++;
+        else prevDays++;
+      } else if (d >= start) {
+        if (outDay[d]) recentOut++;
+        else recentDays++;
+      }
+    }
+    const isNew = prevDays < 30;
+    const prevPace = !isNew ? x.pq / prevDays * 30 : null;
+    const recentPace = recentDays > 0 ? x.q / recentDays * 30 : x.q;
+    const pct = prevPace > 0 ? (recentPace / prevPace - 1) * 100 : null;
+    const prevV = !isNew ? x.pv / prevDays * 30 : 0;
+    const big = Object.values(x.inv).sort((a, b) => b.q - a.q)[0];
+    let single = null;
+    if (big && big.q >= 5 && big.q >= x.q * 0.6 && (pct == null || pct >= 40)) {
+      const rest = x.q - big.q, restPace = recentDays > 0 ? rest / recentDays * 30 : rest;
+      if (isNew || !prevPace || (restPace / prevPace - 1) * 100 < 40) single = { q: Math.round(big.q), c: big.c };
+    }
+    const p = prodBy[k];
+    const coverWeeks = p && p.currentStock != null && x.q > 0 ? Math.max(0, Math.round((p.currentStock + (p.incomingQty || 0)) / (recentPace / 30) / 7)) : null;
+    return {
+      k,
+      name: x.name,
+      q: Math.round(x.q),
+      prevQ: prevPace != null ? Math.round(prevPace * 10) / 10 : 0,
+      pct,
+      delta: x.v - prevV,
+      coverWeeks,
+      isNew,
+      noPrev: !isNew && !(prevPace > 0),
+      since: arrived && arrived > b0 ? arrived : null,
+      prevDays,
+      prevOut,
+      recentOut,
+      single
+    };
   });
-  const up = rows.filter((x) => x.q >= 5 && (x.pct == null || x.pct >= 40)).sort((a, b) => b.delta - a.delta);
-  const down = rows.filter((x) => x.prevQ >= 5 && x.pct != null && x.pct <= -40).sort((a, b) => a.delta - b.delta);
+  const up = rows.filter((x) => x.q >= 5 && (x.pct == null || x.pct >= 40)).sort((a, b) => (a.single ? 1 : 0) - (b.single ? 1 : 0) || b.delta - a.delta);
+  const down = rows.filter((x) => x.prevQ >= 5 && x.pct != null && x.pct <= -40 && x.recentOut < 7).sort((a, b) => a.delta - b.delta);
   return { up, down };
 };
 var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
@@ -1668,6 +1766,7 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
   const exchangeRates = app.exchangeRates || {};
   const openOrders = app.openOrders || [];
   const shipSupOverride = app.procShipSupplierMap || {};
+  const inactive = inactiveSkusOf(sets.procItemsExtra || {});
   const outliers = detectOutliers(salesLines, { sinceIso: iso2(now - 365 * DAY_MS) });
   const decisions = app.procOutlierDecisions || {};
   const caps = {};
@@ -1701,7 +1800,7 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
     (purchBySku[l.k] ||= []).push(l);
     if (!lastSupBySku[l.k]) lastSupBySku[l.k] = l;
   });
-  const products = computeProducts({
+  const productsAll = computeProducts({
     salesData,
     excludeCurrentMonth: app.excludeCurrentMonth !== false,
     avgWindowMonths: Number.isFinite(Number(app.procAvgWindow)) && app.procAvgWindow != null ? Number(app.procAvgWindow) : 12,
@@ -1727,6 +1826,7 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
     outlierDecisions: decisions,
     orderBlock: app.procOrderBlock || {}
   });
+  const products = productsAll.filter((p) => !p.inactive);
   const bySup = {};
   products.filter((p) => p.suggestedOrder > 0 && !p.ownMade).forEach((p) => {
     const s = bySup[p.supplier || "\u05E1\u05E4\u05E7 \u05DC\u05D0 \u05D9\u05D3\u05D5\u05E2"] ||= { name: p.supplier || "\u05E1\u05E4\u05E7 \u05DC\u05D0 \u05D9\u05D3\u05D5\u05E2", n: 0, now: 0, value: 0, lead: p.effectiveLeadTime };
@@ -1744,7 +1844,7 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
     if (o.poNumber) s.pos.add(o.poNumber);
   });
   const delayed = shipments.map((s) => ({ ...s, stage: shipmentStage(s, today), delayDays: s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0 })).filter((s) => s.stage.idx < 2 && s.delayDays > 0).sort((a, b) => b.delayDays - a.delayDays);
-  const hist = purchasePriceHistory(purchaseLines);
+  const hist = purchasePriceHistory(purchaseLines.filter((l) => !inactive.has(l.k)));
   const names = app.procurementNames || {};
   const priceUps = priceIncreases(hist, { sinceIso: iso2(now - 7 * DAY_MS) }).map((x) => ({ ...x, name: names[x.k] || hist[x.k]?.[0]?.n || x.k }));
   const excess = excessOf(products, 3);
@@ -1753,9 +1853,9 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
   const sum = (a, b) => salesLinesAll.filter((l) => l.d >= a && l.d <= b && l.v > 0).reduce((s, l) => s + l.v, 0);
   const w0 = iso2(now - 6 * DAY_MS), ly0 = iso2(now - (365 + 6) * DAY_MS), ly1 = iso2(now - 365 * DAY_MS);
   const week = { v: sum(w0, today), lastYear: sum(ly0, ly1), from: w0, to: today };
-  const productMoves = trendingProducts(salesLinesAll, { now, products, names: app.procurementNames || {} });
+  const productMoves = trendingProducts(salesLinesAll, { now, products, names: app.procurementNames || {}, purchaseLines, stockHistory: sets.stockHistory, currentStock: stockMap, inactive });
   const ret = returnsAnalysis(salesLinesAll, { fromIso: iso2(now - 30 * DAY_MS), toIso: today });
-  const returnSpikes = ret.products.filter((p) => p.rate != null && p.rate >= 10 && p.retQ >= 3).slice(0, 8);
+  const returnSpikes = ret.products.filter((p) => !inactive.has(p.k)).filter((p) => p.rate != null && p.rate >= 10 && p.retQ >= 3).slice(0, 8);
   return {
     generatedAt: now,
     today,
@@ -1855,6 +1955,15 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
 var esc = (s) => String(s ?? "").replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" })[c]);
 var ils = (v) => "\u20AA" + Math.round(v || 0).toLocaleString("en-US");
 var pctS = (v) => `<span dir="ltr">${v > 0 ? "+" : ""}${v.toFixed(0)}%</span>`;
+var moveNoteText = (x) => [
+  x.since ? `\u05D1\u05DE\u05DC\u05D0\u05D9 \u05DE-${isoToDisplay(x.since)}` : "",
+  x.single ? `\u05D4\u05D6\u05DE\u05E0\u05D4 \u05D1\u05D5\u05D3\u05D3\u05EA \u05E9\u05DC ${x.single.q} \u05D9\u05D7'${x.single.c ? " (" + x.single.c + ")" : ""}` : "",
+  x.prevOut >= 7 ? `${x.prevOut} \u05D9\u05DE\u05D9\u05DD \u05D7\u05E1\u05E8 \u05D1\u05DE\u05DC\u05D0\u05D9 \u05DC\u05D0 \u05E0\u05E1\u05E4\u05E8\u05D5` : ""
+].filter(Boolean).join(" \xB7 ");
+var moveNote = (x) => {
+  const t = moveNoteText(x);
+  return t ? " \xB7 " + esc(t) : "";
+};
 var renderDigestHtml = (d, { siteUrl }) => {
   const sec = (title, inner, link) => `<tr><td style="padding:18px 22px;border-top:1px solid #e2e8f0">
     <h2 style="margin:0 0 10px;font-size:16px;color:#0f172a">${esc(title)}</h2>${inner}
@@ -1873,7 +1982,7 @@ var renderDigestHtml = (d, { siteUrl }) => {
     ${sec("\u05DE\u05D4 \u05D1\u05D3\u05E8\u05DA \u2014 \u05D1\u05D0\u05D9\u05D7\u05D5\u05E8 \u05D5\u05E0\u05D3\u05D7\u05D4", p(`\u05D4\u05D6\u05DE\u05E0\u05D5\u05EA \u05E8\u05DB\u05E9 \u05D1\u05D0\u05D9\u05D7\u05D5\u05E8: <b>${d.latePOLines}</b> \u05E9\u05D5\u05E8\u05D5\u05EA`) + table(["\u05E1\u05E4\u05E7", "\u05E9\u05D5\u05E8\u05D5\u05EA", "\u05D0\u05D9\u05D7\u05D5\u05E8 \u05DE\u05E8\u05D1\u05D9", "\u05D4\u05D6\u05DE\u05E0\u05D5\u05EA"], d.latePOs.slice(0, 8).map((s) => [esc(s.name), s.lines, `${s.maxDays} \u05D9\u05DE\u05D9\u05DD`, esc(s.pos.slice(0, 4).join(", "))])) + (d.delayed.length ? '<div style="height:10px"></div>' + table(["\u05DE\u05DB\u05D5\u05DC\u05D4", "\u05E1\u05E4\u05E7", "\u05D4\u05D2\u05E2\u05D4", "\u05E0\u05D3\u05D7\u05D4"], d.delayed.map((s) => [esc(s.cont || "\u2014"), esc(s.sup), esc(isoToDisplay(s.arr)), `${s.delayDays} \u05D9\u05DE\u05D9\u05DD (\u05D4\u05D9\u05D4 ${esc(isoToDisplay(s.from))})`])) : ""), proc)}
     ${sec("\u05D4\u05EA\u05D9\u05D9\u05E7\u05E8\u05D5\u05D9\u05D5\u05EA \u05D1\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05D5\u05EA \u05E1\u05E4\u05E7 \u05D4\u05E9\u05D1\u05D5\u05E2", table(["\u05DE\u05D5\u05E6\u05E8", "\u05E1\u05E4\u05E7", "\u05E7\u05D5\u05D3\u05DD", "\u05E2\u05DB\u05E9\u05D9\u05D5", "\u05E9\u05D9\u05E0\u05D5\u05D9"], d.priceUps.map((x) => [esc(x.name), esc(x.s), `${x.prevP} ${esc(x.cur)}`, `<b>${x.p} ${esc(x.cur)}</b>`, `<b style="color:#C8322B">${pctS(x.pct)}</b>`])), proc)}
     ${sec("\u05DE\u05DC\u05D0\u05D9 \u05E2\u05D5\u05D3\u05E3", p(`\u05DB\u05E1\u05E3 \u05E9\u05D9\u05D5\u05E9\u05D1 \u05D1\u05DE\u05DC\u05D0\u05D9 \u05E2\u05D5\u05D3\u05E3: <b>${ils(d.excessValue)}</b> \xB7 \u05D4\u05D6\u05DE\u05E0\u05D5\u05EA \u05E4\u05EA\u05D5\u05D7\u05D5\u05EA \u05E2\u05DC \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05D1\u05E2\u05D5\u05D3\u05E3: <b>${d.excessPOCount}</b>`) + table(["\u05DE\u05D5\u05E6\u05E8", "\u05E1\u05E4\u05E7", "\u05D1\u05D4\u05D6\u05DE\u05E0\u05D4 \u05DE\u05D9\u05D5\u05EA\u05E8\u05EA", "\u05E9\u05D5\u05D5\u05D9"], d.excessPOs.map((x) => [esc(x.name), esc(x.supplier || "\u2014"), `${x.poExcess} \u05D9\u05D7\u05F3`, x.value ? ils(x.value) : "\u2014"])), proc)}
-    ${sec("\u05DE\u05DB\u05D9\u05E8\u05D5\u05EA", p(`7 \u05D4\u05D9\u05DE\u05D9\u05DD \u05D4\u05D0\u05D7\u05E8\u05D5\u05E0\u05D9\u05DD: <b>${ils(d.week.v)}</b>${d.week.lastYear ? ` \xB7 \u05D0\u05D5\u05EA\u05D5 \u05E9\u05D1\u05D5\u05E2 \u05D0\u05E9\u05EA\u05E7\u05D3 ${ils(d.week.lastYear)} (<b>${pctS((d.week.v / d.week.lastYear - 1) * 100)}</b>)` : ""}`) + ((d.productsUp || []).length ? '<div style="height:6px"></div>' + p("<b>\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05D1\u05E2\u05DC\u05D9\u05D9\u05D4</b> \u2014 30 \u05D4\u05D9\u05DE\u05D9\u05DD \u05D4\u05D0\u05D7\u05E8\u05D5\u05E0\u05D9\u05DD \u05DE\u05D5\u05DC \u05D4\u05E7\u05E6\u05D1 \u05D4\u05D7\u05D5\u05D3\u05E9\u05D9 \u05D1-3 \u05D4\u05D7\u05D5\u05D3\u05E9\u05D9\u05DD \u05E9\u05DC\u05E4\u05E0\u05D9\u05D4\u05DD") + table(["\u05DE\u05D5\u05E6\u05E8", "30 \u05D9\u05D5\u05DD", "\u05E7\u05E6\u05D1 \u05E7\u05D5\u05D3\u05DD \u05DC\u05D7\u05D5\u05D3\u05E9", "\u05E9\u05D9\u05E0\u05D5\u05D9", "\u05DE\u05DC\u05D0\u05D9 \u05DE\u05E1\u05E4\u05D9\u05E7 \u05DC"], d.productsUp.map((x) => [`${esc(x.name)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}</span>`, x.q.toLocaleString("en-US"), x.prevQ ? x.prevQ.toLocaleString("en-US") : "\u05D7\u05D3\u05E9", x.prevQ ? `<b style="color:#2E8B57">${pctS(x.pct)}</b>` : "\u2014", x.coverWeeks == null ? "\u2014" : x.coverWeeks < 4 ? `<b style="color:#C8322B">${x.coverWeeks} \u05E9\u05D1\u05D5\u05E2\u05D5\u05EA</b>` : `${x.coverWeeks} \u05E9\u05D1\u05D5\u05E2\u05D5\u05EA`])) : "") + ((d.productsDown || []).length ? '<div style="height:10px"></div>' + p("<b>\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05D1\u05D9\u05E8\u05D9\u05D3\u05D4</b>") + table(["\u05DE\u05D5\u05E6\u05E8", "30 \u05D9\u05D5\u05DD", "\u05E7\u05E6\u05D1 \u05E7\u05D5\u05D3\u05DD \u05DC\u05D7\u05D5\u05D3\u05E9", "\u05E9\u05D9\u05E0\u05D5\u05D9"], d.productsDown.map((x) => [`${esc(x.name)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}</span>`, x.q.toLocaleString("en-US"), x.prevQ.toLocaleString("en-US"), `<b style="color:#C8322B">${pctS(x.pct)}</b>`])) : "") + (d.returnSpikes.length ? '<div style="height:6px"></div>' + p("<b>\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05E2\u05DD \u05D4\u05E8\u05D1\u05D4 \u05D4\u05D7\u05D6\u05E8\u05D5\u05EA \u05D1-30 \u05D4\u05D9\u05DE\u05D9\u05DD \u05D4\u05D0\u05D7\u05E8\u05D5\u05E0\u05D9\u05DD:</b>") + table(["\u05DE\u05D5\u05E6\u05E8", "\u05E0\u05DE\u05DB\u05E8\u05D5", "\u05D7\u05D6\u05E8\u05D5", "\u05D0\u05D7\u05D5\u05D6"], d.returnSpikes.map((x) => [esc(x.n), x.soldQ, x.retQ, `<b style="color:#C8322B">${x.rate.toFixed(0)}%</b>`])) : ""), proc)}
+    ${sec("\u05DE\u05DB\u05D9\u05E8\u05D5\u05EA", p(`7 \u05D4\u05D9\u05DE\u05D9\u05DD \u05D4\u05D0\u05D7\u05E8\u05D5\u05E0\u05D9\u05DD: <b>${ils(d.week.v)}</b>${d.week.lastYear ? ` \xB7 \u05D0\u05D5\u05EA\u05D5 \u05E9\u05D1\u05D5\u05E2 \u05D0\u05E9\u05EA\u05E7\u05D3 ${ils(d.week.lastYear)} (<b>${pctS((d.week.v / d.week.lastYear - 1) * 100)}</b>)` : ""}`) + ((d.productsUp || []).length ? '<div style="height:6px"></div>' + p("<b>\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05D1\u05E2\u05DC\u05D9\u05D9\u05D4</b> \u2014 \u05E0\u05DE\u05DB\u05E8 \u05D1-30 \u05D4\u05D9\u05DE\u05D9\u05DD \u05D4\u05D0\u05D7\u05E8\u05D5\u05E0\u05D9\u05DD \u05DE\u05D5\u05DC \u05D4\u05DE\u05DE\u05D5\u05E6\u05E2 \u05D4\u05D7\u05D5\u05D3\u05E9\u05D9 \u05D4\u05E8\u05D2\u05D9\u05DC \u05E9\u05DC\u05D5 \u05D1\u05E9\u05E0\u05D4 \u05E9\u05DC\u05E4\u05E0\u05D9 (\u05DE\u05D0\u05D6 \u05E9\u05D4\u05D2\u05D9\u05E2 \u05DC\u05DE\u05DC\u05D0\u05D9, \u05D1\u05DC\u05D9 \u05D9\u05DE\u05D9\u05DD \u05E9\u05D4\u05D9\u05D4 \u05D7\u05E1\u05E8)") + table(["\u05DE\u05D5\u05E6\u05E8", "30 \u05D9\u05D5\u05DD", "\u05DE\u05DE\u05D5\u05E6\u05E2 \u05E8\u05D2\u05D9\u05DC \u05DC\u05D7\u05D5\u05D3\u05E9", "\u05E9\u05D9\u05E0\u05D5\u05D9", "\u05DE\u05DC\u05D0\u05D9 \u05DE\u05E1\u05E4\u05D9\u05E7 \u05DC"], d.productsUp.map((x) => [`${esc(x.name)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}${moveNote(x)}</span>`, x.q.toLocaleString("en-US"), x.isNew ? "\u05D7\u05D3\u05E9" : x.noPrev ? "\u05DC\u05D0 \u05E0\u05DE\u05DB\u05E8" : x.prevQ.toLocaleString("en-US"), x.pct != null ? `<b style="color:#2E8B57">${pctS(x.pct)}</b>` : "\u2014", x.coverWeeks == null ? "\u2014" : x.coverWeeks < 4 ? `<b style="color:#C8322B">${x.coverWeeks} \u05E9\u05D1\u05D5\u05E2\u05D5\u05EA</b>` : `${x.coverWeeks} \u05E9\u05D1\u05D5\u05E2\u05D5\u05EA`])) : "") + ((d.productsDown || []).length ? '<div style="height:10px"></div>' + p("<b>\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05D1\u05D9\u05E8\u05D9\u05D3\u05D4</b> \u2014 \u05D0\u05D5\u05EA\u05D5 \u05D7\u05D9\u05E9\u05D5\u05D1; \u05DE\u05D5\u05E6\u05E8 \u05E9\u05D4\u05D9\u05D4 \u05D7\u05E1\u05E8 \u05D1\u05DE\u05DC\u05D0\u05D9 \u05DC\u05D0 \u05DE\u05D5\u05E4\u05D9\u05E2 \u05DB\u05D0\u05DF") + table(["\u05DE\u05D5\u05E6\u05E8", "30 \u05D9\u05D5\u05DD", "\u05DE\u05DE\u05D5\u05E6\u05E2 \u05E8\u05D2\u05D9\u05DC \u05DC\u05D7\u05D5\u05D3\u05E9", "\u05E9\u05D9\u05E0\u05D5\u05D9"], d.productsDown.map((x) => [`${esc(x.name)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}${moveNote(x)}</span>`, x.q.toLocaleString("en-US"), x.prevQ.toLocaleString("en-US"), `<b style="color:#C8322B">${pctS(x.pct)}</b>`])) : "") + (d.returnSpikes.length ? '<div style="height:6px"></div>' + p("<b>\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05E2\u05DD \u05D4\u05E8\u05D1\u05D4 \u05D4\u05D7\u05D6\u05E8\u05D5\u05EA \u05D1-30 \u05D4\u05D9\u05DE\u05D9\u05DD \u05D4\u05D0\u05D7\u05E8\u05D5\u05E0\u05D9\u05DD:</b>") + table(["\u05DE\u05D5\u05E6\u05E8", "\u05E0\u05DE\u05DB\u05E8\u05D5", "\u05D7\u05D6\u05E8\u05D5", "\u05D0\u05D7\u05D5\u05D6"], d.returnSpikes.map((x) => [esc(x.n), x.soldQ, x.retQ, `<b style="color:#C8322B">${x.rate.toFixed(0)}%</b>`])) : ""), proc)}
     <tr><td style="padding:14px 22px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:11px">\u05E0\u05E9\u05DC\u05D7 \u05D0\u05D5\u05D8\u05D5\u05DE\u05D8\u05D9\u05EA \u05DB\u05DC \u05D9\u05D5\u05DD \u05E8\u05D0\u05E9\u05D5\u05DF \u05DE\u05D4\u05D0\u05EA\u05E8 BizData \xB7 \u05D4\u05E0\u05EA\u05D5\u05E0\u05D9\u05DD \u05DE-Priority (\u05E7\u05E8\u05D9\u05D0\u05D4 \u05D1\u05DC\u05D1\u05D3)</td></tr>
   </table></td></tr></table></body></html>`;
 };

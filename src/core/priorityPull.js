@@ -116,7 +116,17 @@ async function pullItems(forms, query) {
   });
   const out = [], extra = {};
   for (const r of rows) {
-    if (st && r[st] && r[st] !== 'פעיל') continue;
+    // Inactive items stay out of the stock/item lists but are remembered (marked), so the analyses can
+    // tell an inactive product from an unknown one and the person can still find it by searching.
+    if (st && r[st] && r[st] !== 'פעיל') {
+      if (!r[sku]) continue;
+      const bal = balSub && balField && (!inv || !r[inv] || r[inv] === 'Y') ? (r[balSub] || []).reduce((s, b) => s + numv(b[balField]), 0) : 0;
+      extra[r[sku]] = { inactive: true, status: String(r[st]), name: r[des] || '',
+        fam: fam ? r[fam] || '' : '', famCode: famCode ? r[famCode] || '' : '',
+        lastSale: lastSale ? iso(r[lastSale]) : '', lastBuy: lastBuy ? iso(r[lastBuy]) : '',
+        ...(bal ? { bal, cost: price ? numv(r[price]) || null : null, cur: cur ? r[cur] || '' : '' } : {}) };
+      continue;
+    }
     extra[r[sku]] = {
       fam: fam ? r[fam] || '' : '', famCode: famCode ? r[famCode] || '' : '', type: typ ? r[typ] || '' : '',
       avgCost: avg ? numv(r[avg]) || null : null, listPrice: list ? numv(r[list]) || null : null,

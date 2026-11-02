@@ -2,7 +2,7 @@
 // Uses the same model as the procurement page (procModel.js), so the numbers
 // in the email match the website.
 import { mergeLinesIntoMonthly, detectOutliers, saleLineId, supplierLeadTimes, matchShipSupplier, shipmentStage, daysBetween, stockTimelines, stockoutSummary,
-  purchasePriceHistory, priceIncreases, priceCheck, linkShipmentsToPOs, returnsAnalysis, productStartDates, DAY_MS, isoToDisplay } from './data.js';
+  purchasePriceHistory, priceIncreases, priceCheck, linkShipmentsToPOs, returnsAnalysis, productStartDates, inactiveSkusOf, DAY_MS, isoToDisplay } from './data.js';
 import { computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './procModel.js';
 
 // Items that sell but whose stock + incoming is well beyond the plan's need.
@@ -23,27 +23,77 @@ export const excessOf = (products, marginMonths = 3) => {
   return rows.sort((a, b) => (b.excessValue || 0) - (a.excessValue || 0));
 };
 
-// Products whose sales moved: units in the last 30 days vs the monthly pace of the 90 days before.
-// Rising: at least 5 units now and +40%, or a product that sold 5+ units with no sales before (new).
+// Products whose sales moved: units in the last 30 days vs the product's usual monthly pace in the year
+// before them (a year, not 3 months: one quiet or out-of-stock stretch doesn't make the next month look like
+// a boom). The usual pace is measured only over days the product could actually be sold:
+//  · from its first arrival (first supplier invoice, or first sale if earlier) — a product that arrived
+//    a month ago isn't divided by three months;
+//  · skipping days it was out of stock (from the stock history) — no stock, no sales, not lower demand.
+// Fewer than 30 sellable days before the last 30 → "new" (no % — there is nothing fair to compare with).
+// A rise that comes mostly from one invoice is flagged `single` (one big order, not a trend).
+// Rising: 5+ units now and +40% (or new). Falling: usual pace 5+/month and −40%, per sellable day.
 // Ranked by the extra revenue, so a jump on a big seller beats +300% on a 2-unit item.
-export const trendingProducts = (lines, { now = Date.now(), products = [], names = {} } = {}) => {
+export const trendingProducts = (lines, { now = Date.now(), products = [], names = {}, purchaseLines = [], stockHistory = null, currentStock = {}, inactive = null } = {}) => {
   const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
-  const a0 = iso(now - 29 * DAY_MS), b0 = iso(now - 119 * DAY_MS);
-  const by = {};
+  const today = iso(now), a0 = iso(now - 29 * DAY_MS), b0 = iso(now - (29 + 365) * DAY_MS);
+  const skip = (k) => inactive && inactive.has(k);
+  const by = {}, firstSale = {}, firstBuy = {};
+  let dataStart = today; // the stored history doesn't go back forever — nothing before it counts as "no sales"
   lines.forEach(l => {
-    if (l.x || l.junk || !l.k || !(l.q > 0) || l.d < b0) return;
-    const x = (by[l.k] ||= { k: l.k, name: names[l.k] || l.n || l.k, q: 0, v: 0, pq: 0, pv: 0 });
-    if (l.d >= a0) { x.q += l.q; x.v += l.v || 0; } else { x.pq += l.q; x.pv += l.v || 0; }
+    if (l.d && l.d < dataStart) dataStart = l.d;
+    if (l.x || l.junk || !l.k || !l.q) return;
+    if (l.q > 0 && (!firstSale[l.k] || l.d < firstSale[l.k])) firstSale[l.k] = l.d;
+    if (l.d < b0 || l.d > today || skip(l.k)) return;
+    const x = (by[l.k] ||= { k: l.k, name: names[l.k] || l.n || l.k, q: 0, v: 0, pq: 0, pv: 0, inv: {}, soldDays: new Set() });
+    if (l.q > 0) x.soldDays.add(l.d);
+    // returns (negative lines) are netted out — a sale that came back isn't demand
+    if (l.d >= a0) { x.q += l.q; x.v += l.v || 0; if (l.q > 0) { const key = l.inv || l.d + '|' + (l.cid || l.c); const iv = (x.inv[key] ||= { q: 0, c: l.c || '' }); iv.q += l.q; } }
+    else { x.pq += l.q; x.pv += l.v || 0; }
   });
+  purchaseLines.forEach(l => { if (!l.junk && l.k && l.q > 0 && l.d && (!firstBuy[l.k] || l.d < firstBuy[l.k])) firstBuy[l.k] = l.d; });
+  const ks = Object.keys(by);
+  // stock per day over the 4 months (estimated back from today's balance with the invoices + daily snapshots)
+  const tl = ks.length ? stockTimelines({ stockHistory, currentStock, salesLines: lines, purchaseLines, skus: ks, fromIso: b0, toIso: today }) : {};
   const prodBy = {}; products.forEach(p => { if (p.sku) prodBy[p.sku] = p; });
-  const rows = Object.values(by).map(x => {
-    const prevQ = Math.round(x.pq / 3), prevV = x.pv / 3;
-    const p = prodBy[x.k];
-    const coverWeeks = p && p.currentStock != null && x.q > 0 ? Math.max(0, Math.round((p.currentStock + (p.incomingQty || 0)) / (x.q / 30) / 7)) : null;
-    return { k: x.k, name: x.name, q: Math.round(x.q), prevQ, pct: prevQ ? (x.q / (x.pq / 3) - 1) * 100 : null, delta: x.v - prevV, coverWeeks };
+  const rows = ks.map(k => {
+    const x = by[k];
+    const fs = firstSale[k], fb = firstBuy[k];
+    // first arrival = first supplier invoice or first sale, whichever is earlier — but only when it is well
+    // after the start of the stored history (otherwise the product simply existed before it)
+    const first = fs && fb ? (fs < fb ? fs : fb) : (fs || fb || '');
+    const histStart = dataStart > b0 ? dataStart : b0;
+    const arrived = first && Date.parse(first) - Date.parse(dataStart) > 60 * DAY_MS ? first : '';
+    const start = arrived && arrived > histStart ? arrived : histStart;
+    const startPrev = start;
+    // a day is "out" only when the balance at its end was 0 and nothing sold that day
+    const outDay = {}; (tl[k] || []).forEach(t => { if (t.q <= 0 && !t.neg && !x.soldDays.has(t.d)) outDay[t.d] = 1; });
+    let prevDays = 0, prevOut = 0, recentDays = 0, recentOut = 0;
+    for (let t = Date.parse(startPrev); t <= now; t += DAY_MS) {
+      const d = iso(t); if (d > today) break;
+      if (d < a0) { if (outDay[d]) prevOut++; else prevDays++; }
+      else if (d >= start) { if (outDay[d]) recentOut++; else recentDays++; }
+    }
+    const isNew = prevDays < 30;
+    const prevPace = !isNew ? x.pq / prevDays * 30 : null;              // units per 30 sellable days
+    const recentPace = recentDays > 0 ? x.q / recentDays * 30 : x.q;
+    const pct = prevPace > 0 ? (recentPace / prevPace - 1) * 100 : null;
+    const prevV = !isNew ? x.pv / prevDays * 30 : 0;
+    // one invoice carrying most of the rise
+    const big = Object.values(x.inv).sort((a, b) => b.q - a.q)[0];
+    let single = null;
+    if (big && big.q >= 5 && big.q >= x.q * 0.6 && (pct == null || pct >= 40)) {
+      const rest = x.q - big.q, restPace = recentDays > 0 ? rest / recentDays * 30 : rest;
+      if (isNew || !prevPace || (restPace / prevPace - 1) * 100 < 40) single = { q: Math.round(big.q), c: big.c };
+    }
+    const p = prodBy[k];
+    const coverWeeks = p && p.currentStock != null && x.q > 0 ? Math.max(0, Math.round((p.currentStock + (p.incomingQty || 0)) / (recentPace / 30) / 7)) : null;
+    return { k, name: x.name, q: Math.round(x.q), prevQ: prevPace != null ? Math.round(prevPace * 10) / 10 : 0, pct, delta: x.v - prevV, coverWeeks,
+      isNew, noPrev: !isNew && !(prevPace > 0), since: arrived && arrived > b0 ? arrived : null, prevDays, prevOut, recentOut, single };
   });
-  const up = rows.filter(x => x.q >= 5 && (x.pct == null || x.pct >= 40)).sort((a, b) => b.delta - a.delta);
-  const down = rows.filter(x => x.prevQ >= 5 && x.pct != null && x.pct <= -40).sort((a, b) => a.delta - b.delta);
+  const up = rows.filter(x => x.q >= 5 && (x.pct == null || x.pct >= 40))
+    .sort((a, b) => (a.single ? 1 : 0) - (b.single ? 1 : 0) || b.delta - a.delta);
+  // a drop explained by running out of stock (a week+ of the last 30 days) isn't lower demand → not listed
+  const down = rows.filter(x => x.prevQ >= 5 && x.pct != null && x.pct <= -40 && x.recentOut < 7).sort((a, b) => a.delta - b.delta);
   return { up, down };
 };
 
@@ -63,6 +113,8 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
   const exchangeRates = app.exchangeRates || {};
   const openOrders = app.openOrders || [];
   const shipSupOverride = app.procShipSupplierMap || {};
+  // inactive products (Priority item status): out of every product-level list; money totals keep them
+  const inactive = inactiveSkusOf(sets.procItemsExtra || {});
 
   // outliers → the plan's sales (same as the page)
   const outliers = detectOutliers(salesLines, { sinceIso: iso(now - 365 * DAY_MS) });
@@ -87,10 +139,11 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
   const ordersEnriched = enrichOrders({ openOrders, currencyMap, exchangeRates, costMap });
   const purchBySku = {}, lastSupBySku = {};
   purchaseLines.forEach(l => { if (l.junk) return; (purchBySku[l.k] ||= []).push(l); if (!lastSupBySku[l.k]) lastSupBySku[l.k] = l; });
-  const products = computeProducts({ salesData, excludeCurrentMonth: app.excludeCurrentMonth !== false, avgWindowMonths: Number.isFinite(Number(app.procAvgWindow)) && app.procAvgWindow != null ? Number(app.procAvgWindow) : 12, stockouts, skipStockoutMonths: app.procSkipStockoutMonths !== '0' && app.procSkipStockoutMonths !== 0,
+  const productsAll = computeProducts({ salesData, excludeCurrentMonth: app.excludeCurrentMonth !== false, avgWindowMonths: Number.isFinite(Number(app.procAvgWindow)) && app.procAvgWindow != null ? Number(app.procAvgWindow) : 12, stockouts, skipStockoutMonths: app.procSkipStockoutMonths !== '0' && app.procSkipStockoutMonths !== 0,
     stockMap, minStockMap: app.procurementMinStock || {}, lastSupBySku, supplierMap, costMap, itemsExtra: sets.procItemsExtra || {}, currencyMap, exchangeRates,
     costHistory: app.procurementCostHistory || {}, purchBySku, leadFor, incomingMap: incomingMapOf(openOrders), overdueByProduct: overdueByProductOf(ordersEnriched),
     moqMap: app.procurementMOQ || {}, monthsToStock: Number(app.procMonthsToStock) || 2, supplierConcentration: supplierConcentrationOf(supplierMap), outliers, outlierDecisions: decisions, orderBlock: app.procOrderBlock || {} });
+  const products = productsAll.filter(p => !p.inactive);
 
   // 1. what to order, by supplier
   const bySup = {};
@@ -107,7 +160,7 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
     .filter(s => s.stage.idx < 2 && s.delayDays > 0).sort((a, b) => b.delayDays - a.delayDays);
 
   // 3. price increases on supplier invoices this week
-  const hist = purchasePriceHistory(purchaseLines);
+  const hist = purchasePriceHistory(purchaseLines.filter(l => !inactive.has(l.k)));
   const names = app.procurementNames || {};
   const priceUps = priceIncreases(hist, { sinceIso: iso(now - 7 * DAY_MS) }).map(x => ({ ...x, name: names[x.k] || hist[x.k]?.[0]?.n || x.k }));
 
@@ -121,9 +174,9 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
   const w0 = iso(now - 6 * DAY_MS), ly0 = iso(now - (365 + 6) * DAY_MS), ly1 = iso(now - 365 * DAY_MS);
   const week = { v: sum(w0, today), lastYear: sum(ly0, ly1), from: w0, to: today };
   // Products on the move: last 30 days vs the monthly pace of the 90 days before them.
-  const productMoves = trendingProducts(salesLinesAll, { now, products, names: app.procurementNames || {} });
+  const productMoves = trendingProducts(salesLinesAll, { now, products, names: app.procurementNames || {}, purchaseLines, stockHistory: sets.stockHistory, currentStock: stockMap, inactive });
   const ret = returnsAnalysis(salesLinesAll, { fromIso: iso(now - 30 * DAY_MS), toIso: today });
-  const returnSpikes = ret.products.filter(p => p.rate != null && p.rate >= 10 && p.retQ >= 3).slice(0, 8);
+  const returnSpikes = ret.products.filter(p => !inactive.has(p.k)).filter(p => p.rate != null && p.rate >= 10 && p.retQ >= 3).slice(0, 8);
 
   return {
     generatedAt: now, today,
@@ -176,6 +229,14 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
 const esc = (s) => String(s ?? '').replace(/[&<>"]/g, c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;' }[c]));
 const ils = (v) => '₪' + Math.round(v || 0).toLocaleString('en-US');
 const pctS = (v) => `<span dir="ltr">${v > 0 ? '+' : ''}${v.toFixed(0)}%</span>`;
+// Small note under a product on the move: arrived recently / one big order / was out of stock.
+export const moveNoteText = (x) => [
+  x.since ? `במלאי מ-${isoToDisplay(x.since)}` : '',
+  x.single ? `הזמנה בודדת של ${x.single.q} יח'${x.single.c ? ' (' + x.single.c + ')' : ''}` : '',
+  x.prevOut >= 7 ? `${x.prevOut} ימים חסר במלאי לא נספרו` : '',
+].filter(Boolean).join(' · ');
+const moveNote = (x) => { const t = moveNoteText(x); return t ? ' · ' + esc(t) : ''; };
+
 export const renderDigestHtml = (d, { siteUrl }) => {
   const sec = (title, inner, link) => `<tr><td style="padding:18px 22px;border-top:1px solid #e2e8f0">
     <h2 style="margin:0 0 10px;font-size:16px;color:#0f172a">${esc(title)}</h2>${inner}
@@ -200,10 +261,10 @@ export const renderDigestHtml = (d, { siteUrl }) => {
     ${sec('מלאי עודף', p(`כסף שיושב במלאי עודף: <b>${ils(d.excessValue)}</b> · הזמנות פתוחות על מוצרים בעודף: <b>${d.excessPOCount}</b>`) +
       table(['מוצר', 'ספק', 'בהזמנה מיותרת', 'שווי'], d.excessPOs.map(x => [esc(x.name), esc(x.supplier || '—'), `${x.poExcess} יח׳`, x.value ? ils(x.value) : '—'])), proc)}
     ${sec('מכירות', p(`7 הימים האחרונים: <b>${ils(d.week.v)}</b>${d.week.lastYear ? ` · אותו שבוע אשתקד ${ils(d.week.lastYear)} (<b>${pctS((d.week.v / d.week.lastYear - 1) * 100)}</b>)` : ''}`) +
-      ((d.productsUp || []).length ? '<div style="height:6px"></div>' + p('<b>מוצרים בעלייה</b> — 30 הימים האחרונים מול הקצב החודשי ב-3 החודשים שלפניהם') +
-        table(['מוצר', '30 יום', 'קצב קודם לחודש', 'שינוי', 'מלאי מספיק ל'], d.productsUp.map(x => [`${esc(x.name)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}</span>`, x.q.toLocaleString('en-US'), x.prevQ ? x.prevQ.toLocaleString('en-US') : 'חדש', x.prevQ ? `<b style="color:#2E8B57">${pctS(x.pct)}</b>` : '—', x.coverWeeks == null ? '—' : x.coverWeeks < 4 ? `<b style="color:#C8322B">${x.coverWeeks} שבועות</b>` : `${x.coverWeeks} שבועות`])) : '') +
-      ((d.productsDown || []).length ? '<div style="height:10px"></div>' + p('<b>מוצרים בירידה</b>') +
-        table(['מוצר', '30 יום', 'קצב קודם לחודש', 'שינוי'], d.productsDown.map(x => [`${esc(x.name)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}</span>`, x.q.toLocaleString('en-US'), x.prevQ.toLocaleString('en-US'), `<b style="color:#C8322B">${pctS(x.pct)}</b>`])) : '') +
+      ((d.productsUp || []).length ? '<div style="height:6px"></div>' + p('<b>מוצרים בעלייה</b> — נמכר ב-30 הימים האחרונים מול הממוצע החודשי הרגיל שלו בשנה שלפני (מאז שהגיע למלאי, בלי ימים שהיה חסר)') +
+        table(['מוצר', '30 יום', 'ממוצע רגיל לחודש', 'שינוי', 'מלאי מספיק ל'], d.productsUp.map(x => [`${esc(x.name)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}${moveNote(x)}</span>`, x.q.toLocaleString('en-US'), x.isNew ? 'חדש' : x.noPrev ? 'לא נמכר' : x.prevQ.toLocaleString('en-US'), x.pct != null ? `<b style="color:#2E8B57">${pctS(x.pct)}</b>` : '—', x.coverWeeks == null ? '—' : x.coverWeeks < 4 ? `<b style="color:#C8322B">${x.coverWeeks} שבועות</b>` : `${x.coverWeeks} שבועות`])) : '') +
+      ((d.productsDown || []).length ? '<div style="height:10px"></div>' + p('<b>מוצרים בירידה</b> — אותו חישוב; מוצר שהיה חסר במלאי לא מופיע כאן') +
+        table(['מוצר', '30 יום', 'ממוצע רגיל לחודש', 'שינוי'], d.productsDown.map(x => [`${esc(x.name)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}${moveNote(x)}</span>`, x.q.toLocaleString('en-US'), x.prevQ.toLocaleString('en-US'), `<b style="color:#C8322B">${pctS(x.pct)}</b>`])) : '') +
       (d.returnSpikes.length ? '<div style="height:6px"></div>' + p('<b>מוצרים עם הרבה החזרות ב-30 הימים האחרונים:</b>') + table(['מוצר', 'נמכרו', 'חזרו', 'אחוז'], d.returnSpikes.map(x => [esc(x.n), x.soldQ, x.retQ, `<b style="color:#C8322B">${x.rate.toFixed(0)}%</b>`])) : ''), proc)}
     <tr><td style="padding:14px 22px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:11px">נשלח אוטומטית כל יום ראשון מהאתר BizData · הנתונים מ-Priority (קריאה בלבד)</td></tr>
   </table></td></tr></table></body></html>`;

@@ -875,6 +875,23 @@ export const supplierPriceIndex = (hist, { now = Date.now(), recentDays = 180 } 
 // only changes stored), and for the time before the first snapshot an estimate worked
 // backwards from the first known balance: earlier stock = later stock + sales − purchases.
 // The estimate ignores counts/adjustments/own production, so it is marked as such.
+// ─── Inactive products (status ≠ "פעיל" on the Priority item card) ───
+// They are left out of every product-level list and analysis (rankings, trends, purchasing,
+// alerts) and shown only when the person searches for them. Money totals keep their past sales.
+export const inactiveSkusOf = (itemsExtra = {}) => {
+  const s = new Set();
+  for (const [k, x] of Object.entries(itemsExtra || {})) if (x && x.inactive) s.add(k);
+  return s;
+};
+// Inactive products that still have stock in the warehouse — money sitting on a shelf.
+export const inactiveWithStock = (itemsExtra = {}, { exchangeRates = {} } = {}) =>
+  Object.entries(itemsExtra || {}).filter(([, x]) => x && x.inactive && x.bal > 0).map(([k, x]) => {
+    const cur = normCurrency(x.cur);
+    const rate = cur === 'ILS' ? 1 : (exchangeRates[cur] > 0 ? exchangeRates[cur] : null);
+    const unit = x.cost > 0 && rate ? x.cost * rate : null;
+    return { k, n: x.name || k, bal: x.bal, status: x.status || 'לא פעיל', unit, value: unit != null ? unit * x.bal : null, lastSale: x.lastSale || '', fam: x.fam || '' };
+  }).sort((a, b) => (b.value || 0) - (a.value || 0) || b.bal - a.bal);
+
 // When each product started to exist: the item's creation date in Priority. Without one, the first
 // supplier invoice — but only when the invoice history clearly starts earlier (so it is a real first buy).
 export const productStartDates = ({ itemsExtra = {}, purchaseLines = [] } = {}) => {
