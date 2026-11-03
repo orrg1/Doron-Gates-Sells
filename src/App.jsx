@@ -8,7 +8,7 @@ import { loadClothing, dueCount as clothingDueCount } from './clothingModel.js';
 import * as XLSXLib from 'xlsx';
 import { supabase, flushAll, queueDataset, subscribeStatus } from './cloud.js';
 import { OWN_MADE, procStatus, PROC_STATUS_LABEL, procChip, computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './core/procModel.js';
-import { inactiveSkusOf, inactiveWithStock, salesOverview, dueToReorder, supplierReturns, orderCalendar, priceCheck, stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier } from './core/data.js';
+import { inactiveSkusOf, inactiveWithStock, salesOverview, dueToReorder, supplierReturns, orderCalendar, priceCheck, stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier, withShipMarks, shipDeliveryText, SHIP_TRUCK_TYPES, mergeShipmentFile } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
@@ -1398,11 +1398,16 @@ const CustomersPage = ({ requestedTab = null, onRequestedTabHandled = null, mont
 // Same numbers as the weekly email and the procurement page (buildDigest on the stored data).
 const OVERVIEW_APP_KEYS = ['procurementStock','procurementSupplier','procurementCost','procurementCurrency','exchangeRates','openOrders','procShipSupplierMap',
   'procOutlierDecisions','procurementLeadTime','procLeadAddTransit','excludeCurrentMonth','procSkipStockoutMonths','procurementMinStock','procurementCostHistory',
-  'procurementMOQ','procurementNames','prioritySyncAt','procAvgWindow','procMonthsToStock','procDefaultLeadTime','procOrderBlock','procShipPoLinks','procShipReceived'];
+  'procurementMOQ','procurementNames','prioritySyncAt','procAvgWindow','procMonthsToStock','procDefaultLeadTime','procOrderBlock','procShipPoLinks','procShipReceived','procShipDelivery'];
 const readAppState = (keys) => { const o = {}; keys.forEach(k => { let v = null; try { v = localStorage.getItem(k); } catch { /* none */ } if (v == null) return; try { o[k] = JSON.parse(v); } catch { o[k] = v; } }); return o; };
 const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpenProc, salesLines = [], stoppedCount = 0, dueCount = 0 }) => {
   const [sets, setSets] = useState(null);
   const [openMove, setOpenMove] = useState(null);
+  const [marksAt, setMarksAt] = useState(0); // bumps after a shipment is marked here → the digest re-reads the marks
+  const markReceivedHere = (id) => {
+    try { const m = JSON.parse(localStorage.getItem('procShipReceived') || '{}'); m[id] = new Date().toISOString().slice(0, 10); localStorage.setItem('procShipReceived', JSON.stringify(m)); } catch { /* best-effort */ }
+    setMarksAt(Date.now());
+  };
   useEffect(() => {
     let off = false;
     (async () => {
@@ -1416,7 +1421,7 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
   const digest = useMemo(() => {
     if (!sets || !salesLines.length) return null;
     try { return buildDigest({ app: readAppState(OVERVIEW_APP_KEYS), sets: { ...sets, procSalesLines: salesLines } }); } catch (e) { console.error('overview', e); return null; }
-  }, [sets, salesLines]);
+  }, [sets, salesLines, marksAt]); // eslint-disable-line react-hooks/exhaustive-deps
   const clothingDue = useMemo(() => { try { return clothingDueCount(loadClothing()); } catch { return 0; } }, []);
   const countPending = useMemo(() => { try { return (JSON.parse(localStorage.getItem('stockCount') || '{}').items || []).filter(x => x.counted != null && x.sysAtCount != null && x.counted !== x.sysAtCount && !x.done).length; } catch { return 0; } }, []);
   const muted = isDarkMode ? 'text-slate-400' : 'text-slate-500', strong = isDarkMode ? 'text-slate-100' : 'text-slate-800';
@@ -1447,6 +1452,7 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
     { k: 'make', t: 'לייצור עצמי', v: digest ? digest.toMake : '…', sub: 'מוצרים לייצר', go: () => onOpenProc('suppliers'), tone: digest?.toMake ? 'soon' : 'ok', hide: digest && !digest.toMake },
     { k: 'late', t: 'הזמנות רכש באיחור', v: digest ? digest.latePOLines : '…', sub: 'שורות', go: () => onOpenProc('orders'), tone: digest?.latePOLines ? 'soon' : 'ok' },
     { k: 'ship', t: 'משלוחים בדרך', v: o ? o.inTransitCount : '…', sub: o ? `${o.arrivingWeek} מגיעים השבוע${o.delayedCount ? ` · ${o.delayedCount} נדחו` : ''}` : '', go: () => onOpenProc('shipments'), tone: o?.delayedCount ? 'soon' : 'ok' },
+    { k: 'truck', t: 'לתאם הובלה', v: o ? o.toBook : '…', sub: 'משלוחים בנמל בלי הובלה מתואמת', go: () => onOpenProc('shipments'), tone: 'soon', hide: !o || !o.toBook },
     { k: 'price', t: 'מחירים לבדיקה', v: o ? o.priceCheck : '…', sub: o ? `${o.priceHigh} במחיר גבוה` : '', go: () => onOpenProc('prices'), tone: o?.priceHigh ? 'soon' : 'ok' },
     { k: 'due', t: 'לקוחות שהגיע זמנם', v: dueCount, sub: 'עברו את הזמן הרגיל שלהם', go: () => onOpenCustomers ? onOpenCustomers('due') : setActiveTab('customers'), tone: dueCount ? 'soon' : 'ok' },
     { k: 'stop', t: 'לקוחות שהפסיקו', v: stoppedCount, sub: 'מוצר שהפסיקו לקנות', go: () => onOpenCustomers ? onOpenCustomers('stopped') : setActiveTab('customers'), tone: 'ok' },
@@ -1515,26 +1521,35 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
         <section aria-label="משלוחים בדרך" className={`${card} overflow-hidden`}>
           <div className="px-4 py-3 flex flex-wrap items-baseline gap-x-3">
             <h2 className={`font-bold ${strong}`}>משלוחים בדרך ({o.inTransit.length})</h2>
-            <span className={`text-xs ${muted}`}>{o.arrivingWeek} מגיעים השבוע{o.delayedCount ? ` · ${o.delayedCount} נדחו` : ''} · מסודר לפי תאריך הגעה</span>
-            <button type="button" onClick={() => onOpenProc('shipments')} className={`mr-auto text-xs font-semibold underline ${isDarkMode ? 'text-blue-300' : 'text-blue-700'}`}>לכל הפרטים</button>
+            <span className={`text-xs ${muted}`}>{o.arrivingWeek} מגיעים השבוע{o.atPort ? ` · ${o.atPort} בנמל` : ''}{o.toBook ? ` · ${o.toBook} לתאם הובלה` : ''}{o.delayedCount ? ` · ${o.delayedCount} נדחו` : ''} · לפי תאריך הגעה לנמל</span>
+            <button type="button" onClick={() => onOpenProc('shipments')} className={`mr-auto text-xs font-semibold underline ${isDarkMode ? 'text-blue-300' : 'text-blue-700'}`}>לכל הפרטים ותיאום הובלה</button>
           </div>
           <div className="overflow-x-auto">
-            <table className={`w-full text-sm text-right min-w-[720px] ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
+            <table className={`w-full text-sm text-right min-w-[820px] ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
               <thead className={`text-[11px] font-semibold ${isDarkMode ? 'bg-slate-900 text-slate-400' : 'bg-slate-50 text-slate-500'}`}>
-                <tr>{['ספק', 'מכולה', 'שלב', 'הגעה משוערת', 'עוד', 'שינוי', 'הזמנות במשלוח'].map(h => <th key={h} className="px-3 py-2">{h}</th>)}</tr>
+                <tr>{['ספק', 'מכולה', 'שלב', 'הגעה לנמל', 'עוד', 'הובלה', 'שינוי', 'הזמנות במשלוח', ''].map((h, i) => <th key={i} className="px-3 py-2">{h}</th>)}</tr>
               </thead>
               <tbody className={`divide-y ${isDarkMode ? 'divide-slate-700/50' : 'divide-slate-100'}`}>
-                {o.inTransit.map(x => (
-                  <tr key={x.id} className={x.thisWeek ? (isDarkMode ? 'bg-blue-500/10' : 'bg-blue-50/70') : ''}>
-                    <td className={`px-3 py-2 font-semibold ${strong}`}>{x.sup}</td>
-                    <td className="px-3 py-2 text-xs font-mono">{x.cont || '—'}</td>
-                    <td className="px-3 py-2 text-xs">{x.stage}</td>
-                    <td className={`px-3 py-2 text-xs ${x.thisWeek ? `font-bold ${strong}` : ''}`}>{x.arr ? isoToDisplay(x.arr) : 'לא ידוע'}{x.thisWeek && <span className="mr-1 text-[10px] font-bold text-blue-500">השבוע</span>}</td>
-                    <td className="px-3 py-2 text-xs tabular-nums">{x.days == null ? '—' : x.days <= 0 ? 'היום' : `${x.days} ימים`}</td>
-                    <td className="px-3 py-2 text-xs">{x.delayDays > 0 ? <span className={isDarkMode ? 'text-orange-300 font-semibold' : 'text-orange-700 font-semibold'}>נדחה {x.delayDays} ימים (היה {isoToDisplay(x.from)})</span> : x.delayDays < 0 ? <span className="text-emerald-500 font-semibold">הוקדם {-x.delayDays} ימים</span> : '—'}</td>
-                    <td className="px-3 py-2 text-xs font-mono">{x.pos.length ? x.pos.join(', ') : <span className={muted}>לא שויך</span>}</td>
-                  </tr>
-                ))}
+                {o.inTransit.map(x => {
+                  const truck = x.stageIdx === 2 ? shipDeliveryText({ delivery: x.delivery }, { idx: 2 }) : '';
+                  const toDo = x.stageIdx === 2 && !x.delivery?.booked;
+                  return (
+                    <tr key={x.id} className={x.thisWeek ? (isDarkMode ? 'bg-blue-500/10' : 'bg-blue-50/70') : toDo ? (isDarkMode ? 'bg-orange-500/5' : 'bg-orange-50/60') : ''}>
+                      <td className="px-3 py-2">
+                        <p className={`font-bold ${strong}`}>{x.sup || <Missing/>}</p>
+                        {x.matched && x.fwdSup && x.fwdSup !== x.sup && <p className={`text-[11px] ${muted}`}>{x.fwdSup}</p>}
+                      </td>
+                      <td className="px-3 py-2 text-xs font-mono">{x.cont || <Missing/>}</td>
+                      <td className="px-3 py-2 text-xs">{x.stage}</td>
+                      <td className={`px-3 py-2 text-xs ${x.thisWeek ? `font-bold ${strong}` : ''}`}>{x.arr ? isoToDisplay(x.arr) : <Missing/>}{x.thisWeek && <span className="mr-1 text-[10px] font-bold text-blue-500">השבוע</span>}</td>
+                      <td className="px-3 py-2 text-xs tabular-nums">{x.days == null ? '—' : x.days < 0 ? `לפני ${-x.days} ימים` : x.days === 0 ? 'היום' : `${x.days} ימים`}</td>
+                      <td className="px-3 py-2 text-xs">{truck ? <button type="button" onClick={() => onOpenProc('shipments')} className={`text-right ${toDo ? 'font-bold text-orange-600 underline' : (isDarkMode ? 'text-emerald-300' : 'text-emerald-700')}`}>{truck}</button> : <span className={muted}>—</span>}</td>
+                      <td className="px-3 py-2 text-xs">{x.delayDays > 0 ? <span className={isDarkMode ? 'text-orange-300 font-semibold' : 'text-orange-700 font-semibold'}>נדחה {x.delayDays} ימים (היה {isoToDisplay(x.from)})</span> : x.delayDays < 0 ? <span className={isDarkMode ? 'text-emerald-300' : 'text-emerald-700'}>הוקדם {-x.delayDays} ימים</span> : <span className={muted}>—</span>}</td>
+                      <td className="px-3 py-2 text-xs font-mono">{x.pos.length ? x.pos.join(', ') : <span className={muted}>לא שויך</span>}</td>
+                      <td className="px-3 py-2">{x.stageIdx === 2 && <button type="button" onClick={() => markReceivedHere(x.id)} className={`whitespace-nowrap text-xs font-semibold px-2.5 py-1.5 rounded-lg border ${isDarkMode ? 'border-emerald-500/40 text-emerald-300 hover:bg-emerald-500/10' : 'border-emerald-300 text-emerald-700 hover:bg-emerald-50'}`}>סמן שהגיע</button>}</td>
+                    </tr>
+                  );
+                })}
               </tbody>
             </table>
           </div>
@@ -1805,6 +1820,51 @@ const ChatWindow = ({ isOpen, onClose, onSend, messages, thinking, isDarkMode })
 };
 
 // Sort indicator
+// "חסר" — a value the forwarder's file (or the person) hasn't given yet.
+const Missing = () => <span className="text-orange-600 font-semibold">חסר</span>;
+// After the port: the person marks that the container is available for pickup, then that trucking is booked
+// (type: מכולנוע / רגילה, pickup date, free note). Saved per shipment (procShipDelivery).
+const ShipDeliveryPanel = ({ s, onChange, isDarkMode }) => {
+  const d = s.delivery || {};
+  const today = new Date().toISOString().slice(0, 10);
+  const muted = isDarkMode ? 'text-slate-400' : 'text-slate-500', strong = isDarkMode ? 'text-slate-100' : 'text-slate-800';
+  const input = `px-2 py-1.5 rounded-lg border text-sm ${isDarkMode ? 'border-slate-600 bg-slate-900 text-slate-100' : 'border-slate-300 bg-white'}`;
+  const atPort = s.stage.idx === 2;
+  return (
+    <div className={`rounded-xl border px-3 py-3 space-y-2 ${atPort && !d.booked ? (isDarkMode ? 'border-orange-500/40 bg-orange-500/5' : 'border-orange-200 bg-orange-50/60') : (isDarkMode ? 'border-slate-700' : 'border-slate-200')}`}>
+      <p className={`text-xs font-bold ${strong}`}>הובלה מהנמל{atPort && !d.booked ? <span className="mr-2 text-orange-600">{d.avail ? 'לתאם הובלה' : 'לבדוק זמינות'}</span> : null}</p>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+        <label className="inline-flex items-center gap-2 min-h-[36px]">
+          <input type="checkbox" className="w-4 h-4" checked={!!d.avail} onChange={e => onChange({ avail: e.target.checked ? (d.avail || today) : '' })}/>
+          <span className={strong}>התקבלה זמינות</span>
+        </label>
+        {d.avail && <input type="date" aria-label="תאריך זמינות" value={d.avail} onChange={e => onChange({ avail: e.target.value || today })} className={input}/>}
+      </div>
+      <div className="flex flex-wrap items-center gap-x-4 gap-y-2 text-sm">
+        <label className="inline-flex items-center gap-2 min-h-[36px]">
+          <input type="checkbox" className="w-4 h-4" checked={!!d.booked} onChange={e => onChange(e.target.checked ? { booked: true, avail: d.avail || today } : { booked: false })}/>
+          <span className={strong}>תואמה הובלה</span>
+        </label>
+        {d.booked && (
+          <>
+            <div role="group" aria-label="סוג הובלה" className="inline-flex rounded-lg border overflow-hidden text-sm">
+              {SHIP_TRUCK_TYPES.map(t => (
+                <button key={t} type="button" aria-pressed={d.type === t} onClick={() => onChange({ type: d.type === t ? '' : t })}
+                  className={`px-3 py-1.5 font-semibold ${d.type === t ? 'bg-blue-600 text-white' : (isDarkMode ? 'text-slate-300 hover:bg-slate-700' : 'text-slate-600 hover:bg-slate-50')}`}>{t}</button>
+              ))}
+            </div>
+            <label className={`inline-flex items-center gap-2 ${muted}`}>איסוף
+              <input type="date" value={d.pickup || ''} onChange={e => onChange({ pickup: e.target.value })} className={input}/>
+            </label>
+            <input type="text" aria-label="הערה להובלה" placeholder="הערה (נהג, מספר הזמנה…)" defaultValue={d.note || ''} onBlur={e => { if ((e.target.value || '') !== (d.note || '')) onChange({ note: e.target.value.trim() }); }}
+              className={`${input} flex-1 min-w-[160px]`}/>
+          </>
+        )}
+      </div>
+      {d.booked && (!d.type || !d.pickup) && <p className="text-xs text-orange-600 font-semibold">חסר: {[!d.type && 'סוג הובלה', !d.pickup && 'תאריך איסוף'].filter(Boolean).join(', ')}</p>}
+    </div>
+  );
+};
 // Grey tag for a product whose Priority item card is not active (shown only in search results).
 const InactiveBadge = ({ isDarkMode }) => (
   <span className={`mr-2 inline-block align-middle text-[10px] font-medium px-1.5 py-0.5 rounded ${isDarkMode?'bg-slate-700 text-slate-400':'bg-slate-200 text-slate-500'}`}>לא פעיל</span>
@@ -2010,6 +2070,15 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
     try { localStorage.setItem('procShipReceived', JSON.stringify(next)); } catch { /* best-effort */ }
     return next;
   });
+  // Trucking after the port, marked by hand: { shipmentId: { avail, booked, type, pickup, note } } (saved to the server).
+  const [shipDelivery, setShipDelivery] = useState(() => { try { return JSON.parse(localStorage.getItem('procShipDelivery')||'{}'); } catch { return {}; } });
+  const setDelivery = (id, patch) => setShipDelivery(prev => {
+    const cur = { ...(prev[id] || {}), ...patch };
+    Object.keys(cur).forEach(k => { if (cur[k] === '' || cur[k] === false || cur[k] == null) delete cur[k]; });
+    const next = { ...prev }; if (Object.keys(cur).length) next[id] = cur; else delete next[id];
+    try { localStorage.setItem('procShipDelivery', JSON.stringify(next)); } catch { /* best-effort */ }
+    return next;
+  });
   const [shipFilter, setShipFilter] = useState('active');
   const [shipPoManual, setShipPoManual] = useState(() => { try { return JSON.parse(localStorage.getItem('procShipPoLinks')||'{}'); } catch { return {}; } });
   const saveShipPo = (next) => { setShipPoManual(next); try { localStorage.setItem('procShipPoLinks', JSON.stringify(next)); } catch { /* best-effort */ } };
@@ -2082,26 +2151,15 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
       } else if (slot === 'shipments') {
         const parsed = parseShipments(rows);
         if (!parsed) throw new Error('לא נמצאו העמודות Supplier Name / Arrival Date בקובץ.');
-        // Track arrival-date changes between the daily files.
-        const prev = Object.fromEntries(shipments.map(s => [s.id, s]));
         const today = new Date().toISOString().slice(0,10);
-        const fresh = parsed.map(s => {
-          const old = prev[s.id];
-          let change = old?.change || null;
-          if (old && old.arr && s.arr && old.arr !== s.arr) change = { from: old.arr, to: s.arr, at: today };
-          return { ...s, change, firstSeen: old?.firstSeen || today, lastSeen: today };
-        });
-        // Shipments the forwarder dropped from today's file (usually delivered) stay — marked, not deleted.
-        const inFile = new Set(fresh.map(s => s.id));
-        const kept = shipments.filter(s => !inFile.has(s.id)).map(s => s.gone ? s : { ...s, gone: today });
-        const merged = [...fresh, ...kept];
+        const m = mergeShipmentFile(shipments, parsed, today);
+        const merged = m.merged;
         await idbSet('procShipments', merged);
         setShipments(merged);
-        const changed = merged.filter(s => s.change && s.change.at === today).length;
         saveFileMeta(slot, { name:file.name, rows:merged.length });
-        setFileMsg({ slot, kind:'ok', text:`נטענו ${fresh.length} משלוחים מהקובץ${changed?` · ${changed} שינו תאריך הגעה`:''}${kept.length?` · ${kept.length} שכבר לא בדוח נשמרו`:''}` });
+        setFileMsg({ slot, kind:'ok', text:`נטענו ${m.fresh} משלוחים מהקובץ${m.changed?` · ${m.changed} שינו תאריך הגעה`:''}${m.kept?` · ${m.kept} שכבר לא בדוח נשמרו`:''}` });
         // a pushed-back arrival date → let the server email an alert (after the file reached the server)
-        if (merged.some(s => s.change && s.change.at === today && s.change.to > s.change.from)) {
+        if (m.delayed) {
           flushAll().then(() => supabase.functions.invoke('priority-sync', { body: { action: 'alerts' } })).catch(() => { /* alerts are best-effort */ });
         }
       }
@@ -2336,15 +2394,15 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
     return [...set].sort((a,b)=>a.localeCompare(b,'he'));
   }, [purchaseLines, supplierMap, openOrders]);
   const todayIso = new Date().toISOString().slice(0,10);
-  const shipmentsEnriched = useMemo(() => shipments.map(s0 => {
-    const s = shipReceived[s0.id] ? { ...s0, received: shipReceived[s0.id] } : s0;
+  const shipmentsEnriched = useMemo(() => withShipMarks(shipments, shipReceived, shipDelivery).map(s => {
     const override = shipSupOverride[s.sup];
     const matched = override === '' ? null : (override ?? matchShipSupplier(s.sup, knownSuppliers));
     const stage = shipmentStage(s, todayIso);
     const delayDays = s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0;
     const daysToArrival = s.arr ? Math.round(daysBetween(todayIso, s.arr)) : null;
     return { ...s, matched, manual: override !== undefined, stage, delayDays, daysToArrival };
-  }).sort((a,b) => (a.stage.idx>=2) - (b.stage.idx>=2) || (a.stage.idx===3) - (b.stage.idx===3) || (a.stage.idx===3 ? (b.received||'').localeCompare(a.received||'') : (a.arr||'9999').localeCompare(b.arr||'9999'))), [shipments, shipReceived, shipSupOverride, knownSuppliers, todayIso]);
+  // received last (newest first); the rest by arrival date, nearest first, no date at the bottom
+  }).sort((a,b) => (a.stage.idx===3) - (b.stage.idx===3) || (a.stage.idx===3 ? (b.received||'').localeCompare(a.received||'') : (a.arr||'9999').localeCompare(b.arr||'9999'))), [shipments, shipReceived, shipDelivery, shipSupOverride, knownSuppliers, todayIso]);
 
   // ── Supplier lead time from real orders (PO sent → supplier invoice) ──
   const [poMeta, setPoMeta] = useState({});
@@ -3045,7 +3103,7 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   };
   const activeShipsBySupplier = useMemo(() => {
     const m = {};
-    shipmentsEnriched.filter(s => s.matched && s.stage.idx < 2).forEach(s => { (m[s.matched] ||= []).push(s); });
+    shipmentsEnriched.filter(s => s.matched && s.stage.idx <= 2).forEach(s => { (m[s.matched] ||= []).push(s); });
     return m;
   }, [shipmentsEnriched]);
   // When will what's on order for a product arrive: the supplier's next shipment
@@ -5323,8 +5381,9 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
         <div className={`rounded-2xl border px-5 py-4 flex flex-wrap items-center gap-4 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
           <Truck className="w-5 h-5 text-blue-500"/>
           <div className="flex-1 min-w-[240px]">
-            <p className={`font-bold ${strong}`}>{meta ? `קובץ המשלח נטען ${new Date(meta.at).toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}` : 'עוד לא נטען קובץ מהמשלח'}</p>
-            <p className={`text-sm ${muted}`}>מעלים כל יום את האקסל שמגיע מהמשלח ("דוח הזמנות ללקוחות"). שינוי בתאריך ההגעה מסומן. הקובץ לא מפרט מוצרים ולא מספר הזמנה — לכן בכל משלוח מסמנים איזו הזמנה בו (פעם אחת). אם המשלח או הספק רושמים את מספר ההזמנה בשדה האסמכתא, השיוך נעשה לבד.</p>
+            <p className={`font-bold ${strong}`}>{meta ? `קובץ המשלח נטען ${new Date(meta.at).toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}${meta.via==='mail' ? ' · אוטומטית מהמייל של המשלח' : ''}` : 'עוד לא נטען קובץ מהמשלח'}</p>
+            {meta && Date.now() - meta.at > 2*DAY_MS && <p className="text-sm font-semibold text-orange-600">לא הגיע קובץ חדש מהמשלח כבר {Math.floor((Date.now()-meta.at)/DAY_MS)} ימים — המידע כאן אולי לא עדכני.</p>}
+            <p className={`text-sm ${muted}`}>{meta?.via==='mail' ? 'הקובץ היומי מהמשלח ("דוח הזמנות ללקוחות") נקלט אוטומטית מהמייל; אפשר גם להעלות אותו כאן ידנית.' : 'מעלים כל יום את האקסל שמגיע מהמשלח ("דוח הזמנות ללקוחות").'} שינוי בתאריך ההגעה מסומן. הקובץ לא מפרט מוצרים ולא מספר הזמנה — לכן בכל משלוח מסמנים איזו הזמנה בו (פעם אחת). אם המשלח או הספק רושמים את מספר ההזמנה בשדה האסמכתא, השיוך נעשה לבד.</p>
           </div>
           <label className={`inline-flex items-center gap-2 px-4 py-2 rounded-xl text-sm font-semibold cursor-pointer ${meta?(isDarkMode?'border border-slate-600 text-slate-200 hover:bg-slate-700':'border border-slate-300 text-slate-700 bg-white hover:bg-slate-50'):'bg-blue-600 text-white hover:bg-blue-700'}`}>
             {fileBusy==='shipments'?<Loader2 className="w-4 h-4 animate-spin"/>:<Upload className="w-4 h-4"/>} {meta?'החלף בקובץ של היום':'העלה את קובץ המשלח'}
@@ -5336,8 +5395,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
               <select value={sortState.ships ? `${sortState.ships.key}:${sortState.ships.dir}` : ''} onChange={e=>{ const [k,d] = e.target.value.split(':'); setSort('ships', k||null, d); }}
                 style={isDarkMode?{background:'#0f172a',color:'#f1f5f9'}:{}}
                 className={`px-2 py-1.5 rounded-lg border text-sm ${isDarkMode?'border-slate-600':'border-slate-300 bg-white'}`}>
-                <option value="">כמו בקובץ</option>
-                <option value="arr:asc">הגעה — הקרוב קודם</option>
+                <option value="">הגעה — הקרוב קודם</option>
                 <option value="arr:desc">הגעה — הרחוק קודם</option>
                 <option value="delayDays:desc">הכי נדחו קודם</option>
                 <option value="sup:asc">ספק (א–ת)</option>
@@ -5350,7 +5408,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
         </div>
         {(() => {
           const cnt = { open: shipmentsEnriched.filter(x => x.stage.idx<2).length, port: shipmentsEnriched.filter(x => x.stage.idx===2).length, done: shipmentsEnriched.filter(x => x.stage.idx===3).length, all: shipmentsEnriched.length };
-          const chips = [['open','בדרך',cnt.open],['port','ממתין לאישור קבלה',cnt.port],['done','התקבלו',cnt.done],['all','הכל',cnt.all]];
+          const chips = [['open','בדרך',cnt.open],['port','בנמל / הובלה',cnt.port],['done','התקבלו',cnt.done],['all','הכל',cnt.all]];
           return shipmentsEnriched.length > 0 && (
             <div role="group" aria-label="סינון משלוחים" className="flex flex-wrap gap-2">
               <button type="button" aria-pressed={shipFilter==='active'} onClick={()=>setShipFilter('active')}
@@ -5375,18 +5433,23 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
           return (
             <section key={s.id} className={`rounded-2xl border p-5 space-y-4 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'} ${s.stage.idx===3?'opacity-70':''}`}>
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
-                <span className={`font-mono text-lg font-bold ${strong}`}>{s.cont || 'ללא מספר מכולה'}</span>
+                <div className="min-w-0">
+                  <p className={`text-lg font-bold leading-tight ${strong}`}>{s.matched || s.sup || <Missing/>}</p>
+                  <p className={`text-xs ${muted}`}>
+                    {s.matched && s.matched !== s.sup ? <>אצל המשלח: {s.sup} · </> : null}
+                    מכולה <span className="font-mono">{s.cont || <Missing/>}</span>
+                  </p>
+                </div>
                 {s.stage.idx===3 && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${isDarkMode?'bg-emerald-500/15 text-emerald-300':'bg-emerald-50 text-emerald-800'}`}>✓ התקבל {isoToDisplay(s.received)}</span>}
-                {s.stage.idx===2 && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${procChipCls('soon',isDarkMode)}`}>הגיע לנמל — לאשר קבלה</span>}
+                {s.stage.idx===2 && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${(s.stage.sub==='booked' ? (isDarkMode?'bg-emerald-500/15 text-emerald-300':'bg-emerald-50 text-emerald-800') : procChipCls('watch',isDarkMode))}`}>{shipDeliveryText(s, s.stage)}</span>}
                 {s.gone && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-100 text-slate-600'}`} title={`לא הופיע בקובץ המשלח מאז ${isoToDisplay(s.gone)}`}>לא מופיע יותר בדוח המשלח</span>}
-                <span className={`text-sm ${muted}`}>{s.sup}</span>
                 <span className={`text-sm ${muted}`}>{[s.mode, s.qty?`${s.qty} ${s.pkg||''}`.trim():'', s.from&&s.to?`מ-${s.from} ל-${s.to}`:''].filter(Boolean).join(' · ')}</span>
                 {s.delayDays>0 && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${procChipCls('watch',isDarkMode)}`}>נדחה ב-{s.delayDays} ימים (היה {isoToDisplay(s.change.from)})</span>}
                 {s.delayDays<0 && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${isDarkMode?'bg-emerald-500/15 text-emerald-300':'bg-emerald-50 text-emerald-700'}`}>הוקדם ב-{-s.delayDays} ימים</span>}
                 <div className="flex-1"/>
                 <div className="text-left">
-                  <p className={`text-xs ${muted}`}>הגעה משוערת</p>
-                  <p className={`text-lg font-bold ${strong}`}>{s.arr ? isoToDisplay(s.arr) : 'לא ידוע'}{s.daysToArrival!=null && s.daysToArrival>=0 && s.stage.idx<2 ? <span className={`text-xs font-normal mr-1 ${muted}`}>(עוד {s.daysToArrival} ימים)</span> : null}</p>
+                  <p className={`text-xs ${muted}`}>הגעה לנמל</p>
+                  <p className={`text-lg font-bold ${strong}`}>{s.arr ? isoToDisplay(s.arr) : <Missing/>}{s.daysToArrival!=null && s.daysToArrival>=0 && s.stage.idx<2 ? <span className={`text-xs font-normal mr-1 ${muted}`}>(עוד {s.daysToArrival} ימים)</span> : null}</p>
                 </div>
               </div>
               <div className="flex flex-wrap items-center gap-2">
@@ -5401,6 +5464,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                   </a>
                 ))}
               </div>
+              {s.stage.idx < 3 && <ShipDeliveryPanel s={s} onChange={patch => setDelivery(s.id, patch)} isDarkMode={isDarkMode}/>}
               <div className="flex items-center" aria-label={`שלב: ${s.stage.label}`}>
                 {STAGES.map((l,i) => (
                   <React.Fragment key={l}>
@@ -5413,9 +5477,9 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                 ))}
               </div>
               <div className={`grid grid-cols-2 md:grid-cols-4 gap-3 text-sm`}>
-                <div><p className={`text-xs ${muted}`}>הפלגה</p><p className={strong}>{s.dep?isoToDisplay(s.dep):'—'}</p></div>
-                <div><p className={`text-xs ${muted}`}>אירוע אחרון אצל המשלח</p><p className={strong}>{s.event||'—'}</p></div>
-                <div><p className={`text-xs ${muted}`}>אסמכתא</p><p className={strong}>{s.ref||'—'}{s.file?` · תיק ${s.file}`:''}</p></div>
+                <div><p className={`text-xs ${muted}`}>הפלגה</p><p className={strong}>{s.dep?isoToDisplay(s.dep):<Missing/>}</p></div>
+                <div><p className={`text-xs ${muted}`}>אירוע אחרון אצל המשלח</p><p className={strong}>{s.event||<Missing/>}</p></div>
+                <div><p className={`text-xs ${muted}`}>אסמכתא</p><p className={strong}>{s.ref||<Missing/>}{s.file?` · תיק ${s.file}`:''}</p></div>
                 <div>
                   <label htmlFor={`shipsup-${s.id}`} className={`text-xs ${muted}`}>ספק ב-Priority</label>
                   <select id={`shipsup-${s.id}`} value={s.manual ? (shipSupOverride[s.sup]||'') : '__auto'} onChange={e=>setShipSupplier(s.sup, e.target.value)}
@@ -5831,7 +5895,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
             const lateCount = overdueOrders.length;
             const priceUp = invoicePriceUps.length + poPriceDeviations.filter(o=>o.poPriceDiffPct>0).length;
             const urgentSched = scheduleData.filter(p=>p.urgency==='critical'||p.urgency==='urgent').length;
-            const activeShipCount = shipmentsEnriched.filter(x=>x.stage.idx<2).length;
+            const activeShipCount = shipmentsEnriched.filter(x=>x.stage.idx<=2).length;
             const shipDelayedCount = shipmentsEnriched.filter(x=>x.stage.idx<2 && x.delayDays>0).length;
             const groups = [
               ['החלטות', [['suppliers','ספקים',null], ['products','כל המוצרים',null], ['schedule','לוח הזמנות', urgentSched>0?{n:urgentSched,k:'now'}:null]]],

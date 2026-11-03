@@ -381,13 +381,70 @@ var parsePurchaseLines = (rows) => {
   out.sort((a, b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0);
   return out;
 };
-var shipmentStage = (s, todayIso) => {
-  if (s.received) return { idx: 3, label: "\u05D4\u05EA\u05E7\u05D1\u05DC" };
-  if (!s.dep) return { idx: 0, label: "\u05D1\u05D4\u05DB\u05E0\u05D4" };
-  if (s.dep > todayIso) return { idx: 0, label: "\u05DE\u05DE\u05EA\u05D9\u05DF \u05DC\u05D4\u05E4\u05DC\u05D2\u05D4" };
-  if (!s.arr || s.arr > todayIso) return { idx: 1, label: "\u05D1\u05D3\u05E8\u05DA" };
-  return { idx: 2, label: "\u05D4\u05D2\u05D9\u05E2 \u05DC\u05E0\u05DE\u05DC" };
+var parseShipments = (rows) => {
+  const hi = findHeaderRow(rows, ["Supplier Name", "Arrival Date"]);
+  if (hi === -1) return null;
+  const H = rows[hi].map(normHeader);
+  const g = (r, ...n) => {
+    const i = colIndex(H, ...n);
+    return i === -1 ? "" : r[i];
+  };
+  const out = [];
+  for (let i = hi + 1; i < rows.length; i++) {
+    const r = rows[i];
+    const sup = String(g(r, "Supplier Name") || "").trim();
+    if (!sup) continue;
+    const job = String(g(r, "Job Order No") || "").trim();
+    const file = String(g(r, "File Number") || "").trim();
+    out.push({
+      id: job || file || `${sup}-${i}`,
+      job,
+      file: /^0*$/.test(file) ? "" : file,
+      ref: String(g(r, "Customer Reference") || "").trim(),
+      sup,
+      from: String(g(r, "Load Port") || "").trim(),
+      to: String(g(r, "Discharge Port") || "").trim(),
+      pickup: toIsoDate(g(r, "Pick Up Date")),
+      dep: toIsoDate(g(r, "Departure Date")),
+      arr: toIsoDate(g(r, "Arrival Date")),
+      mode: String(g(r, "FCL/LCL") || "").trim(),
+      qty: num(g(r, "QTY")),
+      pkg: String(g(r, "Freight Package Desc") || "").trim(),
+      cont: String(g(r, "Containers List") || "").trim(),
+      event: String(g(r, "Last Event Desc") || "").trim(),
+      transport: String(g(r, "Transport Type") || "").trim()
+    });
+  }
+  return out;
 };
+var mergeShipmentFile = (prevList = [], parsed = [], today = (/* @__PURE__ */ new Date()).toISOString().slice(0, 10)) => {
+  const prev = Object.fromEntries(prevList.map((s) => [s.id, s]));
+  const fresh = parsed.map((s) => {
+    const old = prev[s.id];
+    let change = old?.change || null;
+    if (old && old.arr && s.arr && old.arr !== s.arr) change = { from: old.arr, to: s.arr, at: today };
+    return { ...s, change, firstSeen: old?.firstSeen || today, lastSeen: today };
+  });
+  const inFile = new Set(fresh.map((s) => s.id));
+  const kept = prevList.filter((s) => !inFile.has(s.id)).map((s) => s.gone ? s : { ...s, gone: today });
+  const merged = [...fresh, ...kept];
+  const changedToday = merged.filter((s) => s.change && s.change.at === today);
+  return { merged, fresh: fresh.length, kept: kept.length, changed: changedToday.length, delayed: changedToday.some((s) => s.change.to > s.change.from) };
+};
+var shipmentStage = (s, todayIso) => {
+  if (s.received) return { idx: 3, label: "\u05D4\u05EA\u05E7\u05D1\u05DC", sub: "received" };
+  const d = s.delivery || {};
+  if (d.booked) return { idx: 2, label: "\u05D4\u05D5\u05D1\u05DC\u05D4 \u05EA\u05D5\u05D0\u05DE\u05D4", sub: "booked" };
+  if (d.avail) return { idx: 2, label: "\u05D6\u05DE\u05D9\u05DF \u05DC\u05D0\u05D9\u05E1\u05D5\u05E3", sub: "avail" };
+  if (!s.dep) return { idx: 0, label: "\u05D1\u05D4\u05DB\u05E0\u05D4", sub: "prep" };
+  if (s.dep > todayIso) return { idx: 0, label: "\u05DE\u05DE\u05EA\u05D9\u05DF \u05DC\u05D4\u05E4\u05DC\u05D2\u05D4", sub: "prep" };
+  if (!s.arr || s.arr > todayIso) return { idx: 1, label: "\u05D1\u05D3\u05E8\u05DA", sub: "sea" };
+  return { idx: 2, label: "\u05D1\u05E0\u05DE\u05DC", sub: "port" };
+};
+var withShipMarks = (shipments = [], received = {}, delivery = {}) => shipments.map((s) => {
+  const r = received[s.id], d = delivery[s.id];
+  return r || d ? { ...s, ...r ? { received: r } : {}, ...d ? { delivery: d } : {} } : s;
+});
 var SHIP_NAME_STOP = /* @__PURE__ */ new Set(["LTD", "LIMITED", "CO", "COMPANY", "CORP", "CORPORATION", "INC", "GMBH", "SPA", "SRL", "SA", "INTERNATIONAL", "TRADE", "TRADING", "INDUSTRY", "INDUSTRIAL", "TECHNOLOGY", "TECH", "INTELLIGENT", "ELECTRIC", "ELECTRONIC", "ELECTRONICS", "MACHINE", "MOTORS", "MOTOR", "SHUTTER", "HARDWARE", "GROUP", "AND", "THE", "CITY", "CHINA", "GUANGDONG", "NINGBO", "ZHEJIANG", "SHANGHAI", "SHENZHEN", "XIAMEN", "JIANGSU", "FUJIAN", "UND", "AUTOMATISMI", "AUTOMATION", "SYSTEMS", "SYSTEM"]);
 var matchShipSupplier = (fwdName, candidates) => {
   const words = String(fwdName).toUpperCase().replace(/[^A-Z0-9 ]/g, " ").split(/\s+/).filter(Boolean);
@@ -420,7 +477,7 @@ var linkShipmentsToPOs = ({ shipments = [], orders = [], manual = {} }) => {
   orders.forEach((o) => {
     if (o.poNumber && o.supplier) (posBySup[o.supplier] ||= /* @__PURE__ */ new Set()).add(o.poNumber);
   });
-  const active = shipments.filter((s) => s.matched && s.stage?.idx < 2);
+  const active = shipments.filter((s) => s.matched && s.stage?.idx <= 2);
   const activeBySup = {};
   active.forEach((s) => {
     (activeBySup[s.matched] ||= []).push(s);
@@ -440,7 +497,7 @@ var linkShipmentsToPOs = ({ shipments = [], orders = [], manual = {} }) => {
       howByShip[s.id] = "ref";
       return;
     }
-    if (s.stage?.idx < 2 && pos.length === 1 && (activeBySup[s.matched] || []).length === 1) {
+    if (s.stage?.idx <= 2 && pos.length === 1 && (activeBySup[s.matched] || []).length === 1) {
       byShip[s.id] = pos;
       howByShip[s.id] = "only";
       return;
@@ -1758,8 +1815,7 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
   const salesLinesAll = sets.procSalesLines || [];
   const salesLines = salesLinesAll.filter((l) => !l.x);
   const purchaseLines = sets.procPurchaseLines || [];
-  const shipReceived = app.procShipReceived || {};
-  const shipments = (sets.procShipments || []).map((s) => shipReceived[s.id] ? { ...s, received: shipReceived[s.id] } : s);
+  const shipments = withShipMarks(sets.procShipments || [], app.procShipReceived || {}, app.procShipDelivery || {});
   const stockMap = app.procurementStock || {};
   const supplierMap = app.procurementSupplier || {};
   const costMap = app.procurementCost || {}, currencyMap = app.procurementCurrency || {};
@@ -1898,17 +1954,25 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
       const blocked = new Set(products.filter((p) => p.orderBlocked).map((p) => p.sku));
       const pc = Object.values(priceCheck(hist, { now, poPrice, catalog, names })).filter((x) => !blocked.has(x.k));
       const shipsAll = shipments.map((s) => ({ ...s, matched: supOf(s), stage: shipmentStage(s, today), delayDays: s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0 }));
-      const active = shipsAll.filter((s) => s.stage.idx < 2);
+      const active = shipsAll.filter((s) => s.stage.idx <= 2);
       const links = linkShipmentsToPOs({ shipments: shipsAll, orders: ordersEnriched, manual: app.procShipPoLinks || {} });
       const arriving = active.filter((s) => s.arr && s.arr >= today && s.arr <= wk);
       const inTransit = active.map((s) => ({
         id: s.id,
         sup: s.matched || s.sup,
         fwdSup: s.sup,
+        matched: !!s.matched,
         cont: s.cont,
         arr: s.arr,
         dep: s.dep,
         stage: s.stage.label,
+        stageIdx: s.stage.idx,
+        sub: s.stage.sub,
+        delivery: s.delivery || null,
+        fromPort: s.from || "",
+        toPort: s.to || "",
+        mode: s.mode || "",
+        gone: s.gone || null,
         days: s.arr ? Math.round(daysBetween(today, s.arr)) : null,
         delayDays: s.delayDays,
         from: s.change?.from || null,
@@ -1927,6 +1991,8 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
         delayedCount: delayed.length,
         inTransitCount: active.length,
         inTransit,
+        atPort: active.filter((s) => s.stage.idx === 2).length,
+        toBook: active.filter((s) => s.stage.idx === 2 && !s.delivery?.booked).length,
         priceHigh: pc.filter((x) => x.verdict === "high").length,
         priceCheck: pc.filter((x) => x.verdict !== "ok").length
       };
@@ -2030,7 +2096,9 @@ export {
   describeFromMetadata,
   finalizeSync,
   isoDaysAgo,
+  mergeShipmentFile,
   monthWindows,
+  parseShipments,
   pickAlerts,
   planSteps,
   renderAlertsHtml,

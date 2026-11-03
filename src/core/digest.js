@@ -2,7 +2,7 @@
 // Uses the same model as the procurement page (procModel.js), so the numbers
 // in the email match the website.
 import { mergeLinesIntoMonthly, detectOutliers, saleLineId, supplierLeadTimes, matchShipSupplier, shipmentStage, daysBetween, stockTimelines, stockoutSummary,
-  purchasePriceHistory, priceIncreases, priceCheck, linkShipmentsToPOs, returnsAnalysis, productStartDates, inactiveSkusOf, DAY_MS, isoToDisplay } from './data.js';
+  purchasePriceHistory, priceIncreases, priceCheck, linkShipmentsToPOs, returnsAnalysis, productStartDates, inactiveSkusOf, withShipMarks, DAY_MS, isoToDisplay } from './data.js';
 import { computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './procModel.js';
 
 // Items that sell but whose stock + incoming is well beyond the plan's need.
@@ -105,8 +105,7 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
   const salesLines = salesLinesAll.filter(l => !l.x);
   const purchaseLines = sets.procPurchaseLines || [];
   // shipments the person marked as received are done — not "on the way" anymore
-  const shipReceived = app.procShipReceived || {};
-  const shipments = (sets.procShipments || []).map(s => shipReceived[s.id] ? { ...s, received: shipReceived[s.id] } : s);
+  const shipments = withShipMarks(sets.procShipments || [], app.procShipReceived || {}, app.procShipDelivery || {});
   const stockMap = app.procurementStock || {};
   const supplierMap = app.procurementSupplier || {};
   const costMap = app.procurementCost || {}, currencyMap = app.procurementCurrency || {};
@@ -201,10 +200,12 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
       const blocked = new Set(products.filter(p => p.orderBlocked).map(p => p.sku));
       const pc = Object.values(priceCheck(hist, { now, poPrice, catalog, names })).filter(x => !blocked.has(x.k));
       const shipsAll = shipments.map(s => ({ ...s, matched: supOf(s), stage: shipmentStage(s, today), delayDays: s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0 }));
-      const active = shipsAll.filter(s => s.stage.idx < 2);
+      // everything not yet marked received: at sea, waiting to sail, at the port / trucking
+      const active = shipsAll.filter(s => s.stage.idx <= 2);
       const links = linkShipmentsToPOs({ shipments: shipsAll, orders: ordersEnriched, manual: app.procShipPoLinks || {} });
       const arriving = active.filter(s => s.arr && s.arr >= today && s.arr <= wk);
-      const inTransit = active.map(s => ({ id: s.id, sup: s.matched || s.sup, fwdSup: s.sup, cont: s.cont, arr: s.arr, dep: s.dep, stage: s.stage.label,
+      const inTransit = active.map(s => ({ id: s.id, sup: s.matched || s.sup, fwdSup: s.sup, matched: !!s.matched, cont: s.cont, arr: s.arr, dep: s.dep, stage: s.stage.label, stageIdx: s.stage.idx, sub: s.stage.sub,
+        delivery: s.delivery || null, fromPort: s.from || '', toPort: s.to || '', mode: s.mode || '', gone: s.gone || null,
         days: s.arr ? Math.round(daysBetween(today, s.arr)) : null, delayDays: s.delayDays, from: s.change?.from || null, pos: links.byShip[s.id] || [], thisWeek: !!(s.arr && s.arr >= today && s.arr <= wk) }))
         .sort((a, b) => (a.arr || '9999') < (b.arr || '9999') ? -1 : 1);
       return {
@@ -212,6 +213,7 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
         toOrder: products.filter(p => p.suggestedOrder > 0 && p.currentStock != null && !p.ownMade).length,
         toOrderValue: products.filter(p => p.suggestedOrder > 0 && p.currentStock != null && !p.ownMade).reduce((a, p) => a + (p.orderCost || 0), 0),
         arrivingWeek: arriving.length, delayedCount: delayed.length, inTransitCount: active.length, inTransit,
+        atPort: active.filter(s => s.stage.idx === 2).length, toBook: active.filter(s => s.stage.idx === 2 && !s.delivery?.booked).length,
         priceHigh: pc.filter(x => x.verdict === 'high').length, priceCheck: pc.filter(x => x.verdict !== 'ok').length,
       };
     })(),

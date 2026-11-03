@@ -560,12 +560,49 @@ export const parseShipments = (rows) => {
 };
 
 // Where a shipment is, in plain words — from its dates (the event text is free-form).
+// A new forwarder file over the stored shipments: arrival-date changes are tracked between the daily files,
+// and shipments missing from today's file (usually delivered) stay — marked `gone`, not deleted.
+export const mergeShipmentFile = (prevList = [], parsed = [], today = new Date().toISOString().slice(0, 10)) => {
+  const prev = Object.fromEntries(prevList.map(s => [s.id, s]));
+  const fresh = parsed.map(s => {
+    const old = prev[s.id];
+    let change = old?.change || null;
+    if (old && old.arr && s.arr && old.arr !== s.arr) change = { from: old.arr, to: s.arr, at: today };
+    return { ...s, change, firstSeen: old?.firstSeen || today, lastSeen: today };
+  });
+  const inFile = new Set(fresh.map(s => s.id));
+  const kept = prevList.filter(s => !inFile.has(s.id)).map(s => s.gone ? s : { ...s, gone: today });
+  const merged = [...fresh, ...kept];
+  const changedToday = merged.filter(s => s.change && s.change.at === today);
+  return { merged, fresh: fresh.length, kept: kept.length, changed: changedToday.length, delayed: changedToday.some(s => s.change.to > s.change.from) };
+};
+// Stages: 0 waiting to sail · 1 at sea · 2 at the port (→ available for pickup → trucking booked) · 3 received.
+// The forwarder's file only knows the arrival at the port; what happens after it (the port releases the
+// container, the person books a truck) is marked by hand on the site — s.delivery = { avail, booked, type, pickup, note }.
+export const SHIP_TRUCK_TYPES = ['מכולנוע', 'רגילה'];
 export const shipmentStage = (s, todayIso) => {
-  if (s.received) return { idx:3, label:'התקבל' };
-  if (!s.dep) return { idx:0, label:'בהכנה' };
-  if (s.dep > todayIso) return { idx:0, label:'ממתין להפלגה' };
-  if (!s.arr || s.arr > todayIso) return { idx:1, label:'בדרך' };
-  return { idx:2, label:'הגיע לנמל' };
+  if (s.received) return { idx:3, label:'התקבל', sub:'received' };
+  const d = s.delivery || {};
+  if (d.booked) return { idx:2, label:'הובלה תואמה', sub:'booked' };
+  if (d.avail) return { idx:2, label:'זמין לאיסוף', sub:'avail' };
+  if (!s.dep) return { idx:0, label:'בהכנה', sub:'prep' };
+  if (s.dep > todayIso) return { idx:0, label:'ממתין להפלגה', sub:'prep' };
+  if (!s.arr || s.arr > todayIso) return { idx:1, label:'בדרך', sub:'sea' };
+  return { idx:2, label:'בנמל', sub:'port' };
+};
+// Merge the person's marks (received / delivery) into the forwarder's rows.
+export const withShipMarks = (shipments = [], received = {}, delivery = {}) => shipments.map(s => {
+  const r = received[s.id], d = delivery[s.id];
+  return r || d ? { ...s, ...(r ? { received: r } : {}), ...(d ? { delivery: d } : {}) } : s;
+});
+// Short text for the trucking status of a shipment (overview table, cards).
+export const shipDeliveryText = (s, stage) => {
+  const d = s.delivery || {};
+  if (stage.idx === 3) return 'התקבל';
+  if (d.booked) return ['תואם', d.type || '', d.pickup ? isoToDisplay(d.pickup) : ''].filter(Boolean).join(' · ');
+  if (d.avail) return 'זמין — לתאם הובלה';
+  if (stage.idx === 2) return 'בנמל — לבדוק זמינות';
+  return '';
 };
 
 // Forwarder supplier names are English ("JIE LONG SHUTTER MOTORS LTD"), Priority
@@ -596,7 +633,7 @@ export const matchShipSupplier = (fwdName, candidates) => {
 export const linkShipmentsToPOs = ({ shipments = [], orders = [], manual = {} }) => {
   const posBySup = {};
   orders.forEach(o => { if (o.poNumber && o.supplier) (posBySup[o.supplier] ||= new Set()).add(o.poNumber); });
-  const active = shipments.filter(s => s.matched && s.stage?.idx < 2);
+  const active = shipments.filter(s => s.matched && s.stage?.idx <= 2);
   const activeBySup = {}; active.forEach(s => { (activeBySup[s.matched] ||= []).push(s); });
   const byShip = {}, howByShip = {};
   shipments.forEach(s => {
@@ -605,7 +642,7 @@ export const linkShipmentsToPOs = ({ shipments = [], orders = [], manual = {} })
     const ref = String(s.ref || '').toUpperCase();
     const inRef = pos.filter(po => ref && ref.includes(String(po).toUpperCase()));
     if (inRef.length) { byShip[s.id] = inRef; howByShip[s.id] = 'ref'; return; }
-    if (s.stage?.idx < 2 && pos.length === 1 && (activeBySup[s.matched] || []).length === 1) { byShip[s.id] = pos; howByShip[s.id] = 'only'; return; }
+    if (s.stage?.idx <= 2 && pos.length === 1 && (activeBySup[s.matched] || []).length === 1) { byShip[s.id] = pos; howByShip[s.id] = 'only'; return; }
     byShip[s.id] = []; howByShip[s.id] = null;
   });
   const shipByPo = {};

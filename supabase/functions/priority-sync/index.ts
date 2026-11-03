@@ -13,9 +13,12 @@
 //     { action:'weekly' } Sundays at 04:00 and 05:00 UTC — sends the summary email when it is 07:00 in Israel.
 //   • the website: { action:'digest', send?:true } — preview the weekly email (or send it now).
 //   • the website: { action:'alerts' } — check for new alerts now (also runs after every finished sync).
+//   • a Google Apps Script in the mailbox (header x-ingest-token): { action:'shipments-file', name, data(base64 xlsx), from, date }
+//     — the forwarder's daily Excel, straight from the email, so nobody has to upload it.
 // Priority is only ever read (GET).
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
-import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml, pickAlerts, renderAlertsHtml } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/a0bf16f14c98b306734acf66826c3d31c0e2a1d0/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
+import * as XLSX from 'npm:xlsx@0.18.5';
+import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml, pickAlerts, renderAlertsHtml, parseShipments, mergeShipmentFile } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/a0bf16f14c98b306734acf66826c3d31c0e2a1d0/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
 
 const ROOT = (Deno.env.get('PRIORITY_ROOT') || 'https://p.priority-connect.online/odata/Priority/tabA974E.ini/gate').replace(/\/+$/, '');
 const PAT = Deno.env.get('PRIORITY_PAT') || '';
@@ -216,6 +219,7 @@ async function tick() {
       // fresh data → check for new alerts (never fails the sync)
       let alerts: unknown = null;
       try { alerts = await runAlerts(`sync ${job.trigger}`); } catch (e) { alerts = { error: String((e as Error).message || e) }; }
+      try { await staleShipmentsAlert(); } catch { /* best-effort */ }
       return { done: true, id: job.id, alerts };
     }
     await saveJob(job, { lease_until: null });
@@ -235,7 +239,7 @@ const SITE_URL = 'https://orrg1.github.io/Doron-Gates-Sells/';
 async function digestData() {
   const app = await readState(['procurementStock', 'procurementSupplier', 'procurementCost', 'procurementCurrency', 'exchangeRates', 'openOrders', 'procShipSupplierMap',
     'procOutlierDecisions', 'procurementLeadTime', 'procLeadAddTransit', 'excludeCurrentMonth', 'procSkipStockoutMonths', 'procurementMinStock', 'procurementCostHistory',
-    'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime', 'procOrderBlock', 'procShipPoLinks', 'procShipReceived']);
+    'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime', 'procOrderBlock', 'procShipPoLinks', 'procShipReceived', 'procShipDelivery']);
   const sets: Record<string, unknown> = {};
   for (const k of ['procSalesLines', 'procPurchaseLines', 'procShipments', 'stockHistory', 'procPoMeta', 'procItemsExtra', 'dashboardSalesData']) sets[k] = await readDataset(k);
   return buildDigest({ app, sets });
@@ -260,6 +264,41 @@ async function sendDigest(by: string) {
   await writeState({ digestSentAt: { at: new Date().toISOString(), by, id: m.id, to: m.to } });
   return { sent: true, id: m.id, to: m.to };
 }
+// ── the forwarder's daily file, sent by the mailbox script ──
+const SHIP_SENDER = /@united-il\.com\b/i;
+async function ingestShipments(body: any) {
+  if (!SHIP_SENDER.test(String(body.from || ''))) return { status: 403, out: { error: 'sender not allowed' } };
+  if (!body.data) return { status: 400, out: { error: 'no file' } };
+  const bytes = Uint8Array.from(atob(String(body.data)), c => c.charCodeAt(0));
+  const wb = XLSX.read(bytes, { type: 'array', cellDates: true });
+  const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', raw: true });
+  const parsed = parseShipments(rows);
+  if (!parsed) return { status: 422, out: { error: 'not a shipments file (no Supplier Name / Arrival Date columns)', skip: true } };
+  const today = new Date(Date.now() + 2 * 3600_000).toISOString().slice(0, 10); // Israel's date (close enough for a daily file)
+  const prev = (await readDataset('procShipments')) || [];
+  const m = mergeShipmentFile(Array.isArray(prev) ? prev : [], parsed, today);
+  await writeDataset('procShipments', m.merged);
+  const st = await readState(['procFilesMeta']);
+  const meta = { ...(st.procFilesMeta || {}) };
+  meta.shipments = { name: String(body.name || 'קובץ משלוחים מהמייל'), rows: m.merged.length, at: Date.now(), via: 'mail', mailDate: body.date || null };
+  await writeState({ procFilesMeta: meta, shipMailLast: { at: new Date().toISOString(), name: body.name || '', fresh: m.fresh, changed: m.changed, kept: m.kept } });
+  let alerts: unknown = null;
+  if (m.delayed) { try { alerts = await runAlerts('shipments mail'); } catch (e) { alerts = { error: String((e as Error).message || e) }; } }
+  return { status: 200, out: { ok: true, fresh: m.fresh, changed: m.changed, kept: m.kept, alerts } };
+}
+// No file from the forwarder for 2+ days (once the mailbox script is running) → one email a day.
+async function staleShipmentsAlert() {
+  const st = await readState(['shipMailLast', 'shipStaleAlertAt']);
+  if (!st.shipMailLast?.at) return null;
+  const age = Date.now() - Date.parse(st.shipMailLast.at);
+  if (age < 2 * 86400000) return null;
+  if (st.shipStaleAlertAt && Date.now() - Date.parse(st.shipStaleAlertAt) < 22 * 3600_000) return null;
+  const days = Math.floor(age / 86400000);
+  await sendMail(`התראה: לא הגיע קובץ משלוחים מהמשלח ${days} ימים`, `<div dir="rtl" style="font-family:Arial,sans-serif;font-size:14px">הקובץ האחרון מהמשלח (United) נקלט לפני ${days} ימים. כדאי לבדוק שהמשלח שולח את הדוח, או להעלות אותו ידנית באתר: <a href="${SITE_URL}">${SITE_URL}</a></div>`);
+  await writeState({ shipStaleAlertAt: new Date().toISOString() });
+  return { staleDays: days };
+}
+
 // Instant alerts: only what is NEW since the last check is emailed. The very first run only records
 // what is already known (otherwise the first email would list every item that is short today).
 async function runAlerts(by: string) {
@@ -292,6 +331,13 @@ Deno.serve(async (req) => {
   // caller: scheduler (secret) or a signed-in allowed user
   let caller = '';
   const secret = req.headers.get('x-sync-secret');
+  const ingest = req.headers.get('x-ingest-token');
+  if (ingest) {
+    const want = Deno.env.get('SHIP_INGEST_TOKEN') || '';
+    if (!want || ingest !== want || action !== 'shipments-file') return json({ error: 'bad token' }, 403);
+    try { const r = await ingestShipments(body); return json(r.out, r.status); }
+    catch (e) { return json({ error: String((e as Error).message || e) }, 500); }
+  }
   if (secret) {
     const { data: s } = await sb.rpc('get_sync_secret');
     if (!s || s !== secret) return json({ error: 'bad secret' }, 403);
