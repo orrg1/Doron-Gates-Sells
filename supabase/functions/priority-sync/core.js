@@ -1745,7 +1745,7 @@ var trendingProducts = (lines, { now = Date.now(), products = [], names = {}, pu
   purchaseLines.forEach((l) => {
     if (!l.junk && l.k && l.q > 0 && l.d && (!firstBuy[l.k] || l.d < firstBuy[l.k])) firstBuy[l.k] = l.d;
   });
-  const ks = Object.keys(by);
+  const ks = Object.keys(by).filter((k) => by[k].q >= 5 || by[k].pq >= 5);
   const tl = ks.length ? stockTimelines({ stockHistory, currentStock, salesLines: lines, purchaseLines, skus: ks, fromIso: b0, toIso: today }) : {};
   const prodBy = {};
   products.forEach((p) => {
@@ -1759,22 +1759,16 @@ var trendingProducts = (lines, { now = Date.now(), products = [], names = {}, pu
     const arrived = first && Date.parse(first) - Date.parse(dataStart) > 60 * DAY_MS ? first : "";
     const start = arrived && arrived > histStart ? arrived : histStart;
     const startPrev = start;
-    const outDay = {};
+    const recentFrom = start > a0 ? start : a0;
+    let prevOut = 0, recentOut = 0;
     (tl[k] || []).forEach((t) => {
-      if (t.q <= 0 && !t.neg && !x.soldDays.has(t.d)) outDay[t.d] = 1;
+      if (!(t.q <= 0 && !t.neg && !x.soldDays.has(t.d))) return;
+      if (t.d >= startPrev && t.d < a0) prevOut++;
+      else if (t.d >= recentFrom && t.d <= today) recentOut++;
     });
-    let prevDays = 0, prevOut = 0, recentDays = 0, recentOut = 0;
-    for (let t = Date.parse(startPrev); t <= now; t += DAY_MS) {
-      const d = iso2(t);
-      if (d > today) break;
-      if (d < a0) {
-        if (outDay[d]) prevOut++;
-        else prevDays++;
-      } else if (d >= start) {
-        if (outDay[d]) recentOut++;
-        else recentDays++;
-      }
-    }
+    const span = (a, b) => Math.max(0, Math.round((Date.parse(b) - Date.parse(a)) / DAY_MS));
+    const prevDays = span(startPrev, a0) - prevOut;
+    const recentDays = span(recentFrom, today) + 1 - recentOut;
     const isNew = prevDays < 30;
     const prevPace = !isNew ? x.pq / prevDays * 30 : null;
     const recentPace = recentDays > 0 ? x.q / recentDays * 30 : x.q;

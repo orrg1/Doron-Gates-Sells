@@ -17,8 +17,7 @@
 //     — the forwarder's daily Excel, straight from the email, so nobody has to upload it.
 // Priority is only ever read (GET).
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
-import * as XLSX from 'npm:xlsx@0.18.5';
-import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml, pickAlerts, renderAlertsHtml, parseShipments, mergeShipmentFile } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/a0bf16f14c98b306734acf66826c3d31c0e2a1d0/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
+import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml, pickAlerts, renderAlertsHtml, parseShipments, mergeShipmentFile } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/d1ba5ad4a5eb92eef0caccdef71720d2061f0792/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
 
 const ROOT = (Deno.env.get('PRIORITY_ROOT') || 'https://p.priority-connect.online/odata/Priority/tabA974E.ini/gate').replace(/\/+$/, '');
 const PAT = Deno.env.get('PRIORITY_PAT') || '';
@@ -270,6 +269,7 @@ async function ingestShipments(body: any) {
   if (!SHIP_SENDER.test(String(body.from || ''))) return { status: 403, out: { error: 'sender not allowed' } };
   if (!body.data) return { status: 400, out: { error: 'no file' } };
   const bytes = Uint8Array.from(atob(String(body.data)), c => c.charCodeAt(0));
+  const XLSX = await import('npm:xlsx@0.18.5'); // loaded only here — keeps every other call light
   const wb = XLSX.read(bytes, { type: 'array', cellDates: true });
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', raw: true });
   const parsed = parseShipments(rows);
