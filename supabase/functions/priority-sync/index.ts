@@ -269,7 +269,8 @@ async function ingestShipments(body: any) {
   if (!SHIP_SENDER.test(String(body.from || ''))) return { status: 403, out: { error: 'sender not allowed' } };
   if (!body.data) return { status: 400, out: { error: 'no file' } };
   const bytes = Uint8Array.from(atob(String(body.data)), c => c.charCodeAt(0));
-  const XLSX = await import('npm:xlsx@0.18.5'); // loaded only here — keeps every other call light
+  const mod: any = await import('npm:xlsx@0.18.5'); // loaded only here — keeps every other call light
+  const XLSX = mod.read ? mod : mod.default;
   const wb = XLSX.read(bytes, { type: 'array', cellDates: true });
   const rows = XLSX.utils.sheet_to_json(wb.Sheets[wb.SheetNames[0]], { header: 1, defval: '', raw: true });
   const parsed = parseShipments(rows);
