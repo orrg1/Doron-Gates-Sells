@@ -169,8 +169,13 @@ async function tick() {
     // Last step of a job, in its own run: the alerts check (the digest needs a fresh CPU budget — the merge
     // run already used much of it). The job stays 'running' for this one extra tick.
     if (job.plan?.merged) {
+      // counted BEFORE the check: a run killed by the CPU limit can't record anything — after 2 tries, close the job
+      const tries = (job.plan.alertTries || 0) + 1;
+      job.plan = { ...job.plan, alertTries: tries };
+      await saveJob(job);
       let alerts: unknown = null;
-      try { alerts = await runAlerts(`sync ${job.trigger}`); } catch (e) { alerts = { error: String((e as Error).message || e) }; }
+      if (tries > 2) alerts = { error: 'בדיקת ההתראות לא הסתיימה פעמיים — דולגה' };
+      else try { alerts = await runAlerts(`sync ${job.trigger}`); } catch (e) { alerts = { error: String((e as Error).message || e) }; }
       try { await staleShipmentsAlert(); } catch { /* best-effort */ }
       const a: any = alerts;
       addLog(job, a?.error ? `בדיקת התראות נכשלה: ${a.error}` : a?.sent ? `נשלחה התראה (${a.sent})` : 'אין התראות חדשות');
