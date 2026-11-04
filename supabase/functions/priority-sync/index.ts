@@ -252,7 +252,7 @@ const SITE_URL = 'https://orrg1.github.io/Doron-Gates-Sells/';
 async function digestData() {
   const app = await readState(['procurementStock', 'procurementSupplier', 'procurementCost', 'procurementCurrency', 'exchangeRates', 'openOrders', 'procShipSupplierMap',
     'procOutlierDecisions', 'procurementLeadTime', 'procLeadAddTransit', 'excludeCurrentMonth', 'procSkipStockoutMonths', 'procurementMinStock', 'procurementCostHistory',
-    'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime', 'procOrderBlock', 'procShipPoLinks', 'procShipReceived', 'procShipDelivery']);
+    'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime', 'procOrderBlock', 'procShipPoLinks', 'procShipReceived', 'procShipDelivery', 'procShipExtraSups']);
   const sets: Record<string, unknown> = {};
   for (const k of ['procSalesLines', 'procPurchaseLines', 'procShipments', 'stockHistory', 'procPoMeta', 'procItemsExtra', 'dashboardSalesData']) sets[k] = await readDataset(k);
   // The email looks back at most ~2 years (12-month averages, a year-ago week, the trend year) — older invoice

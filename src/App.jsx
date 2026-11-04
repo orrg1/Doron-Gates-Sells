@@ -8,7 +8,7 @@ import { loadClothing, dueCount as clothingDueCount } from './clothingModel.js';
 import * as XLSXLib from 'xlsx';
 import { supabase, flushAll, queueDataset, subscribeStatus } from './cloud.js';
 import { OWN_MADE, procStatus, PROC_STATUS_LABEL, procChip, computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './core/procModel.js';
-import { inactiveSkusOf, inactiveWithStock, salesOverview, dueToReorder, supplierReturns, orderCalendar, priceCheck, stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier, withShipMarks, shipDeliveryText, SHIP_TRUCK_TYPES, mergeShipmentFile } from './core/data.js';
+import { inactiveSkusOf, inactiveWithStock, salesOverview, dueToReorder, supplierReturns, orderCalendar, priceCheck, stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier, withShipMarks, shipDeliveryText, SHIP_TRUCK_TYPES, mergeShipmentFile, withShipSups, shipExtraSups } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
@@ -1398,7 +1398,7 @@ const CustomersPage = ({ requestedTab = null, onRequestedTabHandled = null, mont
 // Same numbers as the weekly email and the procurement page (buildDigest on the stored data).
 const OVERVIEW_APP_KEYS = ['procurementStock','procurementSupplier','procurementCost','procurementCurrency','exchangeRates','openOrders','procShipSupplierMap',
   'procOutlierDecisions','procurementLeadTime','procLeadAddTransit','excludeCurrentMonth','procSkipStockoutMonths','procurementMinStock','procurementCostHistory',
-  'procurementMOQ','procurementNames','prioritySyncAt','procAvgWindow','procMonthsToStock','procDefaultLeadTime','procOrderBlock','procShipPoLinks','procShipReceived','procShipDelivery'];
+  'procurementMOQ','procurementNames','prioritySyncAt','procAvgWindow','procMonthsToStock','procDefaultLeadTime','procOrderBlock','procShipPoLinks','procShipReceived','procShipDelivery','procShipExtraSups'];
 const readAppState = (keys) => { const o = {}; keys.forEach(k => { let v = null; try { v = localStorage.getItem(k); } catch { /* none */ } if (v == null) return; try { o[k] = JSON.parse(v); } catch { o[k] = v; } }); return o; };
 const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpenProc, salesLines = [], stoppedCount = 0, dueCount = 0 }) => {
   const [sets, setSets] = useState(null);
@@ -1536,7 +1536,7 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
                   return (
                     <tr key={x.id} className={x.thisWeek ? (isDarkMode ? 'bg-blue-500/10' : 'bg-blue-50/70') : toDo ? (isDarkMode ? 'bg-orange-500/5' : 'bg-orange-50/60') : ''}>
                       <td className="px-3 py-2">
-                        <p className={`font-bold ${strong}`}>{x.sup || <Missing/>}</p>
+                        <p className={`font-bold ${strong}`}>{x.sups?.length ? <SupNames names={x.sups}/> : (x.sup || <Missing/>)}</p>
                         {x.matched && x.fwdSup && x.fwdSup !== x.sup && <p className={`text-[11px] ${muted}`}>{x.fwdSup}</p>}
                       </td>
                       <td className="px-3 py-2 text-xs font-mono">{x.cont || <Missing/>}</td>
@@ -1820,6 +1820,8 @@ const ChatWindow = ({ isOpen, onClose, onSend, messages, thinking, isDarkMode })
 };
 
 // Sort indicator
+// Several supplier names (Hebrew and Latin mixed) — each isolated so the order never scrambles in RTL.
+const SupNames = ({ names }) => names.map((n, i) => <React.Fragment key={n}>{i > 0 && <span className="mx-1.5 opacity-50">·</span>}<bdi>{n}</bdi></React.Fragment>);
 // "חסר" — a value the forwarder's file (or the person) hasn't given yet.
 const Missing = () => <span className="text-orange-600 font-semibold">חסר</span>;
 // After the port: the person marks that the container is available for pickup, then that trucking is booked
@@ -2079,6 +2081,16 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
     try { localStorage.setItem('procShipDelivery', JSON.stringify(next)); } catch { /* best-effort */ }
     return next;
   });
+  // More than one Priority supplier in a container (same group, e.g. Beninca + HiMotion + SEAV + MyOne):
+  // { byShip: { shipId: [names] }, byFwd: { forwarder supplier name: [names] } } — byFwd is the default for that name.
+  const [shipExtraSup, setShipExtraSup] = useState(() => { try { return JSON.parse(localStorage.getItem('procShipExtraSups')||'{}'); } catch { return {}; } });
+  const saveShipExtra = (next) => { setShipExtraSup(next); try { localStorage.setItem('procShipExtraSups', JSON.stringify(next)); } catch { /* best-effort */ } };
+  const setShipExtraFor = (s, list) => saveShipExtra({ ...shipExtraSup, byShip: { ...(shipExtraSup.byShip || {}), [s.id]: list } });
+  const makeShipExtraDefault = (s, list) => {
+    const byShip = { ...(shipExtraSup.byShip || {}) };
+    shipments.forEach(x => { if (x.sup === s.sup) delete byShip[x.id]; }); // every shipment of this forwarder name follows the default
+    saveShipExtra({ byShip, byFwd: { ...(shipExtraSup.byFwd || {}), [s.sup]: list } });
+  };
   const [shipFilter, setShipFilter] = useState('active');
   const [shipPoManual, setShipPoManual] = useState(() => { try { return JSON.parse(localStorage.getItem('procShipPoLinks')||'{}'); } catch { return {}; } });
   const saveShipPo = (next) => { setShipPoManual(next); try { localStorage.setItem('procShipPoLinks', JSON.stringify(next)); } catch { /* best-effort */ } };
@@ -2400,9 +2412,9 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
     const stage = shipmentStage(s, todayIso);
     const delayDays = s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0;
     const daysToArrival = s.arr ? Math.round(daysBetween(todayIso, s.arr)) : null;
-    return { ...s, matched, manual: override !== undefined, stage, delayDays, daysToArrival };
+    return withShipSups({ ...s, matched, manual: override !== undefined, stage, delayDays, daysToArrival }, shipExtraSup);
   // received last (newest first); the rest by arrival date, nearest first, no date at the bottom
-  }).sort((a,b) => (a.stage.idx===3) - (b.stage.idx===3) || (a.stage.idx===3 ? (b.received||'').localeCompare(a.received||'') : (a.arr||'9999').localeCompare(b.arr||'9999'))), [shipments, shipReceived, shipDelivery, shipSupOverride, knownSuppliers, todayIso]);
+  }).sort((a,b) => (a.stage.idx===3) - (b.stage.idx===3) || (a.stage.idx===3 ? (b.received||'').localeCompare(a.received||'') : (a.arr||'9999').localeCompare(b.arr||'9999'))), [shipments, shipReceived, shipDelivery, shipExtraSup, shipSupOverride, knownSuppliers, todayIso]);
 
   // ── Supplier lead time from real orders (PO sent → supplier invoice) ──
   const [poMeta, setPoMeta] = useState({});
@@ -3103,7 +3115,7 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   };
   const activeShipsBySupplier = useMemo(() => {
     const m = {};
-    shipmentsEnriched.filter(s => s.matched && s.stage.idx <= 2).forEach(s => { (m[s.matched] ||= []).push(s); });
+    shipmentsEnriched.filter(s => s.stage.idx <= 2).forEach(s => s.sups.forEach(n => { (m[n] ||= []).push(s); }));
     return m;
   }, [shipmentsEnriched]);
   // When will what's on order for a product arrive: the supplier's next shipment
@@ -3112,7 +3124,7 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   const productEta = useMemo(() => {
     const m = {};
     // suppliers where at least one PO is tied to a shipment: their other POs are NOT guessed onto a shipment
-    const supWithLinks = new Set(Object.keys(shipLinks.shipByPo).map(po => shipLinks.shipByPo[po].matched));
+    const supWithLinks = new Set(Object.keys(shipLinks.shipByPo).flatMap(po => shipLinks.shipByPo[po].sups || [shipLinks.shipByPo[po].matched]));
     ordersEnriched.forEach(o => {
       const k = o.productKey || o.productName;
       const linked = o.poNumber ? shipLinks.shipByPo[o.poNumber] : null;
@@ -5425,7 +5437,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
           );
         })()}
         {sortRows('ships', shipmentsEnriched.filter(x => shipFilter==='all' ? true : shipFilter==='active' ? x.stage.idx<=2 : shipFilter==='open' ? x.stage.idx<2 : shipFilter==='port' ? x.stage.idx===2 : shipFilter==='done' ? x.stage.idx===3 : true), { stage: s => s.stage.idx, delayDays: s => s.delayDays || null }).map(s => {
-          const orders = s.matched ? ordersEnriched.filter(o => o.supplier === s.matched) : [];
+          const orders = s.sups.length ? ordersEnriched.filter(o => s.sups.includes(o.supplier)) : [];
           const supPos = [...new Set(orders.map(o => o.poNumber).filter(Boolean))].sort();
           const linkedPos = shipLinks.byShip[s.id] || [];
           const how = shipLinks.howByShip[s.id];
@@ -5434,7 +5446,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
             <section key={s.id} className={`rounded-2xl border p-5 space-y-4 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'} ${s.stage.idx===3?'opacity-70':''}`}>
               <div className="flex flex-wrap items-center gap-x-4 gap-y-2">
                 <div className="min-w-0">
-                  <p className={`text-lg font-bold leading-tight ${strong}`}>{s.matched || s.sup || <Missing/>}</p>
+                  <p className={`text-lg font-bold leading-tight ${strong}`}>{s.sups.length ? <SupNames names={s.sups}/> : (s.sup || <Missing/>)}</p>
                   <p className={`text-xs ${muted}`}>
                     {s.matched && s.matched !== s.sup ? <>אצל המשלח: {s.sup} · </> : null}
                     מכולה <span className="font-mono">{s.cont || <Missing/>}</span>
@@ -5491,8 +5503,38 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                   </select>
                 </div>
               </div>
+              {(() => {
+                const extra = shipExtraSups(s, shipExtraSup);
+                const isOwn = shipExtraSup.byShip?.[s.id] !== undefined;
+                const isDefault = !isOwn && (shipExtraSup.byFwd?.[s.sup] || []).length > 0;
+                const options = knownSuppliers.filter(n => n !== s.matched && !extra.includes(n));
+                return (
+                  <div className="space-y-1.5">
+                    <p className={`text-xs font-semibold ${muted}`}>ספקים נוספים באותה מכולה{isDefault ? ` (ברירת מחדל לכל המשלוחים של ${s.sup})` : ''}</p>
+                    <div className="flex flex-wrap items-center gap-1.5">
+                      {extra.map(n => (
+                        <span key={n} className={`inline-flex items-center gap-1 pl-1 pr-2.5 py-1 rounded-lg text-xs font-semibold ${isDarkMode?'bg-blue-500/15 text-blue-200':'bg-blue-50 text-blue-800'}`}>
+                          {n}
+                          <button type="button" aria-label={`הסר את ${n}`} onClick={() => setShipExtraFor(s, extra.filter(x => x !== n))} className="px-1 rounded hover:bg-black/10"><X className="w-3 h-3"/></button>
+                        </span>
+                      ))}
+                      <select aria-label="הוסף ספק למשלוח" value="" onChange={e => { if (e.target.value) setShipExtraFor(s, [...extra, e.target.value]); }}
+                        style={isDarkMode?{background:'#0f172a',color:'#f1f5f9'}:{}}
+                        className={`px-2 py-1.5 rounded-lg border text-sm ${isDarkMode?'border-slate-600':'border-slate-300 bg-white'}`}>
+                        <option value="">+ הוסף ספק</option>
+                        {options.map(n => <option key={n} value={n}>{n}</option>)}
+                      </select>
+                      {isOwn && extra.length > 0 && (
+                        <button type="button" onClick={() => makeShipExtraDefault(s, extra)} className={`text-xs underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>
+                          קבע כברירת מחדל לכל המשלוחים של {s.sup}
+                        </button>
+                      )}
+                    </div>
+                  </div>
+                );
+              })()}
               <div className="space-y-2">
-                {s.matched && supPos.length > 0 && (
+                {s.sups.length > 0 && supPos.length > 0 && (
                   <div>
                     <p className={`text-xs font-semibold mb-1.5 ${muted}`}>
                       איזו הזמנה במשלוח הזה? {how==='manual'?'(שייכת ידנית)':how==='ref'?'(זוהה מהאסמכתא)':how==='only'?'(הזמנה פתוחה יחידה של הספק)':'(לא שויך — סמן את ההזמנות שבמשלוח)'}
@@ -5514,7 +5556,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                     </div>
                   </div>
                 )}
-                <p className={`text-xs font-semibold mb-1.5 ${muted}`}>{!s.matched ? 'שייך ספק כדי לראות מה כנראה במשלוח' : linkedPos.length ? `במשלוח: ${shownOrders.length} שורות מ-${linkedPos.length} הזמנות` : `לא שויכה הזמנה — אלה כל השורות הפתוחות של "${s.matched}" (${orders.length})`}</p>
+                <p className={`text-xs font-semibold mb-1.5 ${muted}`}>{!s.sups.length ? 'שייך ספק כדי לראות מה כנראה במשלוח' : linkedPos.length ? `במשלוח: ${shownOrders.length} שורות מ-${linkedPos.length} הזמנות` : `לא שויכה הזמנה — אלה כל השורות הפתוחות של ${s.sups.length > 1 ? `${s.sups.length} הספקים` : `"${s.sups[0]}"`} (${orders.length})`}</p>
                 {shownOrders.length>0 && (
                   <div className="flex flex-wrap gap-1.5">
                     {shownOrders.slice(0,24).map(o => (

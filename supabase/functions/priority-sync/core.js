@@ -472,16 +472,22 @@ var matchShipSupplier = (fwdName, candidates) => {
   });
   return bestScore >= 5 ? best : null;
 };
+var shipSups = (s) => s.sups || (s.matched ? [s.matched] : []);
+var shipExtraSups = (s, extra = {}) => extra.byShip?.[s.id] ?? extra.byFwd?.[s.sup] ?? [];
+var withShipSups = (s, extra = {}) => {
+  const sups = [...new Set([s.matched, ...shipExtraSups(s, extra)].filter(Boolean))];
+  return { ...s, sups };
+};
 var linkShipmentsToPOs = ({ shipments = [], orders = [], manual = {} }) => {
   const posBySup = {};
   orders.forEach((o) => {
     if (o.poNumber && o.supplier) (posBySup[o.supplier] ||= /* @__PURE__ */ new Set()).add(o.poNumber);
   });
-  const active = shipments.filter((s) => s.matched && s.stage?.idx <= 2);
+  const active = shipments.filter((s) => shipSups(s).length && s.stage?.idx <= 2);
   const activeBySup = {};
-  active.forEach((s) => {
-    (activeBySup[s.matched] ||= []).push(s);
-  });
+  active.forEach((s) => shipSups(s).forEach((n) => {
+    (activeBySup[n] ||= []).push(s);
+  }));
   const byShip = {}, howByShip = {};
   shipments.forEach((s) => {
     if (manual[s.id]) {
@@ -489,7 +495,8 @@ var linkShipmentsToPOs = ({ shipments = [], orders = [], manual = {} }) => {
       howByShip[s.id] = "manual";
       return;
     }
-    const pos = [...posBySup[s.matched] || []];
+    const sups = shipSups(s);
+    const pos = [...new Set(sups.flatMap((n) => [...posBySup[n] || []]))];
     const ref = String(s.ref || "").toUpperCase();
     const inRef = pos.filter((po) => ref && ref.includes(String(po).toUpperCase()));
     if (inRef.length) {
@@ -497,7 +504,7 @@ var linkShipmentsToPOs = ({ shipments = [], orders = [], manual = {} }) => {
       howByShip[s.id] = "ref";
       return;
     }
-    if (s.stage?.idx <= 2 && pos.length === 1 && (activeBySup[s.matched] || []).length === 1) {
+    if (s.stage?.idx <= 2 && pos.length === 1 && sups.every((n) => (activeBySup[n] || []).length === 1)) {
       byShip[s.id] = pos;
       howByShip[s.id] = "only";
       return;
@@ -1947,15 +1954,16 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
       });
       const blocked = new Set(products.filter((p) => p.orderBlocked).map((p) => p.sku));
       const pc = Object.values(priceCheck(hist, { now, poPrice, catalog, names })).filter((x) => !blocked.has(x.k));
-      const shipsAll = shipments.map((s) => ({ ...s, matched: supOf(s), stage: shipmentStage(s, today), delayDays: s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0 }));
+      const shipsAll = shipments.map((s) => withShipSups({ ...s, matched: supOf(s), stage: shipmentStage(s, today), delayDays: s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0 }, app.procShipExtraSups || {}));
       const active = shipsAll.filter((s) => s.stage.idx <= 2);
       const links = linkShipmentsToPOs({ shipments: shipsAll, orders: ordersEnriched, manual: app.procShipPoLinks || {} });
       const arriving = active.filter((s) => s.arr && s.arr >= today && s.arr <= wk);
       const inTransit = active.map((s) => ({
         id: s.id,
-        sup: s.matched || s.sup,
+        sup: s.sups.length ? s.sups.join(" + ") : s.sup,
+        sups: s.sups,
         fwdSup: s.sup,
-        matched: !!s.matched,
+        matched: s.sups.length > 0,
         cont: s.cont,
         arr: s.arr,
         dep: s.dep,

@@ -630,19 +630,30 @@ export const matchShipSupplier = (fwdName, candidates) => {
 // 2) a PO number written in the shipment's reference field;
 // 3) a supplier with exactly one open PO and one active shipment → that PO.
 // Anything else stays unlinked — the app then says "by supplier, not by order".
+// The Priority suppliers whose goods travel in a shipment: the matched one plus any the person added
+// (one container often carries several suppliers of the same group).
+export const shipSups = (s) => s.sups || (s.matched ? [s.matched] : []);
+// Extra suppliers per shipment: set on that shipment, or the default for its forwarder name.
+// extra = { byShip: { shipId: [names] }, byFwd: { forwarderName: [names] } }
+export const shipExtraSups = (s, extra = {}) => extra.byShip?.[s.id] ?? extra.byFwd?.[s.sup] ?? [];
+export const withShipSups = (s, extra = {}) => {
+  const sups = [...new Set([s.matched, ...shipExtraSups(s, extra)].filter(Boolean))];
+  return { ...s, sups };
+};
 export const linkShipmentsToPOs = ({ shipments = [], orders = [], manual = {} }) => {
   const posBySup = {};
   orders.forEach(o => { if (o.poNumber && o.supplier) (posBySup[o.supplier] ||= new Set()).add(o.poNumber); });
-  const active = shipments.filter(s => s.matched && s.stage?.idx <= 2);
-  const activeBySup = {}; active.forEach(s => { (activeBySup[s.matched] ||= []).push(s); });
+  const active = shipments.filter(s => shipSups(s).length && s.stage?.idx <= 2);
+  const activeBySup = {}; active.forEach(s => shipSups(s).forEach(n => { (activeBySup[n] ||= []).push(s); }));
   const byShip = {}, howByShip = {};
   shipments.forEach(s => {
     if (manual[s.id]) { byShip[s.id] = manual[s.id].slice(); howByShip[s.id] = 'manual'; return; }
-    const pos = [...(posBySup[s.matched] || [])];
+    const sups = shipSups(s);
+    const pos = [...new Set(sups.flatMap(n => [...(posBySup[n] || [])]))];
     const ref = String(s.ref || '').toUpperCase();
     const inRef = pos.filter(po => ref && ref.includes(String(po).toUpperCase()));
     if (inRef.length) { byShip[s.id] = inRef; howByShip[s.id] = 'ref'; return; }
-    if (s.stage?.idx <= 2 && pos.length === 1 && (activeBySup[s.matched] || []).length === 1) { byShip[s.id] = pos; howByShip[s.id] = 'only'; return; }
+    if (s.stage?.idx <= 2 && pos.length === 1 && sups.every(n => (activeBySup[n] || []).length === 1)) { byShip[s.id] = pos; howByShip[s.id] = 'only'; return; }
     byShip[s.id] = []; howByShip[s.id] = null;
   });
   const shipByPo = {};

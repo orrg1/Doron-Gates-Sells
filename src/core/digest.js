@@ -2,7 +2,7 @@
 // Uses the same model as the procurement page (procModel.js), so the numbers
 // in the email match the website.
 import { mergeLinesIntoMonthly, detectOutliers, saleLineId, supplierLeadTimes, matchShipSupplier, shipmentStage, daysBetween, stockTimelines, stockoutSummary,
-  purchasePriceHistory, priceIncreases, priceCheck, linkShipmentsToPOs, returnsAnalysis, productStartDates, inactiveSkusOf, withShipMarks, DAY_MS, isoToDisplay } from './data.js';
+  purchasePriceHistory, priceIncreases, priceCheck, linkShipmentsToPOs, returnsAnalysis, productStartDates, inactiveSkusOf, withShipMarks, withShipSups, DAY_MS, isoToDisplay } from './data.js';
 import { computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './procModel.js';
 
 // Items that sell but whose stock + incoming is well beyond the plan's need.
@@ -202,12 +202,12 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
       Object.entries(costMap).forEach(([k, v]) => { if (v > 0) catalog[k] = { p: v, cur: currencyMap[k] || 'ILS' }; });
       const blocked = new Set(products.filter(p => p.orderBlocked).map(p => p.sku));
       const pc = Object.values(priceCheck(hist, { now, poPrice, catalog, names })).filter(x => !blocked.has(x.k));
-      const shipsAll = shipments.map(s => ({ ...s, matched: supOf(s), stage: shipmentStage(s, today), delayDays: s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0 }));
+      const shipsAll = shipments.map(s => withShipSups({ ...s, matched: supOf(s), stage: shipmentStage(s, today), delayDays: s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0 }, app.procShipExtraSups || {}));
       // everything not yet marked received: at sea, waiting to sail, at the port / trucking
       const active = shipsAll.filter(s => s.stage.idx <= 2);
       const links = linkShipmentsToPOs({ shipments: shipsAll, orders: ordersEnriched, manual: app.procShipPoLinks || {} });
       const arriving = active.filter(s => s.arr && s.arr >= today && s.arr <= wk);
-      const inTransit = active.map(s => ({ id: s.id, sup: s.matched || s.sup, fwdSup: s.sup, matched: !!s.matched, cont: s.cont, arr: s.arr, dep: s.dep, stage: s.stage.label, stageIdx: s.stage.idx, sub: s.stage.sub,
+      const inTransit = active.map(s => ({ id: s.id, sup: s.sups.length ? s.sups.join(' + ') : s.sup, sups: s.sups, fwdSup: s.sup, matched: s.sups.length > 0, cont: s.cont, arr: s.arr, dep: s.dep, stage: s.stage.label, stageIdx: s.stage.idx, sub: s.stage.sub,
         delivery: s.delivery || null, fromPort: s.from || '', toPort: s.to || '', mode: s.mode || '', gone: s.gone || null,
         days: s.arr ? Math.round(daysBetween(today, s.arr)) : null, delayDays: s.delayDays, from: s.change?.from || null, pos: links.byShip[s.id] || [], thisWeek: !!(s.arr && s.arr >= today && s.arr <= wk) }))
         .sort((a, b) => (a.arr || '9999') < (b.arr || '9999') ? -1 : 1);
