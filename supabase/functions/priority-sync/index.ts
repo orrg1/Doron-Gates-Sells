@@ -12,7 +12,8 @@
 //     { action:'nightly' } at 19:00 and 20:00 UTC — it only starts a job when it is 22:00 in Israel,
 //     { action:'weekly' } Sundays at 04:00 and 05:00 UTC — sends the summary email when it is 07:00 in Israel.
 //   • the website: { action:'digest', send?:true } — preview the weekly email (or send it now).
-//   • the website: { action:'alerts' } — check for new alerts now (also runs after every finished sync).
+//   • the website: { action:'alerts' } — check for new alerts now.
+//   • pg_cron every 5 minutes: { action:'alerts-pending' } — the alerts check after a finished sync / a new forwarder file, in its own run.
 //   • a Google Apps Script in the mailbox (header x-ingest-token): { action:'shipments-file', name, data(base64 xlsx), from, date }
 //     — the forwarder's daily Excel, straight from the email, so nobody has to upload it.
 // Priority is only ever read (GET).
@@ -215,11 +216,10 @@ async function tick() {
       addLog(job, hadFailures ? `הסתיים עם ${Object.keys(failed).length} חלקים שנכשלו — מה שנכשל לא עודכן` : `הסתיים בהצלחה (${Math.round((Date.now() - new Date(job.started_at).getTime()) / 1000)} שנ׳)`);
       await saveJob(job, { status: 'done', finished_at: new Date().toISOString(), lease_until: null, error: hadFailures ? 'partial' : null });
       await clearStage(job.id, job.steps.map((s: any) => s.id)).catch(() => {});
-      // fresh data → check for new alerts (never fails the sync)
-      let alerts: unknown = null;
-      try { alerts = await runAlerts(`sync ${job.trigger}`); } catch (e) { alerts = { error: String((e as Error).message || e) }; }
-      try { await staleShipmentsAlert(); } catch { /* best-effort */ }
-      return { done: true, id: job.id, alerts };
+      // fresh data → alerts are checked in a SEPARATE run (pg_cron 'priority-alerts-pending'): the merge above
+      // already used much of this run's CPU budget, and the digest needs a fresh one.
+      await writeState({ alertsPending: { at: new Date().toISOString(), by: `sync ${job.trigger}` } });
+      return { done: true, id: job.id, alertsPending: true };
     }
     await saveJob(job, { lease_until: null });
     return { progress: true, id: job.id, left };
@@ -241,6 +241,10 @@ async function digestData() {
     'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime', 'procOrderBlock', 'procShipPoLinks', 'procShipReceived', 'procShipDelivery']);
   const sets: Record<string, unknown> = {};
   for (const k of ['procSalesLines', 'procPurchaseLines', 'procShipments', 'stockHistory', 'procPoMeta', 'procItemsExtra', 'dashboardSalesData']) sets[k] = await readDataset(k);
+  // The email looks back at most ~2 years (12-month averages, a year-ago week, the trend year) — older invoice
+  // lines only cost CPU here (the server has a hard CPU budget per run).
+  const cut = new Date(Date.now() - 800 * 86400000).toISOString().slice(0, 10);
+  if (Array.isArray(sets.procSalesLines)) sets.procSalesLines = (sets.procSalesLines as any[]).filter((l: any) => l.d >= cut);
   return buildDigest({ app, sets });
 }
 async function sendMail(subject: string, html: string) {
@@ -283,9 +287,8 @@ async function ingestShipments(body: any) {
   const meta = { ...(st.procFilesMeta || {}) };
   meta.shipments = { name: String(body.name || 'קובץ משלוחים מהמייל'), rows: m.merged.length, at: Date.now(), via: 'mail', mailDate: body.date || null };
   await writeState({ procFilesMeta: meta, shipMailLast: { at: new Date().toISOString(), name: body.name || '', fresh: m.fresh, changed: m.changed, kept: m.kept } });
-  let alerts: unknown = null;
-  if (m.delayed) { try { alerts = await runAlerts('shipments mail'); } catch (e) { alerts = { error: String((e as Error).message || e) }; } }
-  return { status: 200, out: { ok: true, fresh: m.fresh, changed: m.changed, kept: m.kept, alerts } };
+  if (m.delayed) await writeState({ alertsPending: { at: new Date().toISOString(), by: 'shipments mail' } });
+  return { status: 200, out: { ok: true, fresh: m.fresh, changed: m.changed, kept: m.kept, alertsPending: m.delayed } };
 }
 // No file from the forwarder for 2+ days (once the mailbox script is running) → one email a day.
 async function staleShipmentsAlert() {
@@ -370,6 +373,15 @@ Deno.serve(async (req) => {
     }
     if (action === 'tick') return json(await tick());
     if (action === 'alerts') return json(await runAlerts(caller));
+    if (action === 'alerts-pending') {
+      const st = await readState(['alertsPending']);
+      if (!st.alertsPending) return json({ skipped: 'nothing pending' });
+      await writeState({ alertsPending: null }); // cleared first: a failing check is not retried every few minutes forever
+      let alerts: unknown = null, stale: unknown = null;
+      try { alerts = await runAlerts(st.alertsPending.by || caller); } catch (e) { alerts = { error: String((e as Error).message || e) }; }
+      try { stale = await staleShipmentsAlert(); } catch (e) { stale = { error: String((e as Error).message || e) }; }
+      return json({ alerts, stale });
+    }
     if (action === 'digest') {
       if (body.send) return json(await sendDigest(caller));
       const d = await digestData();
