@@ -14,7 +14,8 @@
 //   • the website: { action:'digest', send?:true } — preview the weekly email (or send it now).
 //   • the website: { action:'alerts' } — check for new alerts now (a finished sync checks them in one extra tick).
 //   • a Google Apps Script in the mailbox (header x-ingest-token): { action:'shipments-file', name, data(base64 xlsx), from, date }
-//     — the forwarder's daily Excel, straight from the email, so nobody has to upload it.
+//     — the forwarder's daily Excel, straight from the email, so nobody has to upload it;
+//     and { action:'shipments-ping', found, files, version } after every check — so a script that stopped running is noticed.
 // Priority is only ever read (GET).
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
 import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml, pickAlerts, renderAlertsHtml, parseShipments, mergeShipmentFile } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/903fc2cd8e4f083aa1faa71e3e536044944156c0/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
@@ -305,17 +306,39 @@ async function ingestShipments(body: any) {
   if (m.delayed) { try { alerts = await runAlerts('shipments mail'); } catch (e) { alerts = { error: String((e as Error).message || e) }; } }
   return { status: 200, out: { ok: true, fresh: m.fresh, changed: m.changed, kept: m.kept, alerts } };
 }
-// No file from the forwarder for 2+ days (once the mailbox script is running) → one email a day.
+// Every run of the mailbox script reports what it saw (even when there was nothing new).
+async function mailCheckPing(body: any) {
+  const files = Array.isArray(body.files) ? body.files.slice(0, 20).map((f: any) => ({ name: String(f.name || '').slice(0, 120), date: f.date || null, code: Number(f.code) || 0, note: String(f.note || '').slice(0, 160) })) : [];
+  const check = { at: new Date().toISOString(), found: Number(body.found) || 0, newMsgs: Number(body.newMsgs) || 0, files, version: String(body.version || '') };
+  await writeState({ shipMailCheck: check });
+  return { ok: true };
+}
+// Once a day (after the nightly sync): tell the person what is wrong with the forwarder file, specifically.
 async function staleShipmentsAlert() {
-  const st = await readState(['shipMailLast', 'shipStaleAlertAt']);
-  if (!st.shipMailLast?.at) return null;
-  const age = Date.now() - Date.parse(st.shipMailLast.at);
-  if (age < 2 * 86400000) return null;
+  const st = await readState(['shipMailLast', 'shipMailCheck', 'shipStaleAlertAt']);
+  if (!st.shipMailLast?.at && !st.shipMailCheck?.at) return null; // the mailbox script was never set up
   if (st.shipStaleAlertAt && Date.now() - Date.parse(st.shipStaleAlertAt) < 22 * 3600_000) return null;
-  const days = Math.floor(age / 86400000);
-  await sendMail(`התראה: לא הגיע קובץ משלוחים מהמשלח ${days} ימים`, `<div dir="rtl" style="font-family:Arial,sans-serif;font-size:14px">הקובץ האחרון מהמשלח (United) נקלט לפני ${days} ימים. כדאי לבדוק שהמשלח שולח את הדוח, או להעלות אותו ידנית באתר: <a href="${SITE_URL}">${SITE_URL}</a></div>`);
+  const fmt = (iso: string) => new Date(iso).toLocaleString('he-IL', { timeZone: 'Asia/Jerusalem', day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const fileAge = st.shipMailLast?.at ? Date.now() - Date.parse(st.shipMailLast.at) : Infinity;
+  const check = st.shipMailCheck;
+  let subject = '', text = '';
+  if (check?.at && Date.now() - Date.parse(check.at) > 3 * 3600_000) {
+    subject = 'התראה: הסקריפט במייל הפסיק לבדוק את קבצי המשלח';
+    text = `הבדיקה האחרונה של תיבת המייל הייתה ב-${fmt(check.at)}. כנראה שהטריגר בסקריפט נמחק או שההרשאה של Google בוטלה — פותחים את הסקריפט ב-script.google.com ומריצים פעם אחת את install.`;
+  } else if (!check?.at && fileAge > 2 * 86400000) {
+    subject = 'התראה: הסקריפט במייל לא מדווח';
+    text = 'הסקריפט שבתיבת המייל לא מדווח שהוא רץ. פותחים אותו ב-script.google.com, מדביקים את הגרסה העדכנית ומריצים פעם אחת את install.';
+  } else if (fileAge > 2 * 86400000) {
+    const days = Math.floor(fileAge / 86400000);
+    const bad = (check?.files || []).filter((f: any) => f.code !== 200);
+    subject = `התראה: לא נקלט קובץ משלוחים חדש ${days} ימים`;
+    text = check?.found
+      ? `הסקריפט רץ (בדיקה אחרונה ${fmt(check.at)}) ומצא ${check.found} מיילים מהמשלח, אבל לא נקלט קובץ חדש. ${bad.length ? 'מה קרה עם הקבצים: ' + bad.map((f: any) => `${f.name} — ${f.note || f.code}`).join(' · ') : 'במיילים האחרונים לא היה קובץ Excel מצורף.'}`
+      : `הסקריפט רץ (בדיקה אחרונה ${fmt(check.at)}) ולא מצא מיילים מ-info@united-il.com ב-5 הימים האחרונים. אם המשלח שולח מכתובת אחרת — צריך לעדכן את הסקריפט.`;
+  } else return null;
+  await sendMail(subject, `<div dir="rtl" style="font-family:Arial,sans-serif;font-size:14px;line-height:1.6">${text}<br><br>אפשר תמיד להעלות את הקובץ ידנית באתר: <a href="${SITE_URL}">${SITE_URL}</a></div>`);
   await writeState({ shipStaleAlertAt: new Date().toISOString() });
-  return { staleDays: days };
+  return { subject };
 }
 
 // Instant alerts: only what is NEW since the last check is emailed. The very first run only records
@@ -353,8 +376,11 @@ Deno.serve(async (req) => {
   const ingest = req.headers.get('x-ingest-token');
   if (ingest) {
     const want = Deno.env.get('SHIP_INGEST_TOKEN') || '';
-    if (!want || ingest !== want || action !== 'shipments-file') return json({ error: 'bad token' }, 403);
-    try { const r = await ingestShipments(body); return json(r.out, r.status); }
+    if (!want || ingest !== want || (action !== 'shipments-file' && action !== 'shipments-ping')) return json({ error: 'bad token' }, 403);
+    try {
+      if (action === 'shipments-ping') return json(await mailCheckPing(body));
+      const r = await ingestShipments(body); return json(r.out, r.status);
+    }
     catch (e) { return json({ error: String((e as Error).message || e) }, 500); }
   }
   if (secret) {

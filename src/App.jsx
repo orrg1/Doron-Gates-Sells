@@ -2107,6 +2107,7 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   const saveDraft = (next) => { setDraftQty(next); try { localStorage.setItem('procurementDraftQty', JSON.stringify(next)); } catch { /* best-effort */ } };
   const [vendor, setVendor] = useState(null);       // supplier page open (name) or null = supplier list
   const [vendorSearch, setVendorSearch] = useState('');
+  const [vendorItemSearch, setVendorItemSearch] = useState(''); // products inside the open supplier
   const [copiedVendor, setCopiedVendor] = useState(null);
   useEffect(() => {
     let cancelled = false;
@@ -2319,7 +2320,16 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   const [searchTerm, setSearchTerm] = useState('');
   // Arrived here via a "jump to procurement" link from the Sales tab — drop the
   // product name straight into this page's own search box.
-  useEffect(() => { if (jumpTo?.term) setSearchTerm(jumpTo.term); }, [jumpTo]);
+  // From the global search / the sales tab: go straight to the product — the products list, no filters
+  // hiding it, and its card opened when the name or SKU matches exactly (see jumpPending below).
+  const [jumpPending, setJumpPending] = useState(null);
+  useEffect(() => {
+    if (jumpTo?.vendor) { setViewMode('suppliers'); setVendor(jumpTo.vendor); setVendorItemSearch(''); setDrawerKey(null); return; }
+    if (!jumpTo?.term) return;
+    setViewMode('products'); setVendor(null);
+    setAbcFilter('all'); setRiskFilter('all'); setActionFilter('all'); setFamilyFilter(''); setOutlierOnly(false);
+    setSearchTerm(jumpTo.term); setJumpPending(jumpTo.term);
+  }, [jumpTo]); // eslint-disable-line react-hooks/exhaustive-deps
   // Default: most urgent first, then by order value — "what do I do first".
   const [sortConfig, setSortConfig] = useState({ key:'statusRank', direction:'asc' });
   const [editingStock, setEditingStock] = useState(null);
@@ -2791,6 +2801,14 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   const productsAll = useMemo(() => computeProducts({ salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions, orderBlock }),
     [leadFor, stockouts, skipStockoutMonths, outliers, outlierDecisions, salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, leadStats, leadAddTransit, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku, itemsExtra, orderBlock]);
   const products = useMemo(() => productsAll.filter(p => !p.inactive), [productsAll]);
+  useEffect(() => {
+    if (!jumpPending || !productsAll.length) return;
+    const t = String(jumpPending).trim().toLowerCase();
+    const exact = productsAll.filter(p => String(p.name||'').trim().toLowerCase() === t || String(p.sku||'').trim().toLowerCase() === t);
+    const hits = exact.length ? exact : productsAll.filter(p => smartMatch(p.name, jumpPending) || smartMatch(p.sku, jumpPending));
+    if (hits.length === 1 || exact.length === 1) setDrawerKey((exact[0] || hits[0]).key);
+    setJumpPending(null);
+  }, [jumpPending, productsAll]);
 
   const filtered = useMemo(() => {
     let data = searchTerm ? productsAll : products; // inactive products only when searched for
@@ -5125,7 +5143,9 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                 return (
                   <React.Fragment key={v.name}>
                   {firstPhasing && <div className={`px-5 py-2 text-xs font-bold border-t ${isDarkMode?'bg-slate-900/60 text-slate-400 border-slate-700':'bg-slate-50 text-slate-500 border-slate-200'}`}>ספקים בהפסקה — לא נכללים בהמלצות ובהתראות</div>}
-                  <button type="button" onClick={()=>{ setVendor(v.name); setDrawerKey(null); }}
+                  <button type="button" onClick={()=>{ setVendor(v.name); setDrawerKey(null);
+                    // searched for a product (not the supplier's name) → keep that search inside the supplier
+                    setVendorItemSearch(vendorSearch && !smartMatch(v.name, vendorSearch) ? vendorSearch : ''); }}
                     className={`w-full text-right grid gap-4 items-center px-5 py-3.5 border-t transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${isDarkMode?'border-slate-700 hover:bg-slate-700/40':'border-slate-100 hover:bg-slate-50'}`} style={grid}>
                     <div className={`min-w-0 sticky right-0 z-[1] -mr-5 pr-5 py-1 ${stickyBg}`}>
                       <p className={`font-bold text-sm truncate flex items-center gap-1.5 ${strong}`} title={v.name}>{v.ownMade && <Factory className="w-4 h-4 shrink-0 text-violet-500" aria-hidden="true"/>}<span className={v.phasing?'opacity-60':''}>{v.name}</span>{v.phasing && <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${procStatusCls('stopped', isDarkMode)}`}>בהפסקה</span>}</p>
@@ -5166,21 +5186,22 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
 
     // ── Supplier page ──
     const v = vendorObj;
-    const rows = [...v.items].sort((a,b) => (a.statusRank??4)-(b.statusRank??4) || (b.avgMonthly||0)-(a.avgMonthly||0));
-    const months = rows[0]?.trendSeries?.map(d=>d.month) || [];
-    const toOrder = rows.filter(p => orderQtyFor(p) > 0);
+    const allRows = [...v.items].sort((a,b) => (a.statusRank??4)-(b.statusRank??4) || (b.avgMonthly||0)-(a.avgMonthly||0));
+    const rows = vendorItemSearch ? allRows.filter(p => smartMatch(p.name, vendorItemSearch) || smartMatch(p.sku, vendorItemSearch) || smartMatch(p.family, vendorItemSearch)) : allRows;
+    const months = allRows[0]?.trendSeries?.map(d=>d.month) || [];
+    const toOrder = allRows.filter(p => orderQtyFor(p) > 0);
     const totalByCur = {};
     toOrder.forEach(p => { if (p.unitCostOriginal) { const c = p.currency||'ILS'; totalByCur[c] = (totalByCur[c]||0) + orderQtyFor(p)*p.unitCostOriginal; } });
     const grid = { gridTemplateColumns:`var(--rz-cols, minmax(220px,1.4fr) ${months.length*24}px 70px 76px 170px 80px 110px 150px)` };
     const markOpts = (p) => [['', 'רגיל'], ['stop', 'לא להזמין יותר'], ...((v.phasing || p.orderMark==='keep') ? [['keep', 'ממשיכים להזמין']] : [])];
-    const needAlt = v.phasing ? rows.filter(p => p.orderMark !== 'keep' && p.orderMark !== 'stop' && p.avgMonthly > 0)
+    const needAlt = v.phasing ? allRows.filter(p => p.orderMark !== 'keep' && p.orderMark !== 'stop' && p.avgMonthly > 0)
       .sort((a, b) => (b.avgMonthly*(b.unitCost||1)) - (a.avgMonthly*(a.unitCost||1))) : [];
-    const markedHere = rows.filter(p => p.orderMark);
+    const markedHere = allRows.filter(p => p.orderMark);
     return (
       <div className="space-y-4">
         <div className="flex flex-wrap items-end gap-4">
           <div className="space-y-1">
-            <button type="button" onClick={()=>setVendor(null)} className={`inline-flex items-center gap-1 text-sm font-semibold ${isDarkMode?'text-blue-300':'text-blue-700'} hover:underline`}>
+            <button type="button" onClick={()=>{ setVendor(null); setVendorItemSearch(''); }} className={`inline-flex items-center gap-1 text-sm font-semibold ${isDarkMode?'text-blue-300':'text-blue-700'} hover:underline`}>
               <ChevronRight className="w-4 h-4"/> כל הספקים
             </button>
             <h3 className={`text-2xl font-bold flex items-center gap-2 ${strong}`}>{v.ownMade && <Factory className="w-6 h-6 text-violet-500" aria-hidden="true"/>}{v.name}
@@ -5299,6 +5320,16 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
         )}
         <div className="grid grid-cols-1 2xl:grid-cols-[minmax(0,1fr)_300px] gap-4 items-start">
           <div className={cardCls}>
+            <div className={`flex flex-wrap items-center gap-3 px-4 py-3 border-b ${isDarkMode?'border-slate-700':'border-slate-200'}`}>
+              <div className="relative">
+                <Search className={`w-4 h-4 absolute right-3 top-1/2 -translate-y-1/2 ${muted}`} aria-hidden="true"/>
+                <input type="search" aria-label={`חיפוש מוצר אצל ${v.name}`} placeholder="חיפוש מוצר אצל הספק — שם או מק״ט" value={vendorItemSearch} onChange={e=>setVendorItemSearch(e.target.value)}
+                  className={`pr-9 pl-3 py-2 border rounded-xl text-sm w-72 max-w-full focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'bg-slate-900 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
+              </div>
+              <span className={`text-sm ${muted}`}>{vendorItemSearch ? `מציג ${rows.length} מתוך ${allRows.length} מוצרים` : `${allRows.length} מוצרים`}</span>
+              {vendorItemSearch && <button type="button" onClick={()=>setVendorItemSearch('')} className={`text-xs font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>נקה חיפוש</button>}
+            </div>
+            {vendorItemSearch && !rows.length && <p className={`px-4 py-6 text-sm ${muted}`}>אין אצל הספק מוצר שמתאים ל"{vendorItemSearch}".</p>}
             <div className="overflow-x-auto">
               <div style={{minWidth: 220 + months.length*24 + 760}}>
                 <div data-rz-grid="vendorItems" className={`grid gap-3 items-center px-4 py-2.5 ${headCls}`} style={grid}>
@@ -5394,6 +5425,16 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
           <Truck className="w-5 h-5 text-blue-500"/>
           <div className="flex-1 min-w-[240px]">
             <p className={`font-bold ${strong}`}>{meta ? `קובץ המשלח נטען ${new Date(meta.at).toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'})}${meta.via==='mail' ? ' · אוטומטית מהמייל של המשלח' : ''}` : 'עוד לא נטען קובץ מהמשלח'}</p>
+            {(() => { // what the mailbox script saw on its last run (it reports every 30 minutes)
+              let c = null; try { c = JSON.parse(localStorage.getItem('shipMailCheck') || 'null'); } catch { /* none */ }
+              if (!c?.at) return null;
+              const ago = Date.now() - Date.parse(c.at);
+              const when = new Date(c.at).toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
+              const bad = (c.files || []).filter(f => f.code !== 200);
+              return ago > 3*3600000
+                ? <p className="text-sm font-semibold text-orange-600">הסקריפט במייל לא בדק מאז {when} — פותחים אותו ב-script.google.com ומריצים פעם אחת את install.</p>
+                : <p className={`text-xs ${muted}`}>בדיקת מייל אחרונה: {when} · {c.found} מיילים מהמשלח ב-5 ימים{c.newMsgs ? ` · ${c.newMsgs} חדשים` : ''}{bad.length ? ` · ${bad.map(f => `${f.name}: ${f.note || f.code}`).join(' · ')}` : ''}</p>;
+            })()}
             {meta && Date.now() - meta.at > 2*DAY_MS && <p className="text-sm font-semibold text-orange-600">לא הגיע קובץ חדש מהמשלח כבר {Math.floor((Date.now()-meta.at)/DAY_MS)} ימים — המידע כאן אולי לא עדכני.</p>}
             <p className={`text-sm ${muted}`}>{meta?.via==='mail' ? 'הקובץ היומי מהמשלח ("דוח הזמנות ללקוחות") נקלט אוטומטית מהמייל; אפשר גם להעלות אותו כאן ידנית.' : 'מעלים כל יום את האקסל שמגיע מהמשלח ("דוח הזמנות ללקוחות").'} שינוי בתאריך ההגעה מסומן. הקובץ לא מפרט מוצרים ולא מספר הזמנה — לכן בכל משלוח מסמנים איזו הזמנה בו (פעם אחת). אם המשלח או הספק רושמים את מספר ההזמנה בשדה האסמכתא, השיוך נעשה לבד.</p>
           </div>
@@ -7187,21 +7228,36 @@ const App = () => {
   // to "what's its ABC/seasonality/reorder status" without retyping anything.
   const [procurementJumpTo, setProcurementJumpTo] = useState(null); // {term, ts}
   const jumpToProcurement = (name) => { setProcurementJumpTo({ term:name, ts:Date.now() }); setActiveTab('procurement'); };
+  const jumpToVendor = (name) => { setProcurementJumpTo({ vendor:name, ts:Date.now() }); setActiveTab('procurement'); };
   const jumpToSales = (name) => { setActiveTab('sales'); setSalesViewMode('byProduct'); setSearchTerm(name); };
 
   const [globalQuery, setGlobalQuery] = useState('');
   const [globalSearchOpen, setGlobalSearchOpen] = useState(false);
   // ─── Global search — searches products (sales) and suppliers at once ───
+  // Global search: products by name OR SKU (from sales + the Priority item list), with stock and supplier,
+  // and suppliers (Priority + the suppliers file). Read when the box opens — the maps live in localStorage.
+  const globalIndex = useMemo(() => {
+    if (!globalSearchOpen) return null;
+    const rd = (k) => { try { return JSON.parse(localStorage.getItem(k) || '{}') || {}; } catch { return {}; } };
+    const names = rd('procurementNames'), stock = rd('procurementStock'), sup = rd('procurementSupplier');
+    const bySku = {}, noSku = new Set();
+    salesData.forEach(d => { if (!d.description) return; if (d.sku) { if (!bySku[d.sku]) bySku[d.sku] = d.description; } else noSku.add(d.description); });
+    Object.entries(names).forEach(([k, n]) => { if (n && !bySku[k]) bySku[k] = n; });
+    const products = [...Object.entries(bySku).map(([sku, name]) => ({ sku, name, stock: stock[sku] ?? null, supplier: sup[sku] || '' })),
+      ...[...noSku].map(name => ({ sku: '', name, stock: null, supplier: '' }))];
+    const suppliers = [...new Set([...Object.values(sup), ...suppliersData.map(d => d.supplier)].filter(Boolean))];
+    return { products, suppliers };
+  }, [globalSearchOpen, salesData, suppliersData]);
   const globalSearchResults = useMemo(() => {
     const q = globalQuery.trim();
-    if (q.length < 2) return { products: [], suppliers: [] };
-    const productNames = [...new Set(salesData.map(d=>d.description).filter(Boolean))];
-    const supplierNames = [...new Set(suppliersData.map(d=>d.supplier).filter(Boolean))];
-    return {
-      products: productNames.filter(n=>smartMatch(n,q)).slice(0,5),
-      suppliers: supplierNames.filter(n=>smartMatch(n,q)).slice(0,5),
-    };
-  }, [globalQuery, salesData, suppliersData]);
+    if (q.length < 2 || !globalIndex) return { products: [], suppliers: [] };
+    const ql = q.toLowerCase();
+    const hits = globalIndex.products.filter(p => smartMatch(p.name, q) || smartMatch(p.sku, q));
+    // exact SKU / name first, then active before inactive, then by name
+    hits.sort((a, b) => ((b.sku.toLowerCase() === ql || b.name.toLowerCase() === ql) - (a.sku.toLowerCase() === ql || a.name.toLowerCase() === ql))
+      || (inactiveSetApp.has(a.sku) - inactiveSetApp.has(b.sku)) || a.name.localeCompare(b.name, 'he'));
+    return { products: hits.slice(0, 8), more: Math.max(0, hits.length - 8), suppliers: globalIndex.suppliers.filter(n => smartMatch(n, q)).slice(0, 5) };
+  }, [globalQuery, globalIndex, inactiveSetApp]);
   const inactiveNamesApp = useMemo(() => { const s = new Set(); if (inactiveSetApp.size) salesData.forEach(d => { if (d.description && inactiveSetApp.has(d.sku)) s.add(d.description); }); return s; }, [salesData, inactiveSetApp]);
   useEffect(() => {
     if (!globalSearchOpen) return;
@@ -8451,35 +8507,49 @@ const App = () => {
               <input type="text" value={globalQuery}
                 onChange={e=>{setGlobalQuery(e.target.value); setGlobalSearchOpen(true);}}
                 onFocus={()=>setGlobalSearchOpen(true)}
-                placeholder="חיפוש מוצר / ספק בכל האפליקציה..."
-                className={`pr-9 pl-3 py-2 border rounded-xl text-xs w-56 focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'bg-slate-800 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
+                onKeyDown={e=>{ if (e.key==='Enter' && globalQuery.trim().length>=2) { const r = globalSearchResults.products; jumpToProcurement(r.length===1 ? (r[0].sku || r[0].name) : globalQuery.trim()); setGlobalSearchOpen(false); setGlobalQuery(''); } if (e.key==='Escape') setGlobalSearchOpen(false); }}
+                aria-label="חיפוש מוצר, מק״ט או ספק"
+                placeholder="חיפוש מוצר / מק״ט / ספק..."
+                className={`pr-9 pl-3 py-2 border rounded-xl text-xs w-64 focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'bg-slate-800 border-slate-700 text-white placeholder-slate-500':'bg-slate-50 border-slate-200'}`}/>
               {globalSearchOpen && globalQuery.trim().length>=2 && (
-                <div className={`absolute left-0 top-full mt-1.5 w-72 rounded-xl shadow-2xl border p-2 z-50 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+                <div className={`absolute left-0 top-full mt-1.5 w-96 max-h-[70vh] overflow-y-auto rounded-xl shadow-2xl border p-2 z-50 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
                   {globalSearchResults.products.length===0 && globalSearchResults.suppliers.length===0 ? (
                     <p className={`text-xs text-center py-3 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>לא נמצאו תוצאות</p>
                   ) : (
                     <>
                       {globalSearchResults.products.length>0 && (
                         <div className="mb-2">
-                          <p className={`text-[10px] font-bold px-2 mb-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>מוצרים</p>
-                          {globalSearchResults.products.map(name => (
-                            <div key={name} className={`flex items-center justify-between gap-2 px-2 py-1.5 rounded-lg text-xs group ${isDarkMode?'hover:bg-slate-700/50':'hover:bg-slate-50'}`}>
-                              <span className={`flex-1 truncate ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{name}{inactiveNamesApp.has(name) && <InactiveBadge isDarkMode={isDarkMode}/>}</span>
-                              <button onClick={()=>{jumpToSales(name); setGlobalSearchOpen(false); setGlobalQuery('');}} className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-50 text-blue-700'}`}>מכירות</button>
-                              <button onClick={()=>{jumpToProcurement(name); setGlobalSearchOpen(false); setGlobalQuery('');}} className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${isDarkMode?'bg-orange-500/20 text-orange-300':'bg-orange-50 text-orange-700'}`}>רכש</button>
-                            </div>
-                          ))}
+                          <p className={`text-[10px] font-bold px-2 mb-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>מוצרים — לחיצה פותחת את המוצר ברכש</p>
+                          {globalSearchResults.products.map(p => {
+                            const go = () => { jumpToProcurement(p.sku || p.name); setGlobalSearchOpen(false); setGlobalQuery(''); };
+                            return (
+                              <div key={p.sku || p.name} className={`flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs ${isDarkMode?'hover:bg-slate-700/50':'hover:bg-slate-50'}`}>
+                                <button type="button" onClick={go} className="flex-1 min-w-0 text-right">
+                                  <span className={`block truncate font-medium ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{p.name}{inactiveSetApp.has(p.sku) && <InactiveBadge isDarkMode={isDarkMode}/>}</span>
+                                  <span className={`block truncate text-[10px] ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+                                    {[p.sku && `מק״ט ${p.sku}`, p.stock != null && `מלאי ${Number(p.stock).toLocaleString('en-US')}`, p.supplier].filter(Boolean).join(' · ')}
+                                  </span>
+                                </button>
+                                <button type="button" onClick={()=>{jumpToSales(p.name); setGlobalSearchOpen(false); setGlobalQuery('');}} className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-50 text-blue-700'}`}>מכירות</button>
+                                <button type="button" onClick={go} className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${isDarkMode?'bg-orange-500/20 text-orange-300':'bg-orange-50 text-orange-700'}`}>רכש</button>
+                              </div>
+                            );
+                          })}
+                          {globalSearchResults.more > 0 && <p className={`text-[10px] px-2 pt-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>ועוד {globalSearchResults.more} — Enter מציג את כולם ברכש</p>}
                         </div>
                       )}
                       {globalSearchResults.suppliers.length>0 && (
                         <div>
                           <p className={`text-[10px] font-bold px-2 mb-1 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>ספקים</p>
                           {globalSearchResults.suppliers.map(name => (
-                            <button key={name} onClick={()=>{setActiveTab('suppliers'); setSelectedSupplier(name); setGlobalSearchOpen(false); setGlobalQuery('');}}
-                              className={`w-full flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs text-right ${isDarkMode?'hover:bg-slate-700/50 text-slate-200':'hover:bg-slate-50 text-slate-700'}`}>
-                              <Truck className="w-3 h-3 shrink-0 opacity-50"/>
-                              <span className="flex-1 truncate">{name}</span>
-                            </button>
+                            <div key={name} className={`flex items-center gap-2 px-2 py-1.5 rounded-lg text-xs ${isDarkMode?'hover:bg-slate-700/50 text-slate-200':'hover:bg-slate-50 text-slate-700'}`}>
+                              <button type="button" onClick={()=>{ jumpToVendor(name); setGlobalSearchOpen(false); setGlobalQuery(''); }} className="flex-1 min-w-0 flex items-center gap-2 text-right">
+                                <Truck className="w-3 h-3 shrink-0 opacity-50"/>
+                                <span className="flex-1 truncate">{name}</span>
+                              </button>
+                              <button type="button" onClick={()=>{ jumpToVendor(name); setGlobalSearchOpen(false); setGlobalQuery(''); }} className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${isDarkMode?'bg-orange-500/20 text-orange-300':'bg-orange-50 text-orange-700'}`}>מוצרי הספק</button>
+                              <button type="button" onClick={()=>{setActiveTab('suppliers'); setSelectedSupplier(name); setGlobalSearchOpen(false); setGlobalQuery('');}} className={`text-[10px] px-1.5 py-0.5 rounded shrink-0 ${isDarkMode?'bg-blue-500/20 text-blue-300':'bg-blue-50 text-blue-700'}`}>ניתוח</button>
+                            </div>
                           ))}
                         </div>
                       )}
