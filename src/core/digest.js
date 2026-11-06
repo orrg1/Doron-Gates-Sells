@@ -220,6 +220,7 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
         priceHigh: pc.filter(x => x.verdict === 'high').length, priceCheck: pc.filter(x => x.verdict !== 'ok').length,
       };
     })(),
+    allProductsLite: Object.fromEntries(products.filter(p => /^[AB]/.test(p.abc || '')).map(p => [p.sku || p.key, { name: p.name, stock: p.currentStock, incoming: p.incomingQty || 0 }])),
     alertSource: {
       stock: products.filter(p => p.status === 'now' && /^[AB]/.test(p.abc || '') && p.avgMonthly > 0)
         .map(p => ({ k: p.sku || p.key, name: p.name, supplier: p.supplier || '', ownMade: !!p.ownMade, stock: p.currentStock, incoming: p.incomingQty || 0,
@@ -287,6 +288,61 @@ export const pickAlerts = (d, sent = {}, { now = Date.now(), repeatDays = 14 } =
   const ships = (d.alertSource?.ships || []).filter(x => !sent[`ship:${x.id}:${x.arr}`]);
   return { stock, ships, keys: [...stock.map(x => `stock:${x.k}`), ...ships.map(x => `ship:${x.id}:${x.arr}`)] };
 };
+// ─── Morning reminder (every morning, 07:30) ───
+// Every A/B product that is still "order now" is listed every morning until it is no longer at risk
+// (a PO was opened, stock came in, or demand dropped) — or until the person snoozed it on the site.
+// state (app_state 'alertsMorning') = { items: { sku: { since, stock, incoming } }, lastSent }
+// snooze (app_state 'procAlertSnooze') = { sku: { until: 'YYYY-MM-DD' } | { untilStock: true, stock } }
+export const isSnoozed = (x, snooze = {}, todayIso) => {
+  const z = snooze[x.k];
+  if (!z) return false;
+  if (z.until) return z.until >= todayIso;
+  if (z.untilStock) return !((x.stock ?? 0) > (z.stock ?? 0)); // until stock goes up from what it was
+  return false;
+};
+export const pickMorningAlerts = (d, state = {}, snooze = {}, { now = Date.now() } = {}) => {
+  const today = new Date(now).toISOString().slice(0, 10);
+  const prev = state.items || {};
+  const all = d.alertSource?.stock || [];
+  const snoozed = all.filter(x => isSnoozed(x, snooze, today));
+  const current = all.filter(x => !isSnoozed(x, snooze, today)).map(x => {
+    const p = prev[x.k];
+    const since = p?.since || today;
+    return { ...x, isNew: !p, since, days: Math.max(0, Math.round((Date.parse(today) - Date.parse(since)) / 86400000)) };
+  }).sort((a, b) => (b.isNew - a.isNew) || String(a.abc).localeCompare(String(b.abc)) || (a.coverDays ?? 999) - (b.coverDays ?? 999));
+  const inNow = new Set(all.map(x => x.k));
+  const resolved = Object.entries(prev).filter(([k]) => !inNow.has(k)).map(([k, p]) => {
+    const cur = (d.allProductsLite || {})[k] || {};
+    const why = (cur.incoming || 0) > (p.incoming || 0) ? 'נפתחה הזמנה' : (cur.stock ?? 0) > (p.stock ?? 0) ? 'המלאי עלה' : 'כבר לא בסיכון';
+    return { k, name: p.name || cur.name || k, why };
+  });
+  const items = {};
+  [...current, ...snoozed].forEach(x => { items[x.k] = { since: prev[x.k]?.since || today, stock: x.stock ?? null, incoming: x.incoming || 0, name: x.name }; });
+  return { current, resolved, snoozedCount: snoozed.length, nextState: { items, lastSent: state.lastSent || null } };
+};
+export const renderMorningHtml = (m, ships = [], { siteUrl }) => {
+  const row = (cells) => `<tr>${cells.map(c => `<td align="right" style="padding:6px;border-bottom:1px solid #f1f5f9;font-size:13px;vertical-align:top">${c}</td>`).join('')}</tr>`;
+  const head = (cells) => `<tr style="background:#f1f5f9;color:#475569">${cells.map(c => `<th align="right" style="padding:6px;font-size:12px;font-weight:600">${esc(c)}</th>`).join('')}</tr>`;
+  const tag = (x) => x.isNew ? '<span style="background:#C8322B;color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:bold">חדש</span>'
+    : `<span style="color:#b45309;font-size:11px;font-weight:bold">ברשימה ${x.days} ${x.days === 1 ? 'יום' : 'ימים'}</span>`;
+  const rows = m.current.slice(0, 40).map(x => row([`${tag(x)}<br><b>${esc(x.name)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)} · ${esc(x.ownMade ? 'ייצור עצמי' : x.supplier || 'ספק לא ידוע')}</span>`,
+    x.stock ?? '—', x.incoming || '—', x.coverDays == null ? '—' : `<b style="color:#C8322B">${x.coverDays} ימים</b>`, `${x.leadMonths} ח׳`, `<b>${(x.qty || 0).toLocaleString('en-US')}</b> ${x.ownMade ? 'לייצר' : 'להזמין'}`]));
+  const shipRows = ships.map(x => row([esc(x.cont || '—'), esc(x.sup), esc(isoToDisplay(x.from || '')), `<b>${esc(isoToDisplay(x.arr || ''))}</b>`, `<b style="color:#C8322B">+${x.delayDays} ימים</b>`]));
+  const newCount = m.current.filter(x => x.isNew).length;
+  return `<!doctype html><html dir="rtl" lang="he"><body style="margin:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:16px 8px">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:660px;width:100%;background:#fff;border-radius:12px;overflow:hidden" dir="rtl">
+  <tr><td style="background:#C8322B;color:#fff;padding:14px 18px;font-size:17px;font-weight:bold">תזכורת בוקר — ${m.current.length} מוצרים להזמין${newCount ? ` (${newCount} חדשים)` : ''}</td></tr>
+  ${m.resolved.length ? `<tr><td style="padding:12px 18px;background:#f0fdf4;font-size:13px;color:#166534"><b>טופלו מאז אתמול:</b> ${m.resolved.map(r => `${esc(r.name)} — ${esc(r.why)}`).join(' · ')}</td></tr>` : ''}
+  ${m.current.length ? `<tr><td style="padding:14px 18px"><p style="margin:0 0 8px;font-size:13px;color:#475569">מוצרים מרכזיים (A/B) שהמלאי + מה שבדרך לא יחזיק עד שהזמנה חדשה תגיע. כל מוצר נשאר כאן כל בוקר עד שנפתחת הזמנה או שהמלאי עולה.</p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(['מוצר', 'מלאי', 'בדרך', 'מספיק ל', 'זמן אספקה', 'מומלץ'])}${rows.join('')}</table>${m.current.length > 40 ? `<p style="margin:8px 0 0;font-size:12px;color:#64748b">ועוד ${m.current.length - 40} — הרשימה המלאה באתר</p>` : ''}</td></tr>` : ''}
+  ${ships.length ? `<tr><td style="padding:14px 18px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 8px;font-size:15px;color:#0f172a">משלוחים שנדחו (${ships.length})</h2>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(['מכולה', 'ספק', 'היה', 'עכשיו', 'דחייה'])}${shipRows.join('')}</table></td></tr>` : ''}
+  <tr><td style="padding:12px 18px;border-top:1px solid #e2e8f0"><a href="${esc(siteUrl)}" style="color:#1F5FBF;font-size:13px">פתח באתר ←</a>
+    <span style="color:#94a3b8;font-size:11px"> · מוצר שהחלטת לא להזמין כרגע: בכרטיס המוצר באתר — "אל תזכיר לי"${m.snoozedCount ? ` · ${m.snoozedCount} מוצרים מושתקים כרגע` : ''}</span></td></tr>
+  </table></td></tr></table></body></html>`;
+};
+
 export const renderAlertsHtml = (a, { siteUrl }) => {
   const row = (cells) => `<tr>${cells.map(c => `<td align="right" style="padding:6px;border-bottom:1px solid #f1f5f9;font-size:13px">${c}</td>`).join('')}</tr>`;
   const head = (cells) => `<tr style="background:#f1f5f9;color:#475569">${cells.map(c => `<th align="right" style="padding:6px;font-size:12px;font-weight:600">${esc(c)}</th>`).join('')}</tr>`;

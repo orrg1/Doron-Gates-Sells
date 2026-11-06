@@ -2098,6 +2098,13 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   // What is no longer ordered: suppliers being phased out, products marked 'stop' (never again) or 'keep'
   // (still ordered from a supplier that is being phased out). Saved on the server → the email and alerts follow it.
   const [orderBlock, setOrderBlockState] = useState(() => { try { const v = JSON.parse(localStorage.getItem('procOrderBlock')||'{}'); return { suppliers: v.suppliers||{}, products: v.products||{} }; } catch { return { suppliers:{}, products:{} }; } });
+  // "Don't remind me" for the morning email: { sku: { until:'YYYY-MM-DD' } | { untilStock:true, stock } } (saved to the server)
+  const [alertSnooze, setAlertSnoozeState] = useState(() => { try { return JSON.parse(localStorage.getItem('procAlertSnooze')||'{}') || {}; } catch { return {}; } });
+  const setAlertSnooze = (sku, val) => setAlertSnoozeState(prev => {
+    const next = { ...prev }; if (val) next[sku] = { ...val, at: new Date().toISOString().slice(0,10) }; else delete next[sku];
+    try { localStorage.setItem('procAlertSnooze', JSON.stringify(next)); } catch { /* best-effort */ }
+    return next;
+  });
   const saveOrderBlock = (next) => { setOrderBlockState(next); try { localStorage.setItem('procOrderBlock', JSON.stringify(next)); } catch { /* kept on screen */ } };
   const setSupplierPhasing = (name, on) => { const sup = { ...orderBlock.suppliers }; if (on) sup[name] = 'phasing'; else delete sup[name]; saveOrderBlock({ ...orderBlock, suppliers: sup }); };
   const setProductMark = (sku, mark) => { const pr = { ...orderBlock.products }; if (mark) pr[sku] = mark; else delete pr[sku]; saveOrderBlock({ ...orderBlock, products: pr }); };
@@ -3686,6 +3693,38 @@ const renderProductRow = (p) => {
                   <span className="w-2 h-2 rounded-full" style={{background: procDotColor[st]}}/>{PROC_STATUS_LABEL[st]}
                 </span>
                 {p.chip && <span className={`inline-block mr-2 mt-2 text-xs font-semibold px-2 py-1 rounded ${procChipCls(p.chip.k, isDarkMode)}`}>{p.chip.t}</span>}
+                {(() => { // the morning reminder email lists this product every day while it is "order now" (A/B)
+                  const key = p.sku || p.key, z = alertSnooze[key];
+                  const today = new Date().toISOString().slice(0,10);
+                  const active = z && (z.until ? z.until >= today : z.untilStock ? !((p.currentStock ?? 0) > (z.stock ?? 0)) : false);
+                  const inMail = st === 'now' && /^[AB]/.test(p.abc || '');
+                  if (!inMail && !active) return null;
+                  const plus = (d) => new Date(Date.now() + d*86400000).toISOString().slice(0,10);
+                  const btn = `text-xs font-semibold px-2.5 py-1.5 rounded-lg border ${isDarkMode?'border-slate-600 hover:bg-slate-700':'border-slate-300 hover:bg-slate-50'}`;
+                  return (
+                    <div className={`mt-3 rounded-xl px-3 py-2.5 text-xs space-y-2 ${isDarkMode?'bg-slate-900/60':'bg-amber-50'}`}>
+                      {active ? (
+                        <div className="flex flex-wrap items-center gap-2">
+                          <span className={strong}>לא מופיע בתזכורת הבוקר {z.until ? `עד ${isoToDisplay(z.until)}` : 'עד שייכנס מלאי'}</span>
+                          <button type="button" onClick={()=>setAlertSnooze(key, null)} className={btn}>החזר לתזכורת</button>
+                        </div>
+                      ) : (
+                        <>
+                          <p className={strong}>מופיע כל בוקר בתזכורת במייל עד שתיפתח הזמנה או שהמלאי יעלה. החלטת לא להזמין כרגע?</p>
+                          <div className="flex flex-wrap items-center gap-2">
+                            <span className={muted}>אל תזכיר לי:</span>
+                            <button type="button" onClick={()=>setAlertSnooze(key, { until: plus(7) })} className={btn}>שבוע</button>
+                            <button type="button" onClick={()=>setAlertSnooze(key, { until: plus(30) })} className={btn}>חודש</button>
+                            <button type="button" onClick={()=>setAlertSnooze(key, { untilStock: true, stock: p.currentStock ?? 0 })} className={btn}>עד שייכנס מלאי</button>
+                            <label className={`inline-flex items-center gap-1 ${muted}`}>עד
+                              <input type="date" min={plus(1)} onChange={e=>{ if (e.target.value) setAlertSnooze(key, { until: e.target.value }); }} className={`px-2 py-1 rounded-lg border ${isDarkMode?'border-slate-600 bg-slate-900':'border-slate-300 bg-white'}`}/>
+                            </label>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
               <button type="button" autoFocus onClick={()=>setDrawerKey(null)} aria-label="סגור" className={`p-2 rounded-lg border ${isDarkMode?'border-slate-600 hover:bg-slate-700':'border-slate-200 hover:bg-slate-50'}`}><X className="w-4 h-4"/></button>
             </div>
@@ -4122,13 +4161,23 @@ const renderProductRow = (p) => {
   const [alertsOn, setAlertsOnState] = useState(() => { try { return localStorage.getItem('alertsEnabled') !== 'false'; } catch { return true; } });
   const setAlertsOn = (v) => { setAlertsOnState(v); try { localStorage.setItem('alertsEnabled', v ? 'true' : 'false'); } catch { /* sent to the server with the next save */ } };
   const [alertsMsg, setAlertsMsg] = useState('');
+  // "Send now": the morning reminder (products to order — always the full current list) + new shipment delays
   const checkAlertsNow = async () => {
-    setAlertsMsg('בודק…');
+    setAlertsMsg('שולח…');
     try {
-      await flushAll();
-      const { data, error } = await supabase.functions.invoke('priority-sync', { body: { action: 'alerts' } });
-      if (error) { let msg = error.message; try { const j = await error.context?.json?.(); if (j?.error) msg = j.error; } catch { /* generic */ } throw new Error(msg); }
-      setAlertsMsg(data.skipped ? 'ההתראות כבויות' : data.baseline ? `נקבעה נקודת התחלה: ${data.known} פריטים שכבר ידועים לא יישלחו. מעכשיו יישלח רק מה שחדש.` : data.sent ? `נשלחה התראה (${data.sent} פריטים)` : 'אין התראות חדשות');
+      await flushAll(); // the snoozes set on this screen reach the server first
+      const call = async (body) => {
+        const { data, error } = await supabase.functions.invoke('priority-sync', { body });
+        if (error) { let msg = error.message; try { const j = await error.context?.json?.(); if (j?.error) msg = j.error; } catch { /* generic */ } throw new Error(msg); }
+        return data;
+      };
+      const m = await call({ action: 'morning', force: true });
+      const a = await call({ action: 'alerts' });
+      const parts = [
+        m.sent ? `נשלחה תזכורת: ${m.current} מוצרים להזמין${m.resolved ? ` · ${m.resolved} טופלו` : ''}${m.snoozed ? ` · ${m.snoozed} מושתקים` : ''}` : 'אין מוצרים להזמין — לא נשלחה תזכורת',
+        a.sent ? `נשלחה התראה על ${a.ships} משלוחים שנדחו` : '',
+      ].filter(Boolean);
+      setAlertsMsg(parts.join(' · '));
     } catch (e) { setAlertsMsg(`לא הצליח: ${e.message || e}`); }
   };
   const docFrameRef = useRef(null);
@@ -4200,9 +4249,9 @@ const renderProductRow = (p) => {
         <div className={`flex flex-wrap items-center gap-x-3 gap-y-1 text-xs ${muted}`}>
           <label className="inline-flex items-center gap-2 cursor-pointer">
             <input type="checkbox" checked={alertsOn} onChange={e=>setAlertsOn(e.target.checked)} className="w-4 h-4 accent-blue-600"/>
-            <span>התראות מיידיות במייל — מוצר מרכזי (A/B) שעומד להיגמר, או משלוח שתאריך ההגעה שלו נדחה</span>
+            <span>התראות במייל — כל בוקר ב-07:30: מוצרים מרכזיים (A/B) שצריך להזמין, עד שנפתחת הזמנה או שהמלאי עולה; ומשלוח שתאריך ההגעה שלו נדחה</span>
           </label>
-          {alertsOn && <button type="button" onClick={checkAlertsNow} className={`font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>בדוק עכשיו</button>}
+          {alertsOn && <button type="button" onClick={checkAlertsNow} className={`font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>שלח תזכורת עכשיו</button>}
           {alertsMsg && <span role="status">{alertsMsg}</span>}
         </div>
         {prioSync.busy && prioSync.progress && (

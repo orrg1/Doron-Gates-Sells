@@ -13,12 +13,15 @@
 //     { action:'weekly' } Sundays at 04:00 and 05:00 UTC — sends the summary email when it is 07:00 in Israel.
 //   • the website: { action:'digest', send?:true } — preview the weekly email (or send it now).
 //   • the website: { action:'alerts' } — check for new alerts now (a finished sync checks them in one extra tick).
+//     Instant alerts are for delayed shipments; products to order go in the morning reminder:
+//   • pg_cron daily at 04:30 and 05:30 UTC: { action:'morning' } — at 07:30 Israel time, every A/B product that is still
+//     "order now" (until a PO is opened / stock comes in / the person snoozed it on the site). The website can send it now (force).
 //   • a Google Apps Script in the mailbox (header x-ingest-token): { action:'shipments-file', name, data(base64 xlsx), from, date }
 //     — the forwarder's daily Excel, straight from the email, so nobody has to upload it;
 //     and { action:'shipments-ping', found, files, version } after every check — so a script that stopped running is noticed.
 // Priority is only ever read (GET).
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
-import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml, pickAlerts, renderAlertsHtml, parseShipments, mergeShipmentFile } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/903fc2cd8e4f083aa1faa71e3e536044944156c0/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
+import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml, pickAlerts, renderAlertsHtml, pickMorningAlerts, renderMorningHtml, parseShipments, mergeShipmentFile } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/903fc2cd8e4f083aa1faa71e3e536044944156c0/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
 
 const ROOT = (Deno.env.get('PRIORITY_ROOT') || 'https://p.priority-connect.online/odata/Priority/tabA974E.ini/gate').replace(/\/+$/, '');
 const PAT = Deno.env.get('PRIORITY_PAT') || '';
@@ -253,7 +256,7 @@ const SITE_URL = 'https://orrg1.github.io/Doron-Gates-Sells/';
 async function digestData() {
   const app = await readState(['procurementStock', 'procurementSupplier', 'procurementCost', 'procurementCurrency', 'exchangeRates', 'openOrders', 'procShipSupplierMap',
     'procOutlierDecisions', 'procurementLeadTime', 'procLeadAddTransit', 'excludeCurrentMonth', 'procSkipStockoutMonths', 'procurementMinStock', 'procurementCostHistory',
-    'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime', 'procOrderBlock', 'procShipPoLinks', 'procShipReceived', 'procShipDelivery', 'procShipExtraSups']);
+    'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime', 'procOrderBlock', 'procShipPoLinks', 'procShipReceived', 'procShipDelivery', 'procShipExtraSups', 'procAlertSnooze']);
   const sets: Record<string, unknown> = {};
   for (const k of ['procSalesLines', 'procPurchaseLines', 'procShipments', 'stockHistory', 'procPoMeta', 'procItemsExtra', 'dashboardSalesData']) sets[k] = await readDataset(k);
   // The email looks back at most ~2 years (12-month averages, a year-ago week, the trend year) — older invoice
@@ -341,6 +344,27 @@ async function staleShipmentsAlert() {
   return { subject };
 }
 
+// Morning reminder: all A/B products still to order, every morning until handled.
+async function sendMorning(by: string, force = false) {
+  const st = await readState(['alertsEnabled', 'alertsMorning']);
+  if (st.alertsEnabled === false && !force) return { skipped: 'alerts are off' };
+  const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jerusalem' }).format(new Date());
+  if (!force && st.alertsMorning?.lastSent === today) return { skipped: 'already sent today' };
+  const d: any = await digestData();
+  const snooze = ((await readState(['procAlertSnooze'])).procAlertSnooze) || {};
+  const m = pickMorningAlerts(d, st.alertsMorning || {}, snooze);
+  let sent: unknown = null;
+  if (m.current.length || m.resolved.length) {
+    const newCount = m.current.filter((x: any) => x.isNew).length;
+    const subject = m.current.length
+      ? `תזכורת בוקר: ${m.current.length} מוצרים להזמין${newCount ? ` (${newCount} חדשים)` : ''}`
+      : `תזכורת בוקר: כל המוצרים טופלו (${m.resolved.length})`;
+    sent = await sendMail(subject, renderMorningHtml(m, [], { siteUrl: SITE_URL }));
+  }
+  await writeState({ alertsMorning: { ...m.nextState, lastSent: today, lastAt: new Date().toISOString(), by, count: m.current.length } });
+  return { sent: !!sent, current: m.current.length, resolved: m.resolved.length, snoozed: m.snoozedCount };
+}
+
 // Instant alerts: only what is NEW since the last check is emailed. The very first run only records
 // what is already known (otherwise the first email would list every item that is short today).
 async function runAlerts(by: string) {
@@ -349,7 +373,9 @@ async function runAlerts(by: string) {
   const d = await digestData();
   const nowIso = new Date().toISOString();
   const sent: Record<string, string> = st.alertsSent || {};
-  const a = pickAlerts(d, sent);
+  // products to order are in the morning reminder now (every day until handled) — instant alerts: delayed shipments
+  const all = pickAlerts(d, sent);
+  const a = { stock: [] as any[], ships: all.ships, keys: all.keys.filter((k: string) => k.startsWith('ship:')) };
   const keep: Record<string, string> = {};
   Object.entries(sent).forEach(([k, v]) => { if (Date.now() - Date.parse(v) < 60 * 86400000) keep[k] = v; });
   a.keys.forEach((k: string) => { keep[k] = nowIso; });
@@ -414,6 +440,12 @@ Deno.serve(async (req) => {
     }
     if (action === 'tick') return json(await tick());
     if (action === 'alerts') return json(await runAlerts(caller));
+    if (action === 'morning') {
+      const hour = Number(new Intl.DateTimeFormat('en-GB', { timeZone: 'Asia/Jerusalem', hour: '2-digit', hour12: false }).format(new Date()));
+      const force = !!body.force;
+      if (hour !== 7 && !force) return json({ skipped: `not 07:xx in Israel (now ${hour}:00)` });
+      return json(await sendMorning(caller, force));
+    }
     if (action === 'digest') {
       if (body.send) return json(await sendDigest(caller));
       const d = await digestData();

@@ -1999,6 +1999,7 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
         priceCheck: pc.filter((x) => x.verdict !== "ok").length
       };
     })(),
+    allProductsLite: Object.fromEntries(products.filter((p) => /^[AB]/.test(p.abc || "")).map((p) => [p.sku || p.key, { name: p.name, stock: p.currentStock, incoming: p.incomingQty || 0 }])),
     alertSource: {
       stock: products.filter((p) => p.status === "now" && /^[AB]/.test(p.abc || "") && p.avgMonthly > 0).map((p) => ({
         k: p.sku || p.key,
@@ -2060,6 +2061,62 @@ var pickAlerts = (d, sent = {}, { now = Date.now(), repeatDays = 14 } = {}) => {
   const ships = (d.alertSource?.ships || []).filter((x) => !sent[`ship:${x.id}:${x.arr}`]);
   return { stock, ships, keys: [...stock.map((x) => `stock:${x.k}`), ...ships.map((x) => `ship:${x.id}:${x.arr}`)] };
 };
+var isSnoozed = (x, snooze = {}, todayIso) => {
+  const z = snooze[x.k];
+  if (!z) return false;
+  if (z.until) return z.until >= todayIso;
+  if (z.untilStock) return !((x.stock ?? 0) > (z.stock ?? 0));
+  return false;
+};
+var pickMorningAlerts = (d, state = {}, snooze = {}, { now = Date.now() } = {}) => {
+  const today = new Date(now).toISOString().slice(0, 10);
+  const prev = state.items || {};
+  const all = d.alertSource?.stock || [];
+  const snoozed = all.filter((x) => isSnoozed(x, snooze, today));
+  const current = all.filter((x) => !isSnoozed(x, snooze, today)).map((x) => {
+    const p = prev[x.k];
+    const since = p?.since || today;
+    return { ...x, isNew: !p, since, days: Math.max(0, Math.round((Date.parse(today) - Date.parse(since)) / 864e5)) };
+  }).sort((a, b) => b.isNew - a.isNew || String(a.abc).localeCompare(String(b.abc)) || (a.coverDays ?? 999) - (b.coverDays ?? 999));
+  const inNow = new Set(all.map((x) => x.k));
+  const resolved = Object.entries(prev).filter(([k]) => !inNow.has(k)).map(([k, p]) => {
+    const cur = (d.allProductsLite || {})[k] || {};
+    const why = (cur.incoming || 0) > (p.incoming || 0) ? "\u05E0\u05E4\u05EA\u05D7\u05D4 \u05D4\u05D6\u05DE\u05E0\u05D4" : (cur.stock ?? 0) > (p.stock ?? 0) ? "\u05D4\u05DE\u05DC\u05D0\u05D9 \u05E2\u05DC\u05D4" : "\u05DB\u05D1\u05E8 \u05DC\u05D0 \u05D1\u05E1\u05D9\u05DB\u05D5\u05DF";
+    return { k, name: p.name || cur.name || k, why };
+  });
+  const items = {};
+  [...current, ...snoozed].forEach((x) => {
+    items[x.k] = { since: prev[x.k]?.since || today, stock: x.stock ?? null, incoming: x.incoming || 0, name: x.name };
+  });
+  return { current, resolved, snoozedCount: snoozed.length, nextState: { items, lastSent: state.lastSent || null } };
+};
+var renderMorningHtml = (m, ships = [], { siteUrl }) => {
+  const row = (cells) => `<tr>${cells.map((c) => `<td align="right" style="padding:6px;border-bottom:1px solid #f1f5f9;font-size:13px;vertical-align:top">${c}</td>`).join("")}</tr>`;
+  const head = (cells) => `<tr style="background:#f1f5f9;color:#475569">${cells.map((c) => `<th align="right" style="padding:6px;font-size:12px;font-weight:600">${esc(c)}</th>`).join("")}</tr>`;
+  const tag = (x) => x.isNew ? '<span style="background:#C8322B;color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:bold">\u05D7\u05D3\u05E9</span>' : `<span style="color:#b45309;font-size:11px;font-weight:bold">\u05D1\u05E8\u05E9\u05D9\u05DE\u05D4 ${x.days} ${x.days === 1 ? "\u05D9\u05D5\u05DD" : "\u05D9\u05DE\u05D9\u05DD"}</span>`;
+  const rows = m.current.slice(0, 40).map((x) => row([
+    `${tag(x)}<br><b>${esc(x.name)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)} \xB7 ${esc(x.ownMade ? "\u05D9\u05D9\u05E6\u05D5\u05E8 \u05E2\u05E6\u05DE\u05D9" : x.supplier || "\u05E1\u05E4\u05E7 \u05DC\u05D0 \u05D9\u05D3\u05D5\u05E2")}</span>`,
+    x.stock ?? "\u2014",
+    x.incoming || "\u2014",
+    x.coverDays == null ? "\u2014" : `<b style="color:#C8322B">${x.coverDays} \u05D9\u05DE\u05D9\u05DD</b>`,
+    `${x.leadMonths} \u05D7\u05F3`,
+    `<b>${(x.qty || 0).toLocaleString("en-US")}</b> ${x.ownMade ? "\u05DC\u05D9\u05D9\u05E6\u05E8" : "\u05DC\u05D4\u05D6\u05DE\u05D9\u05DF"}`
+  ]));
+  const shipRows = ships.map((x) => row([esc(x.cont || "\u2014"), esc(x.sup), esc(isoToDisplay(x.from || "")), `<b>${esc(isoToDisplay(x.arr || ""))}</b>`, `<b style="color:#C8322B">+${x.delayDays} \u05D9\u05DE\u05D9\u05DD</b>`]));
+  const newCount = m.current.filter((x) => x.isNew).length;
+  return `<!doctype html><html dir="rtl" lang="he"><body style="margin:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif">
+  <table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:16px 8px">
+  <table width="100%" cellpadding="0" cellspacing="0" style="max-width:660px;width:100%;background:#fff;border-radius:12px;overflow:hidden" dir="rtl">
+  <tr><td style="background:#C8322B;color:#fff;padding:14px 18px;font-size:17px;font-weight:bold">\u05EA\u05D6\u05DB\u05D5\u05E8\u05EA \u05D1\u05D5\u05E7\u05E8 \u2014 ${m.current.length} \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DC\u05D4\u05D6\u05DE\u05D9\u05DF${newCount ? ` (${newCount} \u05D7\u05D3\u05E9\u05D9\u05DD)` : ""}</td></tr>
+  ${m.resolved.length ? `<tr><td style="padding:12px 18px;background:#f0fdf4;font-size:13px;color:#166534"><b>\u05D8\u05D5\u05E4\u05DC\u05D5 \u05DE\u05D0\u05D6 \u05D0\u05EA\u05DE\u05D5\u05DC:</b> ${m.resolved.map((r) => `${esc(r.name)} \u2014 ${esc(r.why)}`).join(" \xB7 ")}</td></tr>` : ""}
+  ${m.current.length ? `<tr><td style="padding:14px 18px"><p style="margin:0 0 8px;font-size:13px;color:#475569">\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DE\u05E8\u05DB\u05D6\u05D9\u05D9\u05DD (A/B) \u05E9\u05D4\u05DE\u05DC\u05D0\u05D9 + \u05DE\u05D4 \u05E9\u05D1\u05D3\u05E8\u05DA \u05DC\u05D0 \u05D9\u05D7\u05D6\u05D9\u05E7 \u05E2\u05D3 \u05E9\u05D4\u05D6\u05DE\u05E0\u05D4 \u05D7\u05D3\u05E9\u05D4 \u05EA\u05D2\u05D9\u05E2. \u05DB\u05DC \u05DE\u05D5\u05E6\u05E8 \u05E0\u05E9\u05D0\u05E8 \u05DB\u05D0\u05DF \u05DB\u05DC \u05D1\u05D5\u05E7\u05E8 \u05E2\u05D3 \u05E9\u05E0\u05E4\u05EA\u05D7\u05EA \u05D4\u05D6\u05DE\u05E0\u05D4 \u05D0\u05D5 \u05E9\u05D4\u05DE\u05DC\u05D0\u05D9 \u05E2\u05D5\u05DC\u05D4.</p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(["\u05DE\u05D5\u05E6\u05E8", "\u05DE\u05DC\u05D0\u05D9", "\u05D1\u05D3\u05E8\u05DA", "\u05DE\u05E1\u05E4\u05D9\u05E7 \u05DC", "\u05D6\u05DE\u05DF \u05D0\u05E1\u05E4\u05E7\u05D4", "\u05DE\u05D5\u05DE\u05DC\u05E5"])}${rows.join("")}</table>${m.current.length > 40 ? `<p style="margin:8px 0 0;font-size:12px;color:#64748b">\u05D5\u05E2\u05D5\u05D3 ${m.current.length - 40} \u2014 \u05D4\u05E8\u05E9\u05D9\u05DE\u05D4 \u05D4\u05DE\u05DC\u05D0\u05D4 \u05D1\u05D0\u05EA\u05E8</p>` : ""}</td></tr>` : ""}
+  ${ships.length ? `<tr><td style="padding:14px 18px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 8px;font-size:15px;color:#0f172a">\u05DE\u05E9\u05DC\u05D5\u05D7\u05D9\u05DD \u05E9\u05E0\u05D3\u05D7\u05D5 (${ships.length})</h2>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(["\u05DE\u05DB\u05D5\u05DC\u05D4", "\u05E1\u05E4\u05E7", "\u05D4\u05D9\u05D4", "\u05E2\u05DB\u05E9\u05D9\u05D5", "\u05D3\u05D7\u05D9\u05D9\u05D4"])}${shipRows.join("")}</table></td></tr>` : ""}
+  <tr><td style="padding:12px 18px;border-top:1px solid #e2e8f0"><a href="${esc(siteUrl)}" style="color:#1F5FBF;font-size:13px">\u05E4\u05EA\u05D7 \u05D1\u05D0\u05EA\u05E8 \u2190</a>
+    <span style="color:#94a3b8;font-size:11px"> \xB7 \u05DE\u05D5\u05E6\u05E8 \u05E9\u05D4\u05D7\u05DC\u05D8\u05EA \u05DC\u05D0 \u05DC\u05D4\u05D6\u05DE\u05D9\u05DF \u05DB\u05E8\u05D2\u05E2: \u05D1\u05DB\u05E8\u05D8\u05D9\u05E1 \u05D4\u05DE\u05D5\u05E6\u05E8 \u05D1\u05D0\u05EA\u05E8 \u2014 "\u05D0\u05DC \u05EA\u05D6\u05DB\u05D9\u05E8 \u05DC\u05D9"${m.snoozedCount ? ` \xB7 ${m.snoozedCount} \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DE\u05D5\u05E9\u05EA\u05E7\u05D9\u05DD \u05DB\u05E8\u05D2\u05E2` : ""}</span></td></tr>
+  </table></td></tr></table></body></html>`;
+};
 var renderAlertsHtml = (a, { siteUrl }) => {
   const row = (cells) => `<tr>${cells.map((c) => `<td align="right" style="padding:6px;border-bottom:1px solid #f1f5f9;font-size:13px">${c}</td>`).join("")}</tr>`;
   const head = (cells) => `<tr style="background:#f1f5f9;color:#475569">${cells.map((c) => `<th align="right" style="padding:6px;font-size:12px;font-weight:600">${esc(c)}</th>`).join("")}</tr>`;
@@ -2102,9 +2159,11 @@ export {
   monthWindows,
   parseShipments,
   pickAlerts,
+  pickMorningAlerts,
   planSteps,
   renderAlertsHtml,
   renderDigestHtml,
+  renderMorningHtml,
   runStep,
   syncMonthsOf
 };
