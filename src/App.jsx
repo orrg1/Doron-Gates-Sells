@@ -5430,7 +5430,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
               if (!c?.at) return null;
               const ago = Date.now() - Date.parse(c.at);
               const when = new Date(c.at).toLocaleString('he-IL',{day:'2-digit',month:'2-digit',hour:'2-digit',minute:'2-digit'});
-              const bad = (c.files || []).filter(f => f.code !== 200);
+              const bad = (c.files || []).filter(f => f.code !== 200 && f.code !== 0); // 0 = an email without an Excel (payment requests etc.) — normal
               return ago > 3*3600000
                 ? <p className="text-sm font-semibold text-orange-600">הסקריפט במייל לא בדק מאז {when} — פותחים אותו ב-script.google.com ומריצים פעם אחת את install.</p>
                 : <p className={`text-xs ${muted}`}>בדיקת מייל אחרונה: {when} · {c.found} מיילים מהמשלח ב-5 ימים{c.newMsgs ? ` · ${c.newMsgs} חדשים` : ''}{bad.length ? ` · ${bad.map(f => `${f.name}: ${f.note || f.code}`).join(' · ')}` : ''}</p>;
