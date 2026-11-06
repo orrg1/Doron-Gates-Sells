@@ -4171,7 +4171,7 @@ const renderProductRow = (p) => {
         <div className="flex flex-wrap items-center gap-3">
           <div className="flex-1 min-w-[220px]">
             <p className={`font-bold text-sm ${strong}`}>סנכרון ישיר מ-Priority</p>
-            <p className={`text-xs mt-0.5 ${muted}`}>מושך פריטים, יתרות מלאי, הזמנות רכש, לקוחות, חשבוניות מכירה וחשבוניות ספק — במקום להעלות קבצים. הסנכרון רץ בשרת, וגם לבד כל ערב ב-22:00. רק חשבוניות סופיות נספרות (בלי טיוטות ובלי מבוטלות). קריאה בלבד, שום דבר לא משתנה ב-Priority. דוח המשלוחים מהמשלח עדיין נטען כקובץ.</p>
+            <p className={`text-xs mt-0.5 ${muted}`}>מושך פריטים, יתרות מלאי, הזמנות רכש, לקוחות, חשבוניות מכירה וחשבוניות ספק — במקום להעלות קבצים. הסנכרון רץ בשרת, וגם לבד כל ערב ב-22:00. רק חשבוניות סופיות נספרות (בלי טיוטות ובלי מבוטלות). קריאה בלבד, שום דבר לא משתנה ב-Priority. דוח המשלוחים מהמשלח נקלט אוטומטית מהמייל (אפשר גם להעלות אותו ידנית).</p>
             {prioSync.at && <p className={`text-xs mt-1 ${muted}`}>סנכרון אחרון: {new Date(prioSync.at).toLocaleString('he-IL', { day:'2-digit', month:'2-digit', hour:'2-digit', minute:'2-digit' })}</p>}
           </div>
           <button type="button" onClick={()=>syncFromPriority(false)} disabled={prioSync.busy}
