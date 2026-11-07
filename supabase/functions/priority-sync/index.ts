@@ -256,7 +256,7 @@ const SITE_URL = 'https://orrg1.github.io/Doron-Gates-Sells/';
 async function digestData() {
   const app = await readState(['procurementStock', 'procurementSupplier', 'procurementCost', 'procurementCurrency', 'exchangeRates', 'openOrders', 'procShipSupplierMap',
     'procOutlierDecisions', 'procurementLeadTime', 'procLeadAddTransit', 'excludeCurrentMonth', 'procSkipStockoutMonths', 'procurementMinStock', 'procurementCostHistory',
-    'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime', 'procOrderBlock', 'procShipPoLinks', 'procShipReceived', 'procShipDelivery', 'procShipExtraSups', 'procAlertSnooze']);
+    'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime', 'procOrderBlock', 'procShipPoLinks', 'procShipReceived', 'procShipDelivery', 'procShipExtraSups', 'procAlertSnooze', 'procOwnMadeAlertDays']);
   const sets: Record<string, unknown> = {};
   for (const k of ['procSalesLines', 'procPurchaseLines', 'procShipments', 'stockHistory', 'procPoMeta', 'procItemsExtra', 'dashboardSalesData']) sets[k] = await readDataset(k);
   // The email looks back at most ~2 years (12-month averages, a year-ago week, the trend year) — older invoice
@@ -346,23 +346,24 @@ async function staleShipmentsAlert() {
 
 // Morning reminder: all A/B products still to order, every morning until handled.
 async function sendMorning(by: string, force = false) {
-  const st = await readState(['alertsEnabled', 'alertsMorning']);
+  const st = await readState(['alertsEnabled', 'alertsMorning', 'procOwnMadeAlertDays']);
   if (st.alertsEnabled === false && !force) return { skipped: 'alerts are off' };
   const today = new Intl.DateTimeFormat('en-CA', { timeZone: 'Asia/Jerusalem' }).format(new Date());
   if (!force && st.alertsMorning?.lastSent === today) return { skipped: 'already sent today' };
   const d: any = await digestData();
   const snooze = ((await readState(['procAlertSnooze'])).procAlertSnooze) || {};
-  const m = pickMorningAlerts(d, st.alertsMorning || {}, snooze);
+  const m = pickMorningAlerts(d, st.alertsMorning || {}, snooze, { ownMadeDays: Number(st.procOwnMadeAlertDays) || 14 });
   let sent: unknown = null;
   if (m.current.length || m.resolved.length) {
     const newCount = m.current.filter((x: any) => x.isNew).length;
+    const parts = [m.buy.length ? `${m.buy.length} מוצרים להזמין מ-${m.bySupplier.length} ספקים` : '', m.make.length ? `${m.make.length} לייצור` : ''].filter(Boolean);
     const subject = m.current.length
-      ? `תזכורת בוקר: ${m.current.length} מוצרים להזמין${newCount ? ` (${newCount} חדשים)` : ''}`
+      ? `תזכורת בוקר: ${parts.join(' · ')}${newCount ? ` (${newCount} חדשים)` : ''}`
       : `תזכורת בוקר: כל המוצרים טופלו (${m.resolved.length})`;
     sent = await sendMail(subject, renderMorningHtml(m, [], { siteUrl: SITE_URL }));
   }
   await writeState({ alertsMorning: { ...m.nextState, lastSent: today, lastAt: new Date().toISOString(), by, count: m.current.length } });
-  return { sent: !!sent, current: m.current.length, resolved: m.resolved.length, snoozed: m.snoozedCount };
+  return { sent: !!sent, current: m.current.length, buy: m.buy.length, suppliers: m.bySupplier.length, make: m.make.length, resolved: m.resolved.length, snoozed: m.snoozedCount };
 }
 
 // Instant alerts: only what is NEW since the last check is emailed. The very first run only records

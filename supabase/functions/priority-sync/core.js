@@ -1406,6 +1406,7 @@ var isOwnMadeFamily = (fam) => /ייצור\s*עצמי/.test(String(fam || ""));
 var orderBlockOf = (orderBlock, sku, supplier) => {
   const pm = orderBlock?.products?.[sku];
   if (pm === "stop") return "product";
+  if (pm === "mto") return "mto";
   if (supplier && orderBlock?.suppliers?.[supplier] === "phasing" && pm !== "keep") return "supplier";
   return null;
 };
@@ -1418,6 +1419,7 @@ var procStatus = (p) => {
 };
 var procChip = (p) => {
   if (p.inactive) return { t: "\u05DE\u05D5\u05E6\u05E8 \u05DC\u05D0 \u05E4\u05E2\u05D9\u05DC \u05D1\u05E4\u05E8\u05D9\u05D5\u05E8\u05D9\u05D8\u05D9", k: "muted" };
+  if (p.orderBlocked === "mto") return { t: "\u05DC\u05E4\u05D9 \u05D4\u05D6\u05DE\u05E0\u05D4 \u2014 \u05D1\u05DC\u05D9 \u05DE\u05DC\u05D0\u05D9 \u05D5\u05D1\u05DC\u05D9 \u05D4\u05EA\u05E8\u05D0\u05D5\u05EA", k: "muted" };
   if (p.overdue) return { t: `\u05D4\u05D6\u05DE\u05E0\u05D4 \u05D1\u05D0\u05D9\u05D7\u05D5\u05E8 ${p.overdue.maxDays} \u05D9\u05DE\u05D9\u05DD`, k: "now" };
   if (p.shortNowCoveredByPO) return { t: "\u05D7\u05E1\u05E8 \u05E2\u05DB\u05E9\u05D9\u05D5 \xB7 \u05DE\u05DB\u05D5\u05E1\u05D4 \u05D1\u05D4\u05D6\u05DE\u05E0\u05D4", k: "watch" };
   if (p.priceChangePct != null && Math.abs(p.priceChangePct) >= 3) return { t: `\u05DE\u05D7\u05D9\u05E8 \u05E7\u05E0\u05D9\u05D4 ${p.priceChangePct > 0 ? "\u05E2\u05DC\u05D4" : "\u05D9\u05E8\u05D3"} ${Math.abs(p.priceChangePct).toFixed(0)}%`, k: p.priceChangePct > 0 ? "watch" : "muted" };
@@ -1922,6 +1924,9 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
     toOrderNow: products.filter((p) => p.status === "now" && !p.ownMade).length,
     toMake: products.filter((p) => p.ownMade && p.suggestedOrder > 0).length,
     toMakeNow: products.filter((p) => p.ownMade && p.status === "now").length,
+    // own-made that is nearly out (under procOwnMadeAlertDays, default 14, or no stock) — the urgent part
+    toMakeUrgent: products.filter((p) => p.ownMade && p.status === "now" && ((p.currentStock ?? 0) <= 0 || p.effectiveCoverDays != null && p.effectiveCoverDays < (Number(app.procOwnMadeAlertDays) || 14))).length,
+    toMakeList: products.filter((p) => p.ownMade && p.suggestedOrder > 0 && p.currentStock != null).sort((a, b) => (b.status === "now") - (a.status === "now") || (a.effectiveCoverDays ?? 999) - (b.effectiveCoverDays ?? 999)).slice(0, 15).map((p) => ({ name: p.name, sku: p.sku, stock: p.currentStock, coverDays: p.effectiveCoverDays != null ? Math.round(p.effectiveCoverDays) : null, qty: p.suggestedOrder, now: p.status === "now" })),
     latePOs: Object.values(lateBySup).map((s) => ({ ...s, pos: [...s.pos] })).sort((a, b) => b.maxDays - a.maxDays),
     latePOLines: latePOs.length,
     delayed: delayed.slice(0, 10).map((s) => ({ cont: s.cont, sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays })),
@@ -2047,7 +2052,7 @@ var renderDigestHtml = (d, { siteUrl }) => {
   <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#ffffff;border-radius:12px;overflow:hidden" dir="rtl">
     <tr><td style="background:#0f172a;color:#fff;padding:18px 22px"><div style="font-size:18px;font-weight:bold">\u05E1\u05D9\u05DB\u05D5\u05DD \u05E9\u05D1\u05D5\u05E2\u05D9 \u2014 \u05E8\u05DB\u05E9 \u05D5\u05DE\u05DB\u05D9\u05E8\u05D5\u05EA</div>
       <div style="font-size:12px;opacity:.75;margin-top:4px">${esc(isoToDisplay(d.today))}${d.syncAt ? ` \xB7 \u05E0\u05EA\u05D5\u05E0\u05D9 Priority \u05DE-${esc(new Date(d.syncAt).toLocaleString("he-IL", { timeZone: "Asia/Jerusalem", day: "2-digit", month: "2-digit", hour: "2-digit", minute: "2-digit" }))}` : ""}</div></td></tr>
-    ${sec("\u05DE\u05D4 \u05DC\u05D4\u05D6\u05DE\u05D9\u05DF \u05D4\u05E9\u05D1\u05D5\u05E2", p(`<b>${d.toOrderNow}</b> \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DC\u05D4\u05D6\u05DE\u05D9\u05DF \u05E2\u05DB\u05E9\u05D9\u05D5 \xB7 \u05E9\u05D5\u05D5\u05D9 \u05DE\u05E9\u05D5\u05E2\u05E8 \u05E9\u05DC \u05DB\u05DC \u05D4\u05D4\u05DE\u05DC\u05E6\u05D5\u05EA <b>${ils(d.toOrderTotal)}</b>`) + (d.toMake ? p(`\u05D9\u05D9\u05E6\u05D5\u05E8 \u05E2\u05E6\u05DE\u05D9: <b>${d.toMake}</b> \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DC\u05D9\u05D9\u05E6\u05E8${d.toMakeNow ? ` (\u05DE\u05D4\u05DD <b style="color:#C8322B">${d.toMakeNow}</b> \u05D3\u05D7\u05D5\u05E4\u05D9\u05DD)` : ""}`) : "") + table(["\u05E1\u05E4\u05E7", "\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD", "\u05D3\u05D7\u05D5\u05E3", "\u05E9\u05D5\u05D5\u05D9 \u05DE\u05E9\u05D5\u05E2\u05E8", "\u05D6\u05DE\u05DF \u05D0\u05E1\u05E4\u05E7\u05D4"], d.toOrder.slice(0, 12).map((s) => [esc(s.name), s.n, s.now ? `<b style="color:#C8322B">${s.now}</b>` : "\u2014", s.value ? ils(s.value) : "\u2014", `${s.lead} \u05D7\u05F3`])), proc)}
+    ${sec("\u05DE\u05D4 \u05DC\u05D4\u05D6\u05DE\u05D9\u05DF \u05D4\u05E9\u05D1\u05D5\u05E2", p(`<b>${d.toOrderNow}</b> \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DC\u05D4\u05D6\u05DE\u05D9\u05DF \u05E2\u05DB\u05E9\u05D9\u05D5 \xB7 \u05E9\u05D5\u05D5\u05D9 \u05DE\u05E9\u05D5\u05E2\u05E8 \u05E9\u05DC \u05DB\u05DC \u05D4\u05D4\u05DE\u05DC\u05E6\u05D5\u05EA <b>${ils(d.toOrderTotal)}</b>`) + p("<b>\u05DC\u05D4\u05D6\u05DE\u05D9\u05DF \u05DE\u05E1\u05E4\u05E7\u05D9\u05DD</b>") + table(["\u05E1\u05E4\u05E7", "\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD", "\u05D3\u05D7\u05D5\u05E3", "\u05E9\u05D5\u05D5\u05D9 \u05DE\u05E9\u05D5\u05E2\u05E8", "\u05D6\u05DE\u05DF \u05D0\u05E1\u05E4\u05E7\u05D4"], d.toOrder.slice(0, 12).map((s) => [esc(s.name), s.n, s.now ? `<b style="color:#C8322B">${s.now}</b>` : "\u2014", s.value ? ils(s.value) : "\u2014", `${s.lead} \u05D7\u05F3`])) + ((d.toMakeList || []).length ? '<div style="height:12px"></div>' + p(`<b>\u05DC\u05D9\u05D9\u05E6\u05D5\u05E8</b> \u2014 ${d.toMake} \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD${d.toMakeNow ? ` (\u05DE\u05D4\u05DD <b style="color:#C8322B">${d.toMakeNow}</b> \u05D3\u05D7\u05D5\u05E4\u05D9\u05DD)` : ""}`) + table(["\u05DE\u05D5\u05E6\u05E8", "\u05DE\u05DC\u05D0\u05D9", "\u05DE\u05E1\u05E4\u05D9\u05E7 \u05DC", "\u05DC\u05D9\u05D9\u05E6\u05E8"], d.toMakeList.map((x) => [`${x.now ? '<b style="color:#C8322B">\u25CF</b> ' : ""}${esc(x.name)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.sku || "")}</span>`, x.stock ?? "\u2014", x.coverDays == null ? "\u2014" : `${x.coverDays} \u05D9\u05DE\u05D9\u05DD`, `<b>${(x.qty || 0).toLocaleString("en-US")}</b>`])) + (d.toMake > d.toMakeList.length ? p(`<span style="font-size:12px;color:#64748b">\u05D5\u05E2\u05D5\u05D3 ${d.toMake - d.toMakeList.length} \u2014 \u05D1\u05D0\u05EA\u05E8</span>`) : "") : ""), proc)}
     ${sec("\u05DE\u05D4 \u05D1\u05D3\u05E8\u05DA \u2014 \u05D1\u05D0\u05D9\u05D7\u05D5\u05E8 \u05D5\u05E0\u05D3\u05D7\u05D4", p(`\u05D4\u05D6\u05DE\u05E0\u05D5\u05EA \u05E8\u05DB\u05E9 \u05D1\u05D0\u05D9\u05D7\u05D5\u05E8: <b>${d.latePOLines}</b> \u05E9\u05D5\u05E8\u05D5\u05EA`) + table(["\u05E1\u05E4\u05E7", "\u05E9\u05D5\u05E8\u05D5\u05EA", "\u05D0\u05D9\u05D7\u05D5\u05E8 \u05DE\u05E8\u05D1\u05D9", "\u05D4\u05D6\u05DE\u05E0\u05D5\u05EA"], d.latePOs.slice(0, 8).map((s) => [esc(s.name), s.lines, `${s.maxDays} \u05D9\u05DE\u05D9\u05DD`, esc(s.pos.slice(0, 4).join(", "))])) + (d.delayed.length ? '<div style="height:10px"></div>' + table(["\u05DE\u05DB\u05D5\u05DC\u05D4", "\u05E1\u05E4\u05E7", "\u05D4\u05D2\u05E2\u05D4", "\u05E0\u05D3\u05D7\u05D4"], d.delayed.map((s) => [esc(s.cont || "\u2014"), esc(s.sup), esc(isoToDisplay(s.arr)), `${s.delayDays} \u05D9\u05DE\u05D9\u05DD (\u05D4\u05D9\u05D4 ${esc(isoToDisplay(s.from))})`])) : ""), proc)}
     ${sec("\u05D4\u05EA\u05D9\u05D9\u05E7\u05E8\u05D5\u05D9\u05D5\u05EA \u05D1\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05D5\u05EA \u05E1\u05E4\u05E7 \u05D4\u05E9\u05D1\u05D5\u05E2", table(["\u05DE\u05D5\u05E6\u05E8", "\u05E1\u05E4\u05E7", "\u05E7\u05D5\u05D3\u05DD", "\u05E2\u05DB\u05E9\u05D9\u05D5", "\u05E9\u05D9\u05E0\u05D5\u05D9"], d.priceUps.map((x) => [esc(x.name), esc(x.s), `${x.prevP} ${esc(x.cur)}`, `<b>${x.p} ${esc(x.cur)}</b>`, `<b style="color:#C8322B">${pctS(x.pct)}</b>`])), proc)}
     ${sec("\u05DE\u05DC\u05D0\u05D9 \u05E2\u05D5\u05D3\u05E3", p(`\u05DB\u05E1\u05E3 \u05E9\u05D9\u05D5\u05E9\u05D1 \u05D1\u05DE\u05DC\u05D0\u05D9 \u05E2\u05D5\u05D3\u05E3: <b>${ils(d.excessValue)}</b> \xB7 \u05D4\u05D6\u05DE\u05E0\u05D5\u05EA \u05E4\u05EA\u05D5\u05D7\u05D5\u05EA \u05E2\u05DC \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05D1\u05E2\u05D5\u05D3\u05E3: <b>${d.excessPOCount}</b>`) + table(["\u05DE\u05D5\u05E6\u05E8", "\u05E1\u05E4\u05E7", "\u05D1\u05D4\u05D6\u05DE\u05E0\u05D4 \u05DE\u05D9\u05D5\u05EA\u05E8\u05EA", "\u05E9\u05D5\u05D5\u05D9"], d.excessPOs.map((x) => [esc(x.name), esc(x.supplier || "\u2014"), `${x.poExcess} \u05D9\u05D7\u05F3`, x.value ? ils(x.value) : "\u2014"])), proc)}
@@ -2068,12 +2073,13 @@ var isSnoozed = (x, snooze = {}, todayIso) => {
   if (z.untilStock) return !((x.stock ?? 0) > (z.stock ?? 0));
   return false;
 };
-var pickMorningAlerts = (d, state = {}, snooze = {}, { now = Date.now() } = {}) => {
+var pickMorningAlerts = (d, state = {}, snooze = {}, { now = Date.now(), ownMadeDays = 14 } = {}) => {
   const today = new Date(now).toISOString().slice(0, 10);
   const prev = state.items || {};
   const all = d.alertSource?.stock || [];
   const snoozed = all.filter((x) => isSnoozed(x, snooze, today));
-  const current = all.filter((x) => !isSnoozed(x, snooze, today)).map((x) => {
+  const urgentEnough = (x) => !x.ownMade || (x.stock ?? 0) <= 0 || x.coverDays != null && x.coverDays < ownMadeDays;
+  const current = all.filter((x) => !isSnoozed(x, snooze, today) && urgentEnough(x)).map((x) => {
     const p = prev[x.k];
     const since = p?.since || today;
     return { ...x, isNew: !p, since, days: Math.max(0, Math.round((Date.parse(today) - Date.parse(since)) / 864e5)) };
@@ -2088,33 +2094,53 @@ var pickMorningAlerts = (d, state = {}, snooze = {}, { now = Date.now() } = {}) 
   [...current, ...snoozed].forEach((x) => {
     items[x.k] = { since: prev[x.k]?.since || today, stock: x.stock ?? null, incoming: x.incoming || 0, name: x.name };
   });
-  return { current, resolved, snoozedCount: snoozed.length, nextState: { items, lastSent: state.lastSent || null } };
+  const buy = current.filter((x) => !x.ownMade), make = current.filter((x) => x.ownMade);
+  const groups = {};
+  buy.forEach((x) => {
+    (groups[x.supplier || "\u05E1\u05E4\u05E7 \u05DC\u05D0 \u05D9\u05D3\u05D5\u05E2"] ||= []).push(x);
+  });
+  const bySupplier = Object.entries(groups).map(([name, items2]) => ({ name, items: items2, newCount: items2.filter((x) => x.isNew).length, minCover: Math.min(...items2.map((x) => x.coverDays ?? 999)) })).sort((a, b) => (b.newCount > 0) - (a.newCount > 0) || a.minCover - b.minCover || b.items.length - a.items.length);
+  return { current, buy, make, bySupplier, ownMadeDays, resolved, snoozedCount: snoozed.length, nextState: { items, lastSent: state.lastSent || null } };
 };
 var renderMorningHtml = (m, ships = [], { siteUrl }) => {
   const row = (cells) => `<tr>${cells.map((c) => `<td align="right" style="padding:6px;border-bottom:1px solid #f1f5f9;font-size:13px;vertical-align:top">${c}</td>`).join("")}</tr>`;
   const head = (cells) => `<tr style="background:#f1f5f9;color:#475569">${cells.map((c) => `<th align="right" style="padding:6px;font-size:12px;font-weight:600">${esc(c)}</th>`).join("")}</tr>`;
-  const tag = (x) => x.isNew ? '<span style="background:#C8322B;color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:bold">\u05D7\u05D3\u05E9</span>' : `<span style="color:#b45309;font-size:11px;font-weight:bold">\u05D1\u05E8\u05E9\u05D9\u05DE\u05D4 ${x.days} ${x.days === 1 ? "\u05D9\u05D5\u05DD" : "\u05D9\u05DE\u05D9\u05DD"}</span>`;
-  const rows = m.current.slice(0, 40).map((x) => row([
-    `${tag(x)}<br><b>${esc(x.name)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)} \xB7 ${esc(x.ownMade ? "\u05D9\u05D9\u05E6\u05D5\u05E8 \u05E2\u05E6\u05DE\u05D9" : x.supplier || "\u05E1\u05E4\u05E7 \u05DC\u05D0 \u05D9\u05D3\u05D5\u05E2")}</span>`,
+  const tag = (x) => x.isNew ? '<span style="background:#C8322B;color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:bold">\u05D7\u05D3\u05E9</span> ' : `<span style="color:#b45309;font-size:11px;font-weight:bold">\u05D1\u05E8\u05E9\u05D9\u05DE\u05D4 ${x.days} ${x.days === 1 ? "\u05D9\u05D5\u05DD" : "\u05D9\u05DE\u05D9\u05DD"}</span> `;
+  const itemRow = (x, verb) => row([
+    `${tag(x)}<b>${esc(x.name)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}</span>`,
     x.stock ?? "\u2014",
     x.incoming || "\u2014",
     x.coverDays == null ? "\u2014" : `<b style="color:#C8322B">${x.coverDays} \u05D9\u05DE\u05D9\u05DD</b>`,
-    `${x.leadMonths} \u05D7\u05F3`,
-    `<b>${(x.qty || 0).toLocaleString("en-US")}</b> ${x.ownMade ? "\u05DC\u05D9\u05D9\u05E6\u05E8" : "\u05DC\u05D4\u05D6\u05DE\u05D9\u05DF"}`
-  ]));
+    `<b>${(x.qty || 0).toLocaleString("en-US")}</b> ${verb}`
+  ]);
+  const cols = (verb) => head(["\u05DE\u05D5\u05E6\u05E8", "\u05DE\u05DC\u05D0\u05D9", "\u05D1\u05D3\u05E8\u05DA", "\u05DE\u05E1\u05E4\u05D9\u05E7 \u05DC", verb]);
+  const buy = m.buy || m.current.filter((x) => !x.ownMade), make = m.make || m.current.filter((x) => x.ownMade);
+  let shown = 0;
+  const LIMIT = 60;
+  const supBlocks = (m.bySupplier || []).map((g) => {
+    if (shown >= LIMIT) return "";
+    const items = g.items.slice(0, Math.max(0, LIMIT - shown));
+    shown += items.length;
+    return `<tr><td colspan="5" style="padding:10px 6px 4px;font-size:14px;font-weight:bold;color:#0f172a;border-bottom:2px solid #e2e8f0"><bdi>${esc(g.name)}</bdi> <span style="font-weight:normal;color:#64748b;font-size:12px">\u2014 ${g.items.length === 1 ? "\u05DE\u05D5\u05E6\u05E8 \u05D0\u05D7\u05D3" : `${g.items.length} \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD`}${g.newCount ? `, ${g.newCount === 1 ? "\u05D7\u05D3\u05E9 \u05D0\u05D7\u05D3" : `${g.newCount} \u05D7\u05D3\u05E9\u05D9\u05DD`}` : ""}</span></td></tr>` + items.map((x) => itemRow(x, "\u05DC\u05D4\u05D6\u05DE\u05D9\u05DF")).join("");
+  }).join("");
   const shipRows = ships.map((x) => row([esc(x.cont || "\u2014"), esc(x.sup), esc(isoToDisplay(x.from || "")), `<b>${esc(isoToDisplay(x.arr || ""))}</b>`, `<b style="color:#C8322B">+${x.delayDays} \u05D9\u05DE\u05D9\u05DD</b>`]));
   const newCount = m.current.filter((x) => x.isNew).length;
+  const title = [buy.length ? `${buy.length} \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DC\u05D4\u05D6\u05DE\u05D9\u05DF \u05DE-${(m.bySupplier || []).length} \u05E1\u05E4\u05E7\u05D9\u05DD` : "", make.length ? `${make.length} \u05DC\u05D9\u05D9\u05E6\u05D5\u05E8` : ""].filter(Boolean).join(" \xB7 ") || "\u05D4\u05DB\u05DC \u05D8\u05D5\u05E4\u05DC";
   return `<!doctype html><html dir="rtl" lang="he"><body style="margin:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif">
   <table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:16px 8px">
   <table width="100%" cellpadding="0" cellspacing="0" style="max-width:660px;width:100%;background:#fff;border-radius:12px;overflow:hidden" dir="rtl">
-  <tr><td style="background:#C8322B;color:#fff;padding:14px 18px;font-size:17px;font-weight:bold">\u05EA\u05D6\u05DB\u05D5\u05E8\u05EA \u05D1\u05D5\u05E7\u05E8 \u2014 ${m.current.length} \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DC\u05D4\u05D6\u05DE\u05D9\u05DF${newCount ? ` (${newCount} \u05D7\u05D3\u05E9\u05D9\u05DD)` : ""}</td></tr>
+  <tr><td style="background:#C8322B;color:#fff;padding:14px 18px;font-size:17px;font-weight:bold">\u05EA\u05D6\u05DB\u05D5\u05E8\u05EA \u05D1\u05D5\u05E7\u05E8 \u2014 ${esc(title)}${newCount ? ` <span style="font-size:13px;font-weight:normal">(${newCount} \u05D7\u05D3\u05E9\u05D9\u05DD)</span>` : ""}</td></tr>
   ${m.resolved.length ? `<tr><td style="padding:12px 18px;background:#f0fdf4;font-size:13px;color:#166534"><b>\u05D8\u05D5\u05E4\u05DC\u05D5 \u05DE\u05D0\u05D6 \u05D0\u05EA\u05DE\u05D5\u05DC:</b> ${m.resolved.map((r) => `${esc(r.name)} \u2014 ${esc(r.why)}`).join(" \xB7 ")}</td></tr>` : ""}
-  ${m.current.length ? `<tr><td style="padding:14px 18px"><p style="margin:0 0 8px;font-size:13px;color:#475569">\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DE\u05E8\u05DB\u05D6\u05D9\u05D9\u05DD (A/B) \u05E9\u05D4\u05DE\u05DC\u05D0\u05D9 + \u05DE\u05D4 \u05E9\u05D1\u05D3\u05E8\u05DA \u05DC\u05D0 \u05D9\u05D7\u05D6\u05D9\u05E7 \u05E2\u05D3 \u05E9\u05D4\u05D6\u05DE\u05E0\u05D4 \u05D7\u05D3\u05E9\u05D4 \u05EA\u05D2\u05D9\u05E2. \u05DB\u05DC \u05DE\u05D5\u05E6\u05E8 \u05E0\u05E9\u05D0\u05E8 \u05DB\u05D0\u05DF \u05DB\u05DC \u05D1\u05D5\u05E7\u05E8 \u05E2\u05D3 \u05E9\u05E0\u05E4\u05EA\u05D7\u05EA \u05D4\u05D6\u05DE\u05E0\u05D4 \u05D0\u05D5 \u05E9\u05D4\u05DE\u05DC\u05D0\u05D9 \u05E2\u05D5\u05DC\u05D4.</p>
-    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(["\u05DE\u05D5\u05E6\u05E8", "\u05DE\u05DC\u05D0\u05D9", "\u05D1\u05D3\u05E8\u05DA", "\u05DE\u05E1\u05E4\u05D9\u05E7 \u05DC", "\u05D6\u05DE\u05DF \u05D0\u05E1\u05E4\u05E7\u05D4", "\u05DE\u05D5\u05DE\u05DC\u05E5"])}${rows.join("")}</table>${m.current.length > 40 ? `<p style="margin:8px 0 0;font-size:12px;color:#64748b">\u05D5\u05E2\u05D5\u05D3 ${m.current.length - 40} \u2014 \u05D4\u05E8\u05E9\u05D9\u05DE\u05D4 \u05D4\u05DE\u05DC\u05D0\u05D4 \u05D1\u05D0\u05EA\u05E8</p>` : ""}</td></tr>` : ""}
+  ${buy.length ? `<tr><td style="padding:14px 18px"><h2 style="margin:0 0 4px;font-size:15px;color:#0f172a">\u05DC\u05D4\u05D6\u05DE\u05D9\u05DF \u05DE\u05E1\u05E4\u05E7\u05D9\u05DD</h2>
+    <p style="margin:0 0 8px;font-size:12px;color:#64748b">\u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DE\u05E8\u05DB\u05D6\u05D9\u05D9\u05DD (A/B) \u05E9\u05D4\u05DE\u05DC\u05D0\u05D9 + \u05DE\u05D4 \u05E9\u05D1\u05D3\u05E8\u05DA \u05DC\u05D0 \u05D9\u05D7\u05D6\u05D9\u05E7 \u05E2\u05D3 \u05E9\u05D4\u05D6\u05DE\u05E0\u05D4 \u05D7\u05D3\u05E9\u05D4 \u05EA\u05D2\u05D9\u05E2 \u2014 \u05DC\u05E4\u05D9 \u05E1\u05E4\u05E7. \u05DB\u05DC \u05DE\u05D5\u05E6\u05E8 \u05E0\u05E9\u05D0\u05E8 \u05DB\u05D0\u05DF \u05DB\u05DC \u05D1\u05D5\u05E7\u05E8 \u05E2\u05D3 \u05E9\u05E0\u05E4\u05EA\u05D7\u05EA \u05D4\u05D6\u05DE\u05E0\u05D4 \u05D0\u05D5 \u05E9\u05D4\u05DE\u05DC\u05D0\u05D9 \u05E2\u05D5\u05DC\u05D4.</p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${cols("\u05DE\u05D5\u05DE\u05DC\u05E5")}${supBlocks}</table>${buy.length > shown ? `<p style="margin:8px 0 0;font-size:12px;color:#64748b">\u05D5\u05E2\u05D5\u05D3 ${buy.length - shown} \u2014 \u05D4\u05E8\u05E9\u05D9\u05DE\u05D4 \u05D4\u05DE\u05DC\u05D0\u05D4 \u05D1\u05D0\u05EA\u05E8</p>` : ""}</td></tr>` : ""}
+  ${make.length ? `<tr><td style="padding:14px 18px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 4px;font-size:15px;color:#475569">\u05DC\u05D9\u05D9\u05E6\u05D5\u05E8 \u2014 \u05E4\u05D7\u05D5\u05EA \u05D3\u05D7\u05D5\u05E3</h2>
+    <p style="margin:0 0 8px;font-size:12px;color:#64748b">\u05D9\u05D9\u05E6\u05D5\u05E8 \u05E2\u05E6\u05DE\u05D9 \u05E9\u05E0\u05E9\u05D0\u05E8 \u05DC\u05D5 \u05DE\u05DC\u05D0\u05D9 \u05DC\u05E4\u05D7\u05D5\u05EA \u05DE-${m.ownMadeDays || 14} \u05D9\u05D5\u05DD (\u05D0\u05D5 \u05E9\u05E0\u05D2\u05DE\u05E8).</p>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${cols("\u05DC\u05D9\u05D9\u05E6\u05E8")}${make.slice(0, 25).map((x) => itemRow(x, "\u05DC\u05D9\u05D9\u05E6\u05E8")).join("")}</table></td></tr>` : ""}
   ${ships.length ? `<tr><td style="padding:14px 18px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 8px;font-size:15px;color:#0f172a">\u05DE\u05E9\u05DC\u05D5\u05D7\u05D9\u05DD \u05E9\u05E0\u05D3\u05D7\u05D5 (${ships.length})</h2>
     <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(["\u05DE\u05DB\u05D5\u05DC\u05D4", "\u05E1\u05E4\u05E7", "\u05D4\u05D9\u05D4", "\u05E2\u05DB\u05E9\u05D9\u05D5", "\u05D3\u05D7\u05D9\u05D9\u05D4"])}${shipRows.join("")}</table></td></tr>` : ""}
   <tr><td style="padding:12px 18px;border-top:1px solid #e2e8f0"><a href="${esc(siteUrl)}" style="color:#1F5FBF;font-size:13px">\u05E4\u05EA\u05D7 \u05D1\u05D0\u05EA\u05E8 \u2190</a>
-    <span style="color:#94a3b8;font-size:11px"> \xB7 \u05DE\u05D5\u05E6\u05E8 \u05E9\u05D4\u05D7\u05DC\u05D8\u05EA \u05DC\u05D0 \u05DC\u05D4\u05D6\u05DE\u05D9\u05DF \u05DB\u05E8\u05D2\u05E2: \u05D1\u05DB\u05E8\u05D8\u05D9\u05E1 \u05D4\u05DE\u05D5\u05E6\u05E8 \u05D1\u05D0\u05EA\u05E8 \u2014 "\u05D0\u05DC \u05EA\u05D6\u05DB\u05D9\u05E8 \u05DC\u05D9"${m.snoozedCount ? ` \xB7 ${m.snoozedCount} \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DE\u05D5\u05E9\u05EA\u05E7\u05D9\u05DD \u05DB\u05E8\u05D2\u05E2` : ""}</span></td></tr>
+    <span style="color:#94a3b8;font-size:11px"> \xB7 \u05DE\u05D5\u05E6\u05E8 \u05E9\u05DC\u05D0 \u05E8\u05D5\u05E6\u05D9\u05DD \u05E2\u05DC\u05D9\u05D5 \u05EA\u05D6\u05DB\u05D5\u05E8\u05EA: \u05D1\u05DB\u05E8\u05D8\u05D9\u05E1 \u05D4\u05DE\u05D5\u05E6\u05E8 \u05D1\u05D0\u05EA\u05E8 \u2014 "\u05D0\u05DC \u05EA\u05D6\u05DB\u05D9\u05E8 \u05DC\u05D9" \u05D0\u05D5 "\u05DC\u05E4\u05D9 \u05D4\u05D6\u05DE\u05E0\u05D4"${m.snoozedCount ? ` \xB7 ${m.snoozedCount} \u05DE\u05D5\u05E6\u05E8\u05D9\u05DD \u05DE\u05D5\u05E9\u05EA\u05E7\u05D9\u05DD \u05DB\u05E8\u05D2\u05E2` : ""}</span></td></tr>
   </table></td></tr></table></body></html>`;
 };
 var renderAlertsHtml = (a, { siteUrl }) => {

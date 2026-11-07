@@ -1398,7 +1398,7 @@ const CustomersPage = ({ requestedTab = null, onRequestedTabHandled = null, mont
 // Same numbers as the weekly email and the procurement page (buildDigest on the stored data).
 const OVERVIEW_APP_KEYS = ['procurementStock','procurementSupplier','procurementCost','procurementCurrency','exchangeRates','openOrders','procShipSupplierMap',
   'procOutlierDecisions','procurementLeadTime','procLeadAddTransit','excludeCurrentMonth','procSkipStockoutMonths','procurementMinStock','procurementCostHistory',
-  'procurementMOQ','procurementNames','prioritySyncAt','procAvgWindow','procMonthsToStock','procDefaultLeadTime','procOrderBlock','procShipPoLinks','procShipReceived','procShipDelivery','procShipExtraSups'];
+  'procurementMOQ','procurementNames','prioritySyncAt','procAvgWindow','procMonthsToStock','procDefaultLeadTime','procOrderBlock','procShipPoLinks','procShipReceived','procShipDelivery','procShipExtraSups','procAlertSnooze','procOwnMadeAlertDays'];
 const readAppState = (keys) => { const o = {}; keys.forEach(k => { let v = null; try { v = localStorage.getItem(k); } catch { /* none */ } if (v == null) return; try { o[k] = JSON.parse(v); } catch { o[k] = v; } }); return o; };
 const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpenProc, salesLines = [], stoppedCount = 0, dueCount = 0 }) => {
   const [sets, setSets] = useState(null);
@@ -1448,8 +1448,8 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
     ['לקוחות שקנו החודש', sales.customersMonth.toLocaleString(), null, sales.newReliable ? `${sales.newCustomers} מהם חדשים` : ''],
   ];
   const actions = [
-    { k: 'order', t: 'להזמין עכשיו', v: o ? o.toOrder : '…', sub: o && o.toOrderValue ? `≈ ${formatShort(o.toOrderValue)}` : 'מוצרים', go: () => onOpenProc('schedule'), tone: o?.toOrder ? 'now' : 'ok' },
-    { k: 'make', t: 'לייצור עצמי', v: digest ? digest.toMake : '…', sub: 'מוצרים לייצר', go: () => onOpenProc('suppliers'), tone: digest?.toMake ? 'soon' : 'ok', hide: digest && !digest.toMake },
+    { k: 'order', t: 'להזמין מספקים', v: o ? o.toOrder : '…', sub: o && o.toOrderValue ? `≈ ${formatShort(o.toOrderValue)}` : 'מוצרים', go: () => onOpenProc('schedule'), tone: o?.toOrder ? 'now' : 'ok' },
+    { k: 'make', t: 'לייצור — דחוף', v: digest ? (digest.toMakeUrgent ?? digest.toMakeNow) : '…', sub: digest ? `נגמר בקרוב · מתוך ${digest.toMake} לייצר` : 'מוצרים', go: () => onOpenProc('suppliers'), tone: digest?.toMakeUrgent ? 'soon' : 'ok', hide: digest && !digest.toMake },
     { k: 'late', t: 'הזמנות רכש באיחור', v: digest ? digest.latePOLines : '…', sub: 'שורות', go: () => onOpenProc('orders'), tone: digest?.latePOLines ? 'soon' : 'ok' },
     { k: 'ship', t: 'משלוחים בדרך', v: o ? o.inTransitCount : '…', sub: o ? `${o.arrivingWeek} מגיעים השבוע${o.delayedCount ? ` · ${o.delayedCount} נדחו` : ''}` : '', go: () => onOpenProc('shipments'), tone: o?.delayedCount ? 'soon' : 'ok' },
     { k: 'truck', t: 'לתאם הובלה', v: o ? o.toBook : '…', sub: 'משלוחים בנמל בלי הובלה מתואמת', go: () => onOpenProc('shipments'), tone: 'soon', hide: !o || !o.toBook },
@@ -3716,6 +3716,7 @@ const renderProductRow = (p) => {
                             <button type="button" onClick={()=>setAlertSnooze(key, { until: plus(7) })} className={btn}>שבוע</button>
                             <button type="button" onClick={()=>setAlertSnooze(key, { until: plus(30) })} className={btn}>חודש</button>
                             <button type="button" onClick={()=>setAlertSnooze(key, { untilStock: true, stock: p.currentStock ?? 0 })} className={btn}>עד שייכנס מלאי</button>
+                            <button type="button" onClick={()=>setProductMark(key, 'mto')} className={btn} title="מוצר שמייצרים / מזמינים רק מול הזמנת לקוח — בלי מלאי, בלי המלצות ובלי התראות">לעולם לא — מוצר לפי הזמנה</button>
                             <label className={`inline-flex items-center gap-1 ${muted}`}>עד
                               <input type="date" min={plus(1)} onChange={e=>{ if (e.target.value) setAlertSnooze(key, { until: e.target.value }); }} className={`px-2 py-1 rounded-lg border ${isDarkMode?'border-slate-600 bg-slate-900':'border-slate-300 bg-white'}`}/>
                             </label>
@@ -3994,9 +3995,10 @@ const renderProductRow = (p) => {
                     className={`px-2 py-1 rounded-lg border text-xs font-semibold ${isDarkMode?'border-slate-600':'border-slate-300 bg-white'}`}>
                     <option value="">רגיל</option>
                     <option value="stop">לא להזמין יותר</option>
+                    <option value="mto">לפי הזמנה — בלי מלאי ובלי התראות</option>
                     {(orderBlock.suppliers[p.supplier]==='phasing' || p.orderMark==='keep') && <option value="keep">ממשיכים להזמין</option>}
                   </select>
-                  {p.orderBlocked && <span className={`mr-2 text-[11px] ${muted}`}>{p.orderBlocked==='supplier' ? 'הספק בהפסקה' : 'לא מזמינים'} — לא נכלל בהמלצות</span>}
+                  {p.orderBlocked && <span className={`mr-2 text-[11px] ${muted}`}>{p.orderBlocked==='supplier' ? 'הספק בהפסקה' : p.orderBlocked==='mto' ? 'לפי הזמנה' : 'לא מזמינים'} — לא נכלל בהמלצות ובהתראות</span>}
                 </dd>
                 {p.family && <><dt className={muted}>משפחת מוצר</dt><dd className={`font-semibold ${strong}`}>{p.family}{p.ownMade && <span className={`mr-2 text-[11px] px-1.5 py-0.5 rounded ${procChipCls('watch',isDarkMode)}`}>ייצור עצמי</span>}</dd></>}
                 {p.avgCostPriority>0 && <><dt className={muted}>עלות ממוצעת (Priority)</dt><dd className={`font-semibold ${strong}`}>{formatUnitCost(p.avgCostPriority, null)}</dd></>}
@@ -4158,6 +4160,8 @@ const renderProductRow = (p) => {
       else { setDocPreview({ kind:'digest', title:'תצוגה מקדימה — סיכום שבועי', html: data.html }); setDigestMsg(''); }
     } catch (e) { setDigestMsg(`לא הצליח: ${e.message || e}`); }
   };
+  const [ownMadeDays, setOwnMadeDaysState] = useState(() => { try { return localStorage.getItem('procOwnMadeAlertDays') || '14'; } catch { return '14'; } });
+  const setOwnMadeDays = (v) => { setOwnMadeDaysState(v); const n = Math.round(Number(v)); if (n >= 1 && n <= 120) { try { localStorage.setItem('procOwnMadeAlertDays', String(n)); } catch { /* best-effort */ } } };
   const [alertsOn, setAlertsOnState] = useState(() => { try { return localStorage.getItem('alertsEnabled') !== 'false'; } catch { return true; } });
   const setAlertsOn = (v) => { setAlertsOnState(v); try { localStorage.setItem('alertsEnabled', v ? 'true' : 'false'); } catch { /* sent to the server with the next save */ } };
   const [alertsMsg, setAlertsMsg] = useState('');
@@ -4251,6 +4255,9 @@ const renderProductRow = (p) => {
             <input type="checkbox" checked={alertsOn} onChange={e=>setAlertsOn(e.target.checked)} className="w-4 h-4 accent-blue-600"/>
             <span>התראות במייל — כל בוקר ב-07:30: מוצרים מרכזיים (A/B) שצריך להזמין, עד שנפתחת הזמנה או שהמלאי עולה; ומשלוח שתאריך ההגעה שלו נדחה</span>
           </label>
+          {alertsOn && <label className="inline-flex items-center gap-1.5">ייצור עצמי רק כשנשאר פחות מ-
+            <input type="number" min="1" max="120" value={ownMadeDays} onChange={e=>setOwnMadeDays(e.target.value)} aria-label="ימי מלאי לייצור עצמי בתזכורת"
+              className={`w-14 px-1.5 py-0.5 rounded border text-center ${isDarkMode?'bg-slate-900 border-slate-600 text-slate-100':'bg-white border-slate-300'}`}/> ימים</label>}
           {alertsOn && <button type="button" onClick={checkAlertsNow} className={`font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>שלח תזכורת עכשיו</button>}
           {alertsMsg && <span role="status">{alertsMsg}</span>}
         </div>
@@ -4630,6 +4637,7 @@ const renderProductRow = (p) => {
         </div>
         {list('מוצרים "לא להזמין יותר"', marked.filter(x => x.m === 'stop'), 'יוצאים מהרכש אצל כל ספק. נשארים במלאי עד שנגמרים.')}
         {list('מוצרים "ממשיכים להזמין"', marked.filter(x => x.m === 'keep'), 'החריגים: עדיין מזמינים אותם, גם שהספק שלהם בהפסקה.')}
+        {list('מוצרים "לפי הזמנה"', marked.filter(x => x.m === 'mto'), 'מייצרים / מזמינים רק מול הזמנת לקוח — בלי יעד מלאי, בלי המלצות ובלי התראות. מכירות ומלאי ממשיכים להופיע כרגיל.')}
       </div>
     );
   };
@@ -5242,7 +5250,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
     const totalByCur = {};
     toOrder.forEach(p => { if (p.unitCostOriginal) { const c = p.currency||'ILS'; totalByCur[c] = (totalByCur[c]||0) + orderQtyFor(p)*p.unitCostOriginal; } });
     const grid = { gridTemplateColumns:`var(--rz-cols, minmax(220px,1.4fr) ${months.length*24}px 70px 76px 170px 80px 110px 150px)` };
-    const markOpts = (p) => [['', 'רגיל'], ['stop', 'לא להזמין יותר'], ...((v.phasing || p.orderMark==='keep') ? [['keep', 'ממשיכים להזמין']] : [])];
+    const markOpts = (p) => [['', 'רגיל'], ['stop', 'לא להזמין יותר'], ['mto', 'לפי הזמנה'], ...((v.phasing || p.orderMark==='keep') ? [['keep', 'ממשיכים להזמין']] : [])];
     const needAlt = v.phasing ? allRows.filter(p => p.orderMark !== 'keep' && p.orderMark !== 'stop' && p.avgMonthly > 0)
       .sort((a, b) => (b.avgMonthly*(b.unitCost||1)) - (a.avgMonthly*(a.unitCost||1))) : [];
     const markedHere = allRows.filter(p => p.orderMark);

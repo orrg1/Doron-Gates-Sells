@@ -8,12 +8,13 @@ import { getDateVal, calcOrderPlan, isoToMonthKey, parseFlexDate, startOfToday, 
 // under one pseudo-supplier of that name ("what to produce"), not ordered from a supplier.
 export const OWN_MADE = 'ייצור עצמי';
 export const isOwnMadeFamily = (fam) => /ייצור\s*עצמי/.test(String(fam || ''));
-// What is no longer ordered. orderBlock = { suppliers: { name: 'phasing' }, products: { sku: 'stop' | 'keep' } }
+// What is no longer ordered. orderBlock = { suppliers: { name: 'phasing' }, products: { sku: 'stop' | 'keep' | 'mto' } }
 // A product is out of purchasing when marked 'stop', or when its supplier is being phased out and
 // the product was not marked 'keep' (still ordered from that supplier).
 export const orderBlockOf = (orderBlock, sku, supplier) => {
   const pm = orderBlock?.products?.[sku];
   if (pm === 'stop') return 'product';
+  if (pm === 'mto') return 'mto'; // made / bought only against a customer order — no stock target, no alerts
   if (supplier && orderBlock?.suppliers?.[supplier] === 'phasing' && pm !== 'keep') return 'supplier';
   return null;
 };
@@ -28,6 +29,7 @@ export const PROC_STATUS_LABEL = { now:'להזמין עכשיו', soon:'להזמ
 // The single note shown under a product name — the most important one wins.
 export const procChip = (p) => {
   if (p.inactive) return { t:'מוצר לא פעיל בפריוריטי', k:'muted' };
+  if (p.orderBlocked === 'mto') return { t:'לפי הזמנה — בלי מלאי ובלי התראות', k:'muted' };
   if (p.overdue) return { t:`הזמנה באיחור ${p.overdue.maxDays} ימים`, k:'now' };
   if (p.shortNowCoveredByPO) return { t:'חסר עכשיו · מכוסה בהזמנה', k:'watch' };
   if (p.priceChangePct!=null && Math.abs(p.priceChangePct) >= 3) return { t:`מחיר קניה ${p.priceChangePct>0?'עלה':'ירד'} ${Math.abs(p.priceChangePct).toFixed(0)}%`, k: p.priceChangePct>0 ? 'watch' : 'muted' };
