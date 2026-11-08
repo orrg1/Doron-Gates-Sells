@@ -8,7 +8,7 @@ import { loadClothing, dueCount as clothingDueCount } from './clothingModel.js';
 import * as XLSXLib from 'xlsx';
 import { supabase, flushAll, queueDataset, subscribeStatus } from './cloud.js';
 import { OWN_MADE, procStatus, PROC_STATUS_LABEL, procChip, computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './core/procModel.js';
-import { inactiveSkusOf, inactiveWithStock, salesOverview, dueToReorder, supplierReturns, orderCalendar, priceCheck, stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier, withShipMarks, shipDeliveryText, SHIP_TRUCK_TYPES, mergeShipmentFile, withShipSups, shipExtraSups } from './core/data.js';
+import { applyCardNames, lineNote, inactiveSkusOf, inactiveWithStock, salesOverview, dueToReorder, supplierReturns, orderCalendar, priceCheck, stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier, withShipMarks, shipDeliveryText, SHIP_TRUCK_TYPES, mergeShipmentFile, withShipSups, shipExtraSups } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
@@ -2048,7 +2048,7 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   // ── Purchasing files (sales lines, supplier invoice lines, forwarder report) ──
   // Big datasets live in IndexedDB; a small summary of each file lives in localStorage.
   // All stored invoice lines (incl. value-only lines, x:1); procurement looks only at product lines.
-  const [salesLinesAll, setSalesLinesAll] = useState([]);
+  const [salesLinesRaw, setSalesLinesAll] = useState([]); // as stored; salesLinesAll (below) has the item-card names
   // Item-card extras from Priority: family, own production, average cost, list price, last sale / purchase
   const [itemsExtra, setItemsExtra] = useState({});
   const [familyFilter, setFamilyFilter] = useState('');
@@ -2058,8 +2058,11 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
   // Months a product was out of stock don't count as "low demand" in its average (on by default).
   const [skipStockoutMonths, setSkipStockoutMonths] = useState(() => { try { return localStorage.getItem('procSkipStockoutMonths') !== '0'; } catch { return true; } });
   const setSalesLines = (arr) => { setSalesLinesAll(arr); onSalesLinesChange?.(arr); };
+  // Product names from the Priority item cards (the invoice-line text can carry a note — kept as l.ln)
+  const salesLinesAll = useMemo(() => applyCardNames(salesLinesRaw, nameMap, itemsExtra), [salesLinesRaw, nameMap, itemsExtra]);
   const salesLines = useMemo(() => salesLinesAll.filter(l => !l.x), [salesLinesAll]);
-  const [purchaseLines, setPurchaseLines] = useState([]);
+  const [purchaseLinesRaw, setPurchaseLines] = useState([]);
+  const purchaseLines = useMemo(() => applyCardNames(purchaseLinesRaw, nameMap, itemsExtra), [purchaseLinesRaw, nameMap, itemsExtra]);
   const [shipments, setShipments] = useState([]);
   const [filesMeta, setFilesMeta] = useState(() => { try { return JSON.parse(localStorage.getItem('procFilesMeta')||'{}'); } catch { return {}; } });
   const [fileBusy, setFileBusy] = useState(null);   // slot key being loaded
@@ -2153,7 +2156,7 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
       if (slot === 'salesLines') {
         let parsed = parseSalesLines(rows);
         if (!parsed) throw new Error('לא נמצאו עמודות תאריך / שם לקוח / מק"ט / כמות בקובץ.');
-        if (opts.mergeFrom) parsed = mergeLinesSince(salesLinesAll, parsed, opts.mergeFrom);
+        if (opts.mergeFrom) parsed = mergeLinesSince(salesLinesRaw, parsed, opts.mergeFrom);
         if (!parsed.length) throw new Error('לא נמצאו שורות מכירה.');
         await idbSet('procSalesLines', parsed);
         setSalesLines(parsed);
@@ -3837,7 +3840,7 @@ const renderProductRow = (p) => {
                     {sortRows('drawerLines', lines).map((l,i) => (
                       <div key={i} className={`grid gap-2 px-3 py-2 ${isDarkMode?'border-t border-slate-700':'border-t border-slate-100'}`} style={{gridTemplateColumns:'70px minmax(0,1fr) 56px 90px'}}>
                         <span className={muted}>{isoToDisplay(l.d)}</span>
-                        <span className={`truncate ${strong}`} title={l.c}>{l.c}</span>
+                        <span className={`truncate ${strong}`} title={lineNote(l) ? `${l.c} — הערה בחשבונית: ${lineNote(l)}` : l.c}>{l.c}{lineNote(l) && <span className={`block text-[11px] font-normal truncate ${isDarkMode?'text-amber-300':'text-amber-700'}`}>הערה בחשבונית: {lineNote(l)}</span>}</span>
                         <b className={`tabular-nums ${l.q<0?(isDarkMode?'text-red-300':'text-red-700'):strong}`}>{l.q<0?`${l.q} (החזרה)`:l.q}</b>
                         <span className={`text-xs font-mono ${muted}`}>{l.inv}</span>
                       </div>
@@ -3951,6 +3954,7 @@ const renderProductRow = (p) => {
                           <span className={`truncate ${strong}`} title={l.c}>{l.c}</span>
                           <span className={muted}>{isoToDisplay(l.d)} · {l.inv}</span>
                           <span className={`text-xs ${muted}`}>({Math.round(l.q / l.monthQty * 100)}% מהחודש)</span>
+                          {lineNote(l) && <span className={`text-xs ${isDarkMode?'text-amber-300':'text-amber-700'}`}>הערה בחשבונית: {lineNote(l)}</span>}
                           {!dec && <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded ${procChipCls('watch',isDarkMode)}`}>מחכה להחלטה</span>}
                         </div>
                         <div className="flex flex-wrap gap-2 mt-2">
@@ -7177,20 +7181,23 @@ const App = () => {
   // a short loading screen covers that gap on first paint.
   const [salesFileData, setSalesData] = useState([]); // rows from uploaded monthly files only
   // Sales-invoice lines saved by the procurement page (Priority sync or uploaded lines file).
-  const [procSalesLines, setProcSalesLines] = useState([]);
+  const [procSalesLinesRaw, setProcSalesLines] = useState([]);
+  // product names from the Priority item cards (invoice-line text can carry a note like "הוחזר" — kept as l.ln)
+  const [cardNamesApp, setCardNamesApp] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementNames') || '{}') || {}; } catch { return {}; } });
   const isNarrowApp = useIsNarrow();
   const [custView, setCustView] = useState(null); // customers list asked for from the overview (phones)
   const [procView, setProcView] = useState(null); // a procurement view asked for from another screen (overview cards)
   useEffect(() => { idbGet('procSalesLines').then(v => { if (Array.isArray(v)) setProcSalesLines(v); }).catch(() => {}); }, []);
   // What every tab shows: months covered by the invoice lines come from them, older months from the files.
-  const salesData = useMemo(() => mergeLinesIntoMonthly(salesFileData, procSalesLines, { includeExtra: true }), [salesFileData, procSalesLines]);
-  const salesLinesRange = useMemo(() => linesRange(procSalesLines), [procSalesLines]);
   // Customer cards pulled from Priority (city, agent, payment terms, customer since)
   const [priorityCustomers, setPriorityCustomers] = useState({});
   // Item-card extras (family, average cost) for the brands view in "מכירות"
   const [itemsExtraApp, setItemsExtraApp] = useState({});
-  const reloadItemsExtra = () => idbGet('procItemsExtra').then(v => { if (v && typeof v === 'object') setItemsExtraApp(v); }).catch(() => {});
+  const reloadItemsExtra = () => { try { setCardNamesApp(JSON.parse(localStorage.getItem('procurementNames') || '{}') || {}); } catch { /* keep */ } return idbGet('procItemsExtra').then(v => { if (v && typeof v === 'object') setItemsExtraApp(v); }).catch(() => {}); };
   useEffect(() => { reloadItemsExtra(); }, []);
+  const procSalesLines = useMemo(() => applyCardNames(procSalesLinesRaw, cardNamesApp, itemsExtraApp), [procSalesLinesRaw, cardNamesApp, itemsExtraApp]);
+  const salesData = useMemo(() => mergeLinesIntoMonthly(salesFileData, procSalesLines, { includeExtra: true }), [salesFileData, procSalesLines]);
+  const salesLinesRange = useMemo(() => linesRange(procSalesLines), [procSalesLines]);
   // Inactive products (status on the Priority item card) — out of every product-level list and analysis;
   // money totals keep their past sales. They show up only when searched for.
   const inactiveSetApp = useMemo(() => inactiveSkusOf(itemsExtraApp), [itemsExtraApp]);
@@ -8350,7 +8357,7 @@ const App = () => {
                 <thead className={head}><tr>{th('ret-inv','d','תאריך','desc')}{th('ret-inv','c','לקוח')}{th('ret-inv','kind','סוג')}{th('ret-inv','total','סכום','desc')}</tr></thead>
                 <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
                   {invs.map(i => (
-                    <tr key={i.inv} className={rowCls} title={i.items.map(x => `${x.q} × ${x.n}`).join('\n')}>
+                    <tr key={i.inv} className={rowCls} title={i.items.map(x => `${x.q} × ${x.n}${lineNote(x) ? ` (${lineNote(x)})` : ''}`).join('\n')}>
                       <td className="px-4 py-2.5 text-xs tabular-nums whitespace-nowrap">{isoToDisplay(i.d)}<p className={`font-mono text-[10px] ${muted}`}>{i.inv}</p></td>
                       <td className={`px-4 py-2.5 text-xs truncate max-w-[180px] ${strong}`} title={i.c}>{i.c}</td>
                       <td className="px-4 py-2.5 text-xs">{{goods:`החזרה (${i.items.length} שורות)`, money:'זיכוי כספי', both:'החזרה + זיכוי'}[i.kind]}</td>

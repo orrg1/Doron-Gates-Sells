@@ -414,6 +414,27 @@ export const linesRange = (lines) => {
 
 export const NON_PRODUCT_LABEL = 'שורות ללא מוצר (הנחות, שירות, הובלה)';
 
+// A product's name is the one on its Priority item card. The description on an invoice line can be edited
+// when the invoice is issued ("קיט BULL 600 24V- הוחזר") — that text is kept as the line's note (ln) and the
+// card name replaces it. Lines without a card (services, deleted items) keep their own text.
+// names: { sku: card name } (procurementNames), extra: procItemsExtra (also holds inactive items' names)
+export const applyCardNames = (lines, names = {}, extra = {}) => {
+  if (!Array.isArray(lines) || !lines.length) return lines || [];
+  return lines.map(l => {
+    const card = l.k ? (names[l.k] || extra?.[l.k]?.name) : '';
+    if (!card) return l;
+    const orig = l.ln != null ? l.ln : l.n;
+    if (l.n === card && (l.ln == null || l.ln === card)) return l;
+    return orig && orig !== card ? { ...l, n: card, ln: orig } : { ...l, n: card };
+  });
+};
+// The text someone added on the invoice line, beyond the product's card name ("הוחזר"), or ''.
+export const lineNote = (l) => {
+  if (!l || !l.ln || l.ln === l.n) return '';
+  const t = String(l.ln).startsWith(String(l.n)) ? String(l.ln).slice(String(l.n).length).replace(/^[\s\-–—:,]+/, '') : String(l.ln);
+  return t.trim();
+};
+
 // product × month rows (same shape as the "מכירות חודשיות לפי מוצר" file)
 export const mergeLinesIntoMonthly = (raw, lines, { includeExtra = false } = {}) => {
   const use = includeExtra ? lines : lines.filter(l => !l.x);

@@ -270,6 +270,16 @@ var linesCoverage = (lines, fileMonths) => {
   return covered;
 };
 var NON_PRODUCT_LABEL = "\u05E9\u05D5\u05E8\u05D5\u05EA \u05DC\u05DC\u05D0 \u05DE\u05D5\u05E6\u05E8 (\u05D4\u05E0\u05D7\u05D5\u05EA, \u05E9\u05D9\u05E8\u05D5\u05EA, \u05D4\u05D5\u05D1\u05DC\u05D4)";
+var applyCardNames = (lines, names = {}, extra = {}) => {
+  if (!Array.isArray(lines) || !lines.length) return lines || [];
+  return lines.map((l) => {
+    const card = l.k ? names[l.k] || extra?.[l.k]?.name : "";
+    if (!card) return l;
+    const orig = l.ln != null ? l.ln : l.n;
+    if (l.n === card && (l.ln == null || l.ln === card)) return l;
+    return orig && orig !== card ? { ...l, n: card, ln: orig } : { ...l, n: card };
+  });
+};
 var mergeLinesIntoMonthly = (raw, lines, { includeExtra = false } = {}) => {
   const use = includeExtra ? lines : lines.filter((l) => !l.x);
   if (!use.length) return raw;
@@ -1815,9 +1825,9 @@ var trendingProducts = (lines, { now = Date.now(), products = [], names = {}, pu
 var buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
   const iso2 = (ms) => new Date(ms).toISOString().slice(0, 10);
   const today = iso2(now);
-  const salesLinesAll = sets.procSalesLines || [];
+  const salesLinesAll = applyCardNames(sets.procSalesLines || [], app.procurementNames || {}, sets.procItemsExtra || {});
   const salesLines = salesLinesAll.filter((l) => !l.x);
-  const purchaseLines = sets.procPurchaseLines || [];
+  const purchaseLines = applyCardNames(sets.procPurchaseLines || [], app.procurementNames || {}, sets.procItemsExtra || {});
   const shipments = withShipMarks(sets.procShipments || [], app.procShipReceived || {}, app.procShipDelivery || {});
   const stockMap = app.procurementStock || {};
   const supplierMap = app.procurementSupplier || {};

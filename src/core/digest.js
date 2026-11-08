@@ -2,7 +2,7 @@
 // Uses the same model as the procurement page (procModel.js), so the numbers
 // in the email match the website.
 import { mergeLinesIntoMonthly, detectOutliers, saleLineId, supplierLeadTimes, matchShipSupplier, shipmentStage, daysBetween, stockTimelines, stockoutSummary,
-  purchasePriceHistory, priceIncreases, priceCheck, linkShipmentsToPOs, returnsAnalysis, productStartDates, inactiveSkusOf, withShipMarks, withShipSups, DAY_MS, isoToDisplay } from './data.js';
+  purchasePriceHistory, priceIncreases, priceCheck, linkShipmentsToPOs, returnsAnalysis, productStartDates, inactiveSkusOf, withShipMarks, withShipSups, applyCardNames, DAY_MS, isoToDisplay } from './data.js';
 import { computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './procModel.js';
 
 // Items that sell but whose stock + incoming is well beyond the plan's need.
@@ -104,9 +104,10 @@ export const trendingProducts = (lines, { now = Date.now(), products = [], names
 export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
   const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
   const today = iso(now);
-  const salesLinesAll = sets.procSalesLines || [];
+  // product names from the Priority item cards, not the (editable) invoice-line text
+  const salesLinesAll = applyCardNames(sets.procSalesLines || [], app.procurementNames || {}, sets.procItemsExtra || {});
   const salesLines = salesLinesAll.filter(l => !l.x);
-  const purchaseLines = sets.procPurchaseLines || [];
+  const purchaseLines = applyCardNames(sets.procPurchaseLines || [], app.procurementNames || {}, sets.procItemsExtra || {});
   // shipments the person marked as received are done — not "on the way" anymore
   const shipments = withShipMarks(sets.procShipments || [], app.procShipReceived || {}, app.procShipDelivery || {});
   const stockMap = app.procurementStock || {};
