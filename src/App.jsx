@@ -1527,7 +1527,7 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
           <div className="overflow-x-auto">
             <table className={`w-full text-sm text-right min-w-[820px] ${isDarkMode ? 'text-slate-300' : 'text-slate-600'}`}>
               <thead className={`text-[11px] font-semibold ${isDarkMode ? 'bg-slate-900 text-slate-400' : 'bg-slate-50 text-slate-500'}`}>
-                <tr>{['ספק', 'מכולה', 'שלב', 'הגעה לנמל', 'עוד', 'הובלה', 'שינוי', 'הזמנות במשלוח', ''].map((h, i) => <th key={i} className="px-3 py-2">{h}</th>)}</tr>
+                <tr>{['ספק', 'מכולה / תיק', 'שלב', 'הגעה לנמל', 'עוד', 'הובלה', 'שינוי', 'הזמנות במשלוח', ''].map((h, i) => <th key={i} className="px-3 py-2">{h}</th>)}</tr>
               </thead>
               <tbody className={`divide-y ${isDarkMode ? 'divide-slate-700/50' : 'divide-slate-100'}`}>
                 {o.inTransit.map(x => {
@@ -1539,7 +1539,7 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
                         <p className={`font-bold ${strong}`}>{x.sups?.length ? <SupNames names={x.sups}/> : (x.sup || <Missing/>)}</p>
                         {x.matched && x.fwdSup && x.fwdSup !== x.sup && <p className={`text-[11px] ${muted}`}>{x.fwdSup}</p>}
                       </td>
-                      <td className="px-3 py-2 text-xs font-mono">{x.cont || <Missing/>}</td>
+                      <td className="px-3 py-2 text-xs"><p className="font-mono">{x.cont || <Missing/>}</p>{x.file && <p className={`text-[11px] ${muted}`}>תיק <span className="font-mono">{x.file}</span></p>}</td>
                       <td className="px-3 py-2 text-xs">{x.stage}</td>
                       <td className={`px-3 py-2 text-xs ${x.thisWeek ? `font-bold ${strong}` : ''}`}>{x.arr ? isoToDisplay(x.arr) : <Missing/>}{x.thisWeek && <span className="mr-1 text-[10px] font-bold text-blue-500">השבוע</span>}</td>
                       <td className="px-3 py-2 text-xs tabular-nums">{x.days == null ? '—' : x.days < 0 ? `לפני ${-x.days} ימים` : x.days === 0 ? 'היום' : `${x.days} ימים`}</td>
@@ -5330,6 +5330,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
               <span key={s.id} className="flex items-center gap-2">
                 <Truck className={`w-4 h-4 ${muted}`}/>
                 <span className={strong}>{s.cont || (s.mode==='LCL'?'משלוח LCL':'משלוח')}</span>
+                {s.file && <span className={`text-xs ${muted}`}>תיק <span className="font-mono">{s.file}</span></span>}
                 <span className={muted}>{s.stage.label}{s.arr?` · הגעה ${isoToDisplay(s.arr)}`:''}</span>
                 {s.delayDays>0 && <span className={`text-xs font-semibold px-1.5 py-0.5 rounded ${procChipCls('watch',isDarkMode)}`}>נדחה ב-{s.delayDays} ימים</span>}
               </span>
@@ -5551,7 +5552,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                   <p className={`text-lg font-bold leading-tight ${strong}`}>{s.sups.length ? <SupNames names={s.sups}/> : (s.sup || <Missing/>)}</p>
                   <p className={`text-xs ${muted}`}>
                     {s.matched && s.matched !== s.sup ? <>אצל המשלח: {s.sup} · </> : null}
-                    מכולה <span className="font-mono">{s.cont || <Missing/>}</span>
+                    מכולה <span className="font-mono">{s.cont || <Missing/>}</span>{s.file && <> · תיק <span className="font-mono">{s.file}</span></>}
                   </p>
                 </div>
                 {s.stage.idx===3 && <span className={`text-xs font-semibold px-2 py-0.5 rounded ${isDarkMode?'bg-emerald-500/15 text-emerald-300':'bg-emerald-50 text-emerald-800'}`}>✓ התקבל {isoToDisplay(s.received)}</span>}
@@ -5593,7 +5594,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
               <div className={`grid grid-cols-2 md:grid-cols-4 gap-3 text-sm`}>
                 <div><p className={`text-xs ${muted}`}>הפלגה</p><p className={strong}>{s.dep?isoToDisplay(s.dep):<Missing/>}</p></div>
                 <div><p className={`text-xs ${muted}`}>אירוע אחרון אצל המשלח</p><p className={strong}>{s.event||<Missing/>}</p></div>
-                <div><p className={`text-xs ${muted}`}>אסמכתא</p><p className={strong}>{s.ref||<Missing/>}{s.file?` · תיק ${s.file}`:''}</p></div>
+                <div><p className={`text-xs ${muted}`}>אסמכתא</p><p className={strong}>{s.ref||<Missing/>}</p></div>
                 <div>
                   <label htmlFor={`shipsup-${s.id}`} className={`text-xs ${muted}`}>ספק ב-Priority</label>
                   <select id={`shipsup-${s.id}`} value={s.manual ? (shipSupOverride[s.sup]||'') : '__auto'} onChange={e=>setShipSupplier(s.sup, e.target.value)}

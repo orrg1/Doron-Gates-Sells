@@ -192,7 +192,7 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
       .sort((a, b) => (b.status === 'now') - (a.status === 'now') || (a.effectiveCoverDays ?? 999) - (b.effectiveCoverDays ?? 999))
       .slice(0, 15).map(p => ({ name: p.name, sku: p.sku, stock: p.currentStock, coverDays: p.effectiveCoverDays != null ? Math.round(p.effectiveCoverDays) : null, qty: p.suggestedOrder, now: p.status === 'now' })),
     latePOs: Object.values(lateBySup).map(s => ({ ...s, pos: [...s.pos] })).sort((a, b) => b.maxDays - a.maxDays), latePOLines: latePOs.length,
-    delayed: delayed.slice(0, 10).map(s => ({ cont: s.cont, sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays })),
+    delayed: delayed.slice(0, 10).map(s => ({ cont: s.cont, file: s.file || '', sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays })),
     priceUps: priceUps.slice(0, 15), excessValue, excessPOs: excessPOs.slice(0, 10).map(p => ({ name: p.name, sku: p.sku, supplier: p.supplier, poExcess: p.poExcess, value: p.poExcessValue })), excessPOCount: excessPOs.length,
     overview: (() => {
       const lastSale = {}; salesLinesAll.forEach(l => { if (!l.x && l.k && l.q > 0 && (!lastSale[l.k] || l.d > lastSale[l.k])) lastSale[l.k] = l.d; });
@@ -213,7 +213,7 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
       const active = shipsAll.filter(s => s.stage.idx <= 2);
       const links = linkShipmentsToPOs({ shipments: shipsAll, orders: ordersEnriched, manual: app.procShipPoLinks || {} });
       const arriving = active.filter(s => s.arr && s.arr >= today && s.arr <= wk);
-      const inTransit = active.map(s => ({ id: s.id, sup: s.sups.length ? s.sups.join(' + ') : s.sup, sups: s.sups, fwdSup: s.sup, matched: s.sups.length > 0, cont: s.cont, arr: s.arr, dep: s.dep, stage: s.stage.label, stageIdx: s.stage.idx, sub: s.stage.sub,
+      const inTransit = active.map(s => ({ id: s.id, sup: s.sups.length ? s.sups.join(' + ') : s.sup, sups: s.sups, fwdSup: s.sup, matched: s.sups.length > 0, cont: s.cont, file: s.file || '', arr: s.arr, dep: s.dep, stage: s.stage.label, stageIdx: s.stage.idx, sub: s.stage.sub,
         delivery: s.delivery || null, fromPort: s.from || '', toPort: s.to || '', mode: s.mode || '', gone: s.gone || null,
         days: s.arr ? Math.round(daysBetween(today, s.arr)) : null, delayDays: s.delayDays, from: s.change?.from || null, pos: links.byShip[s.id] || [], thisWeek: !!(s.arr && s.arr >= today && s.arr <= wk) }))
         .sort((a, b) => (a.arr || '9999') < (b.arr || '9999') ? -1 : 1);
@@ -231,7 +231,7 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
       stock: products.filter(p => p.status === 'now' && /^[AB]/.test(p.abc || '') && p.avgMonthly > 0)
         .map(p => ({ k: p.sku || p.key, name: p.name, supplier: p.supplier || '', ownMade: !!p.ownMade, stock: p.currentStock, incoming: p.incomingQty || 0,
           coverDays: p.effectiveCoverDays != null ? Math.round(p.effectiveCoverDays) : null, leadMonths: p.effectiveLeadTime, qty: p.suggestedOrder, abc: p.abc })),
-      ships: delayed.map(s => ({ id: s.id, cont: s.cont, sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays })),
+      ships: delayed.map(s => ({ id: s.id, cont: s.cont, file: s.file || '', sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays })),
     },
     week, productsUp: productMoves.up.slice(0, 10), productsDown: productMoves.down.slice(0, 6), returnSpikes,
   };
@@ -249,6 +249,8 @@ export const moveNoteText = (x) => [
 ].filter(Boolean).join(' · ');
 const moveNote = (x) => { const t = moveNoteText(x); return t ? ' · ' + esc(t) : ''; };
 
+// container number, and the forwarder's file number under it (what the forwarder asks for on the phone)
+const contCell = (x) => `${esc(x.cont || '—')}${x.file ? `<br><span style="color:#94a3b8;font-size:11px">תיק ${esc(x.file)}</span>` : ''}`;
 export const renderDigestHtml = (d, { siteUrl }) => {
   const sec = (title, inner, link) => `<tr><td style="padding:18px 22px;border-top:1px solid #e2e8f0">
     <h2 style="margin:0 0 10px;font-size:16px;color:#0f172a">${esc(title)}</h2>${inner}
@@ -271,7 +273,7 @@ export const renderDigestHtml = (d, { siteUrl }) => {
         + (d.toMake > d.toMakeList.length ? p(`<span style="font-size:12px;color:#64748b">ועוד ${d.toMake - d.toMakeList.length} — באתר</span>`) : '') : ''), proc)}
     ${sec('מה בדרך — באיחור ונדחה', p(`הזמנות רכש באיחור: <b>${d.latePOLines}</b> שורות`) +
       table(['ספק', 'שורות', 'איחור מרבי', 'הזמנות'], d.latePOs.slice(0, 8).map(s => [esc(s.name), s.lines, `${s.maxDays} ימים`, esc(s.pos.slice(0, 4).join(', '))])) +
-      (d.delayed.length ? '<div style="height:10px"></div>' + table(['מכולה', 'ספק', 'הגעה', 'נדחה'], d.delayed.map(s => [esc(s.cont || '—'), esc(s.sup), esc(isoToDisplay(s.arr)), `${s.delayDays} ימים (היה ${esc(isoToDisplay(s.from))})`])) : ''), proc)}
+      (d.delayed.length ? '<div style="height:10px"></div>' + table(['מכולה / תיק', 'ספק', 'הגעה', 'נדחה'], d.delayed.map(s => [contCell(s), esc(s.sup), esc(isoToDisplay(s.arr)), `${s.delayDays} ימים (היה ${esc(isoToDisplay(s.from))})`])) : ''), proc)}
     ${sec('התייקרויות בחשבוניות ספק השבוע', table(['מוצר', 'ספק', 'קודם', 'עכשיו', 'שינוי'], d.priceUps.map(x => [esc(x.name), esc(x.s), `${x.prevP} ${esc(x.cur)}`, `<b>${x.p} ${esc(x.cur)}</b>`, `<b style="color:#C8322B">${pctS(x.pct)}</b>`])), proc)}
     ${sec('מלאי עודף', p(`כסף שיושב במלאי עודף: <b>${ils(d.excessValue)}</b> · הזמנות פתוחות על מוצרים בעודף: <b>${d.excessPOCount}</b>`) +
       table(['מוצר', 'ספק', 'בהזמנה מיותרת', 'שווי'], d.excessPOs.map(x => [esc(x.name), esc(x.supplier || '—'), `${x.poExcess} יח׳`, x.value ? ils(x.value) : '—'])), proc)}
@@ -353,7 +355,7 @@ export const renderMorningHtml = (m, ships = [], { siteUrl }) => {
     return `<tr><td colspan="5" style="padding:10px 6px 4px;font-size:14px;font-weight:bold;color:#0f172a;border-bottom:2px solid #e2e8f0"><bdi>${esc(g.name)}</bdi> <span style="font-weight:normal;color:#64748b;font-size:12px">— ${g.items.length === 1 ? 'מוצר אחד' : `${g.items.length} מוצרים`}${g.newCount ? `, ${g.newCount === 1 ? 'חדש אחד' : `${g.newCount} חדשים`}` : ''}</span></td></tr>`
       + items.map(x => itemRow(x, 'להזמין')).join('');
   }).join('');
-  const shipRows = ships.map(x => row([esc(x.cont || '—'), esc(x.sup), esc(isoToDisplay(x.from || '')), `<b>${esc(isoToDisplay(x.arr || ''))}</b>`, `<b style="color:#C8322B">+${x.delayDays} ימים</b>`]));
+  const shipRows = ships.map(x => row([contCell(x), esc(x.sup), esc(isoToDisplay(x.from || '')), `<b>${esc(isoToDisplay(x.arr || ''))}</b>`, `<b style="color:#C8322B">+${x.delayDays} ימים</b>`]));
   const newCount = m.current.filter(x => x.isNew).length;
   const title = [buy.length ? `${buy.length} מוצרים להזמין מ-${(m.bySupplier || []).length} ספקים` : '', make.length ? `${make.length} לייצור` : ''].filter(Boolean).join(' · ') || 'הכל טופל';
   return `<!doctype html><html dir="rtl" lang="he"><body style="margin:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif">
@@ -379,7 +381,7 @@ export const renderAlertsHtml = (a, { siteUrl }) => {
   const head = (cells) => `<tr style="background:#f1f5f9;color:#475569">${cells.map(c => `<th align="right" style="padding:6px;font-size:12px;font-weight:600">${esc(c)}</th>`).join('')}</tr>`;
   const stockRows = a.stock.slice(0, 25).map(x => row([`<b>${esc(x.name)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)} · ${esc(x.ownMade ? 'ייצור עצמי' : x.supplier || 'ספק לא ידוע')}</span>`,
     x.stock ?? '—', x.incoming || '—', x.coverDays == null ? '—' : `<b style="color:#C8322B">${x.coverDays} ימים</b>`, `${x.leadMonths} ח׳`, `<b>${(x.qty || 0).toLocaleString('en-US')}</b> ${x.ownMade ? 'לייצר' : 'להזמין'}`]));
-  const shipRows = a.ships.map(x => row([esc(x.cont || '—'), esc(x.sup), esc(isoToDisplay(x.from || '')), `<b>${esc(isoToDisplay(x.arr || ''))}</b>`, `<b style="color:#C8322B">+${x.delayDays} ימים</b>`]));
+  const shipRows = a.ships.map(x => row([contCell(x), esc(x.sup), esc(isoToDisplay(x.from || '')), `<b>${esc(isoToDisplay(x.arr || ''))}</b>`, `<b style="color:#C8322B">+${x.delayDays} ימים</b>`]));
   return `<!doctype html><html dir="rtl" lang="he"><body style="margin:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif">
   <table width="100%" cellpadding="0" cellspacing="0"><tr><td align="center" style="padding:16px 8px">
   <table width="100%" cellpadding="0" cellspacing="0" style="max-width:640px;width:100%;background:#fff;border-radius:12px;overflow:hidden" dir="rtl">
