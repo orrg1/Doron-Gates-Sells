@@ -1,6 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { buildDigest, moveNoteText } from './core/digest.js';
+import { buildChatContext } from './core/chatContext.js';
 import { installResizableColumns } from './resizableColumns.js';
 import { installMobileTables } from './mobileTables.js';
 import ClothingPage from './ClothingPage.jsx';
@@ -7942,28 +7943,20 @@ const App = () => {
       const allMonthsSorted = [...new Set(salesData.map(d=>d.date).filter(Boolean))].sort((a,b)=>getDateVal(a)-getDateVal(b));
       const trend = (() => { if(allMonthsSorted.length<2)return''; const last=salesData.filter(d=>d.date===allMonthsSorted[allMonthsSorted.length-1]).reduce((a,c)=>a+c.total,0); const prev=salesData.filter(d=>d.date===allMonthsSorted[allMonthsSorted.length-2]).reduce((a,c)=>a+c.total,0); return prev>0?' מגמה: '+((last-prev)/prev*100).toFixed(0)+'% לעומת חודש קודם':''; })();
 
-      // Build product map for smart lookup
-      const prodMap = salesData.reduce((m,d)=>{ if(!d.description)return m; if(!m[d.description])m[d.description]={total:0,qty:0,byMonth:{}}; m[d.description].total+=d.total; m[d.description].qty+=d.quantity||0; m[d.description].byMonth[d.date]=(m[d.description].byMonth[d.date]||0)+(d.quantity||0); return m; },{});
+      // The products / suppliers the question is about, with their real numbers from the invoice lines
       const supMap  = suppliersData.reduce((m,d)=>{ if(!d.supplier)return m; m[d.supplier]=(m[d.supplier]||0)+d.total; return m; },{});
-
-      // Detect mentioned products/suppliers (partial match, min 3 chars)
-      const mentionedProds = Object.keys(prodMap).filter(n=>n.length>=3&&lowerQ.includes(n.substring(0,Math.min(n.length,6)).toLowerCase())).slice(0,3);
-      const mentionedSups  = Object.keys(supMap).filter(n=>n.length>=3&&lowerQ.includes(n.substring(0,Math.min(n.length,6)).toLowerCase())).slice(0,2);
-
-      // Build focused context
-      let specificCtx = '';
-      if(mentionedProds.length > 0) {
-        specificCtx += '\n== מוצרים שצוינו ==\n';
-        mentionedProds.forEach(name => {
-          const p = prodMap[name];
-          const monthlyStr = Object.entries(p.byMonth).sort((a,b)=>getDateVal(a[0])-getDateVal(b[0])).slice(-6).map(([m,q])=>m+': '+q).join(', ');
-          specificCtx += ['• ',name,': סה"כ ',formatCurrency(p.total),' | כמות ',p.qty.toLocaleString(),' יח\' | חודשים: ',monthlyStr,'\n'].join('');
-        });
+      const rd = (k) => { try { return JSON.parse(localStorage.getItem(k) || '{}') || {}; } catch { return {}; } };
+      const ctxOf = (q) => buildChatContext({ question: q, lines: procSalesLines, names: cardNamesApp, stock: rd('procurementStock'), supplier: rd('procurementSupplier'), suppliersTotals: supMap });
+      let ctx = ctxOf(text);
+      // a follow-up that names nothing ("ומי הלקוח?") keeps the subject of the earlier questions
+      if (!ctx.found.length && !ctx.suppliers.length) {
+        const prevQs = chatMessages.filter(m => m.role === 'user').slice(-2).map(m => m.content);
+        for (let i = prevQs.length - 1; i >= 0; i--) { const c = ctxOf(prevQs[i] + ' ' + text); if (c.found.length || c.suppliers.length) { ctx = c; break; } }
       }
-      if(mentionedSups.length > 0) {
-        specificCtx += '\n== ספקים שצוינו ==\n';
-        mentionedSups.forEach(name => specificCtx += '• '+name+': '+formatCurrency(supMap[name])+'\n');
-      }
+      const prodMap = salesData.reduce((m,d)=>{ if(!d.description)return m; (m[d.description] ||= {total:0}).total+=d.total; return m; },{});
+      const specificCtx = '\n' + ctx.text;
+      // the last few turns, so a follow-up question ("ומה עם השנה שעברה?") keeps its subject
+      const history = chatMessages.slice(-6).map(m => (m.role==='user' ? 'משתמש: ' : 'עוזר: ') + String(m.content).slice(0, 600)).join('\n');
 
       // Top products & suppliers summary
       const topProds = Object.entries(prodMap).sort((a,b)=>b[1].total-a[1].total).slice(0,5).map(([n,v])=>n+': '+formatCurrency(v.total)).join(', ');
@@ -7977,18 +7970,21 @@ const App = () => {
           +'• תקופה: '+months+' חודשים | חודש אחרון: '+(allMonthsSorted[allMonthsSorted.length-1]||'')+'\n'
           +'• מוצרים מובילים: '+(topProds||'אין')+'\n'
           +'• ספקים מובילים: '+(topSups||'אין')+'\n'
-          +specificCtx
           +'=================\n'
         : '';
+      const fullCtx = dataCtx + specificCtx;
       if (!apiKey) {
         setChatMessages(p=>[...p,{role:'assistant',content:'⚠️ לא הוגדר API Key. פתח ⚙️ הגדרות והכנס מפתח Gemini.'}]);
         setChatThinking(false); return;
       }
-      const prompt = dataCtx + 'שאלת המשתמש: ' + text + '\nענה בעברית בצורה ברורה וקצרה. אם הנתונים רלוונטיים לשאלה — השתמש בהם.';
+      const prompt = 'אתה עוזר לניתוח נתונים של עסק לאוטומציה לשערים (דורון שערים). ענה רק מהנתונים שלמטה — אל תמציא מספרים. '
+        + 'אם המוצר שנשאל עליו לא מופיע בנתונים, אמור זאת בפשטות. כשאתה מזכיר מוצר — כתוב את השם שלו (ואת המק"ט בסוגריים).\n\n'
+        + fullCtx + (history ? '\n=== השיחה עד עכשיו ===\n' + history + '\n' : '')
+        + '\nשאלת המשתמש: ' + text + '\nענה בעברית בצורה ברורה וקצרה.';
       const reply = await callGemini(prompt, apiKey);
       setChatMessages(p=>[...p,{role:'assistant',content:reply}]);
     } catch(e) { setChatMessages(p=>[...p,{role:'assistant',content:'❌ '+e.message}]); } finally { setChatThinking(false); }
-  }, [salesData, suppliersData, apiKey]);
+  }, [salesData, suppliersData, apiKey, procSalesLines, cardNamesApp, chatMessages]);
 
 
   // YoY comparison data — works for both "מכירות" and "רכש וספקים"
