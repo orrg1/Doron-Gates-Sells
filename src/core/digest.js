@@ -101,7 +101,7 @@ export const trendingProducts = (lines, { now = Date.now(), products = [], names
 };
 
 // state: { app: {key: parsed value}, sets: {key: value} } — exactly what the website stores.
-export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) => {
+export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now(), withDetail = false } = {}) => {
   const iso = (ms) => new Date(ms).toISOString().slice(0, 10);
   const today = iso(now);
   // product names from the Priority item cards, not the (editable) invoice-line text
@@ -234,6 +234,19 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now() } = {}) 
       ships: delayed.map(s => ({ id: s.id, cont: s.cont, file: s.file || '', sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays })),
     },
     week, productsUp: productMoves.up.slice(0, 10), productsDown: productMoves.down.slice(0, 6), returnSpikes,
+    // the website's AI assistant reads these (the email never asks for them)
+    ...(withDetail ? { detail: {
+      products: productsAll.map(p => ({ sku: p.sku || '', name: p.name, supplier: p.supplier || '', abc: p.abc || '', status: p.status, inactive: !!p.inactive, ownMade: !!p.ownMade,
+        orderBlocked: p.orderBlocked || null, stock: p.currentStock, incoming: p.incomingQty || 0, avgMonthly: p.avgMonthly != null ? Math.round(p.avgMonthly * 10) / 10 : null,
+        coverDays: p.effectiveCoverDays, leadMonths: p.effectiveLeadTime, suggestedOrder: p.suggestedOrder || 0, unitCost: p.unitCost != null ? Math.round(p.unitCost * 100) / 100 : null,
+        minStock: p.minStock ?? null, lifecycle: p.lifecycle || '' })),
+      orders: ordersEnriched.map(o => ({ po: o.poNumber || '', supplier: o.supplier || '', sku: o.productKey || '', name: names[o.productKey] || o.productName || '', qty: o.orderedQty || 0,
+        ordered: o.orderDate || '', expected: o.expectedDate || '', late: o.isOverdue ? o.daysLate : 0, valueILS: o.valueILS != null ? Math.round(o.valueILS) : null })),
+      shipments: shipments.map(s => { const w = withShipSups({ ...s, matched: supOf(s) }, app.procShipExtraSups || {}); const st = shipmentStage(s, today);
+        return { container: s.cont || '', file: s.file || '', supplier: w.sups?.length ? w.sups.join(' + ') : s.sup, forwarderName: s.sup, from: s.from || '', to: s.to || '',
+          departed: s.dep || '', arrival: s.arr || '', stage: st.label, received: st.idx === 3, delayDays: s.change ? Math.round(daysBetween(s.change.from, s.change.to)) : 0,
+          delivery: s.delivery || null }; }),
+    } } : {}),
   };
 };
 

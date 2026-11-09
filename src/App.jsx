@@ -1,7 +1,7 @@
 import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
 import { createPortal } from 'react-dom';
 import { buildDigest, moveNoteText } from './core/digest.js';
-import { buildChatContext } from './core/chatContext.js';
+import { aiToolDeclarations, runAiTool, AI_SYSTEM_PROMPT } from './core/aiTools.js';
 import { installResizableColumns } from './resizableColumns.js';
 import { installMobileTables } from './mobileTables.js';
 import ClothingPage from './ClothingPage.jsx';
@@ -1768,51 +1768,82 @@ const AIModal = ({ isOpen, onClose, loading, report, isDarkMode }) => {
 };
 
 // Chat Window
-const ChatWindow = ({ isOpen, onClose, onSend, messages, thinking, isDarkMode }) => {
+// The assistant writes light markdown: **bold**, "- " / "* " / "1. " lists. Rendered as plain elements (no HTML injection).
+const ChatInline = ({ text }) => String(text).split(/(\*\*[^*]+\*\*)/g).map((t, i) => /^\*\*[^*]+\*\*$/.test(t) ? <b key={i}>{t.slice(2, -2)}</b> : <React.Fragment key={i}>{t}</React.Fragment>);
+const ChatText = ({ text }) => {
+  const lines = String(text || '').replace(/\r/g, '').split('\n');
+  const out = []; let list = null;
+  const flush = () => { if (list) { out.push(<ul key={`u${out.length}`} className="list-disc pr-5 space-y-0.5">{list}</ul>); list = null; } };
+  lines.forEach((ln, i) => {
+    const m = ln.match(/^\s*(?:[-*•]|\d+[.)])\s+(.*)$/);
+    if (m) { (list ||= []).push(<li key={i}><ChatInline text={m[1]}/></li>); return; }
+    flush();
+    if (!ln.trim()) { out.push(<div key={i} className="h-1.5"/>); return; }
+    const h = ln.match(/^#{1,4}\s+(.*)$/);
+    out.push(<p key={i} className={h ? 'font-bold' : ''}><ChatInline text={h ? h[1] : ln}/></p>);
+  });
+  flush();
+  return <div className="space-y-1">{out}</div>;
+};
+const CHAT_EXAMPLES = ['מה קנה הלקוח הכי גדול שלנו השנה?', 'אילו מוצרים ירדו הכי הרבה ברבעון האחרון לעומת הקודם?', 'מה צריך להזמין עכשיו מבנינקה?', 'אילו משלוחים בדרך ומתי הם מגיעים?'];
+const ChatWindow = ({ isOpen, onClose, onSend, messages, thinking, status = '', isDarkMode }) => {
   const [input, setInput] = useState('');
   const bottomRef = useRef(null);
-  useEffect(() => { if (isOpen) bottomRef.current?.scrollIntoView({behavior:'smooth'}); }, [messages, isOpen]);
-  const submit = (e) => { e.preventDefault(); if (!input.trim()) return; onSend(input); setInput(''); };
+  useEffect(() => { if (isOpen) bottomRef.current?.scrollIntoView({behavior:'smooth'}); }, [messages, isOpen, status]);
+  const submit = (e) => { e.preventDefault(); if (!input.trim() || thinking) return; onSend(input); setInput(''); };
   if (!isOpen) return null;
+  const muted = isDarkMode ? 'text-slate-400' : 'text-slate-500';
   return (
-    <div className={`fixed bottom-24 left-6 z-50 w-96 h-[520px] max-md:inset-x-2 max-md:w-auto max-md:bottom-2 max-md:h-[75vh] rounded-2xl shadow-2xl border flex flex-col overflow-hidden animate-in slide-in-from-bottom-8 fade-in duration-300 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
+    <div dir="rtl" className={`fixed bottom-24 left-6 z-50 w-[420px] h-[560px] max-md:inset-x-2 max-md:w-auto max-md:bottom-2 max-md:h-[75vh] rounded-2xl shadow-2xl border flex flex-col overflow-hidden animate-in slide-in-from-bottom-8 fade-in duration-300 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
       <div className="p-4 bg-gradient-to-r from-blue-600 to-indigo-600 text-white flex justify-between items-center">
         <div className="flex items-center gap-3">
           <div className="bg-white/20 p-1.5 rounded-lg"><Bot className="w-4 h-4"/></div>
           <div>
             <p className="font-bold text-sm">עוזר AI</p>
-            <p className="text-[10px] opacity-70">שאל על הנתונים שלך</p>
+            <p className="text-[10px] opacity-70">שאל על מכירות, לקוחות, מלאי, רכש ומשלוחים</p>
           </div>
         </div>
-        <button onClick={onClose} className="hover:bg-white/20 rounded-full p-1.5"><X className="w-4 h-4"/></button>
+        <button onClick={onClose} aria-label="סגור" className="hover:bg-white/20 rounded-full p-1.5"><X className="w-4 h-4"/></button>
       </div>
       <div className={`flex-1 overflow-y-auto p-4 space-y-3 ${isDarkMode?'bg-slate-900':'bg-slate-50'}`}>
         {messages.length===0 && (
-          <div className={`text-center text-sm mt-16 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>
+          <div className={`text-center text-sm mt-6 ${muted}`}>
             <Sparkles className="w-8 h-8 mx-auto mb-3 opacity-30"/>
-            <p>שאל כל שאלה על הנתונים שלך</p>
+            <p className="mb-3">שאל כל שאלה על הנתונים שלך. למשל:</p>
+            <div className="space-y-2">
+              {CHAT_EXAMPLES.map(q => (
+                <button key={q} type="button" onClick={() => onSend(q)} className={`block w-full text-right px-3 py-2 rounded-xl border text-xs ${isDarkMode?'border-slate-700 bg-slate-800 hover:bg-slate-700 text-slate-300':'border-slate-200 bg-white hover:bg-blue-50 text-slate-700'}`}>{q}</button>
+              ))}
+            </div>
           </div>
         )}
         {messages.map((m,i)=>(
           <div key={i} className={`flex ${m.role==='user'?'justify-start':'justify-end'}`}>
-            <div className={`max-w-[85%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${m.role==='user'?(isDarkMode?'bg-slate-700 text-white rounded-br-sm border border-slate-600':'bg-white text-slate-800 rounded-br-sm border border-slate-100 shadow-sm'):'bg-gradient-to-br from-blue-600 to-indigo-600 text-white rounded-bl-sm'}`}>
-              {m.content}
+            <div className={`max-w-[90%] px-4 py-2.5 rounded-2xl text-sm leading-relaxed ${m.role==='user'?(isDarkMode?'bg-slate-700 text-white rounded-br-sm border border-slate-600':'bg-white text-slate-800 rounded-br-sm border border-slate-100 shadow-sm'):(isDarkMode?'bg-indigo-950/60 text-slate-100 border border-indigo-900 rounded-bl-sm':'bg-indigo-50 text-slate-800 border border-indigo-100 rounded-bl-sm')}`}>
+              {m.role==='user' ? m.content : <ChatText text={m.content}/>}
+              {m.sources?.length > 0 && (
+                <details className={`mt-2 text-[11px] ${muted}`}>
+                  <summary className="cursor-pointer select-none">מבוסס על ({m.sources.length})</summary>
+                  <ul className="mt-1 space-y-0.5 list-disc pr-4">{m.sources.map((x, j) => <li key={j}>{x}</li>)}</ul>
+                </details>
+              )}
             </div>
           </div>
         ))}
         {thinking && (
           <div className="flex justify-end">
-            <div className={`p-3 rounded-2xl rounded-bl-sm flex gap-1.5 ${isDarkMode?'bg-slate-800':'bg-indigo-50'}`}>
-              {[0,150,300].map(d=><div key={d} className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{animationDelay:`${d}ms`}}/>)}
+            <div className={`px-3 py-2 rounded-2xl rounded-bl-sm flex items-center gap-2 ${isDarkMode?'bg-slate-800':'bg-indigo-50'}`}>
+              <div className="flex gap-1.5">{[0,150,300].map(d=><div key={d} className="w-2 h-2 bg-blue-400 rounded-full animate-bounce" style={{animationDelay:`${d}ms`}}/>)}</div>
+              {status && <span className={`text-[11px] ${muted}`}>{status}</span>}
             </div>
           </div>
         )}
         <div ref={bottomRef}/>
       </div>
       <form onSubmit={submit} className={`p-3 border-t flex gap-2 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-100'}`}>
-        <input type="text" value={input} onChange={e=>setInput(e.target.value)} placeholder="הקלד שאלה..."
+        <input type="text" value={input} onChange={e=>setInput(e.target.value)} placeholder="הקלד שאלה..." aria-label="שאלה לעוזר"
           className={`flex-1 border rounded-full px-4 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 ${isDarkMode?'bg-slate-700 border-slate-600 text-white placeholder-slate-400':'bg-slate-50 border-slate-200'}`}/>
-        <button type="submit" disabled={thinking||!input.trim()} className={`p-2.5 rounded-full text-white transition-all active:scale-95 ${thinking||!input.trim()?'bg-slate-400 cursor-not-allowed':'bg-blue-600 hover:bg-blue-700 shadow-md'}`}>
+        <button type="submit" aria-label="שלח" disabled={thinking||!input.trim()} className={`p-2.5 rounded-full text-white transition-all active:scale-95 ${thinking||!input.trim()?'bg-slate-400 cursor-not-allowed':'bg-blue-600 hover:bg-blue-700 shadow-md'}`}>
           <Send className="w-4 h-4"/>
         </button>
       </form>
@@ -7109,13 +7140,10 @@ const SettingsModal = ({ isOpen, onClose, apiKey, onSave, isDarkMode, exchangeRa
 // ─── SHARED GEMINI HELPER ──────────────────────────────────────────
 // Tries models in order — if one fails moves to the next automatically
 const GEMINI_MODELS = [
-  'gemini-2.5-flash-preview-05-20',
+  'gemini-3.8-flash',
+  'gemini-3.6-flash',
+  'gemini-3.5-flash-lite',
   'gemini-2.5-flash',
-  'gemini-2.5-flash-preview',
-  'gemini-2.5-flash-preview-04-17',
-  'gemini-2.0-flash',
-  'gemini-1.5-flash',
-  'gemini-1.5-flash-latest',
 ];
 
 const callGemini = async (prompt, apiKey) => {
@@ -7151,6 +7179,70 @@ const callGemini = async (prompt, apiKey) => {
     }
   }
   throw new Error(lastErr || 'כל המודלים נכשלו');
+};
+
+// ─── AI assistant with tools: the model asks for data, the site computes it (src/core/aiTools.js) ───
+let geminiToolModel = null; // the first model that answered — used for the rest of the session
+const geminiGoneModels = new Set(); // models this key cannot use (not found / retired) — skipped from then on
+const geminiError = (status, msg) => {
+  if (status === 429 || /quota|rate limit|resource.?exhausted/i.test(msg)) return 'הגעת למגבלת הבקשות של Google ל-Gemini. נסה שוב בעוד דקה (במפתח חינמי יש מגבלה לדקה וליום).';
+  if (/api key not valid|API_KEY_INVALID|permission|unauthori[sz]ed/i.test(msg) || status === 403) return 'מפתח ה-Gemini לא תקין או בלי הרשאה. בדוק אותו ב-⚙️ הגדרות.';
+  return null;
+};
+const geminiChatWithTools = async ({ apiKey, system, history = [], question, tools, runTool, onStep, maxRounds = 6 }) => {
+  if (!apiKey) throw new Error('לא הוגדר API Key. פתח ⚙️ הגדרות והכנס מפתח Gemini.');
+  const contents = [...history, { role: 'user', parts: [{ text: question }] }];
+  const steps = [];
+  const call = async (body) => {
+    const models = (geminiToolModel ? [geminiToolModel, ...GEMINI_MODELS.filter(m => m !== geminiToolModel)] : GEMINI_MODELS).filter(m => !geminiGoneModels.has(m));
+    let lastErr = '';
+    for (const model of models) {
+      for (let attempt = 0; attempt < 2; attempt++) {
+        let res, d;
+        try {
+          res = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${encodeURIComponent(apiKey)}`,
+            { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) });
+          d = await res.json().catch(() => ({}));
+        } catch (e) { lastErr = `[${model}] ${e.message}`; continue; }
+        if (res.ok) { geminiToolModel = model; return d; }
+        const msg = d?.error?.message || `HTTP ${res.status}`;
+        const friendly = geminiError(res.status, msg);
+        if (friendly) throw new Error(friendly);
+        lastErr = `[${model}] ${msg}`;
+        if (res.status === 404 || /not found|not supported|deprecated|no longer available/i.test(msg)) geminiGoneModels.add(model);
+        if (res.status >= 500 && attempt === 0) { await new Promise(r => setTimeout(r, 1200)); continue; } // a busy server: once more
+        break; // 404 / model not available / bad request for this model → the next model
+      }
+    }
+    throw new Error(lastErr || 'כל המודלים נכשלו');
+  };
+  for (let round = 0; round <= maxRounds; round++) {
+    const last = round === maxRounds; // the last round: answer from what was collected, no more tools
+    const d = await call({
+      systemInstruction: { parts: [{ text: system }] }, contents,
+      tools: [{ functionDeclarations: tools }], toolConfig: { functionCallingConfig: { mode: last ? 'NONE' : 'AUTO' } },
+      generationConfig: { temperature: 0.2 },
+    });
+    const cand = d?.candidates?.[0];
+    const parts = cand?.content?.parts || [];
+    const calls = parts.filter(p => p.functionCall);
+    if (calls.length && !last) {
+      contents.push({ role: 'model', parts }); // sent back as is (keeps the model's thought signatures)
+      const responses = calls.map(p => {
+        const { name, args, id } = p.functionCall;
+        const r = runTool(name, args || {});
+        steps.push(r.label); onStep?.(r.label);
+        return { functionResponse: { name, ...(id ? { id } : {}), response: r.result } };
+      });
+      contents.push({ role: 'user', parts: responses });
+      continue;
+    }
+    const text = parts.filter(p => p.text && !p.thought).map(p => p.text).join('').trim();
+    if (text) return { text, steps };
+    if (cand?.finishReason && cand.finishReason !== 'STOP') throw new Error(`Gemini לא החזיר תשובה (${cand.finishReason})`);
+    return { text: 'לא התקבלה תשובה. נסה לנסח את השאלה אחרת.', steps };
+  }
+  return { text: 'השאלה דרשה יותר מדי חיפושים. נסה לפצל אותה לשאלות קטנות יותר.', steps };
 };
 
 // ─── MAIN APP ─────────────────────────────────────────
@@ -7342,6 +7434,8 @@ const App = () => {
   const saveDot = saveSt.state==='saving' ? {color:'#D9822B',label:'שומר לשרת…'} : saveSt.state==='error' ? {color:'#C8322B',label:'שמירה נכשלה'} : saveSt.state==='saved' ? {color:'#2E8B57',label:'נשמר בשרת'} : {color:'#8A919E',label:'מחובר'};
   const [chatMessages, setChatMessages] = useState([]);
   const [chatThinking, setChatThinking] = useState(false);
+  const [chatStatus, setChatStatus] = useState('');
+  const aiDataRef = useRef(null);
 
   const [headerMenuOpen, setHeaderMenuOpen] = useState(false);
   // Global setting: most customers are invoiced only at month-end/start of next
@@ -7932,59 +8026,38 @@ const App = () => {
     } finally { setAiLoading(false); }
   };
 
+  // The data the assistant's tools read — built once and kept for 5 minutes (or until the invoice lines change)
+  const loadAiData = useCallback(async () => {
+    const c = aiDataRef.current;
+    if (c && c.lines === procSalesLines && Date.now() - c.at < 5 * 60000) return c.D;
+    const sets = {};
+    for (const k of ['procPurchaseLines','procShipments','stockHistory','procPoMeta','procItemsExtra','dashboardSalesData']) { try { sets[k] = await idbGet(k); } catch { sets[k] = null; } }
+    const app = readAppState(OVERVIEW_APP_KEYS);
+    let detail = { products: [], orders: [], shipments: [] };
+    try { detail = buildDigest({ app, sets: { ...sets, procSalesLines } }, { withDetail: true }).detail || detail; } catch (e) { console.error('ai data', e); }
+    const D = { sales: procSalesLines, purchases: applyCardNames(sets.procPurchaseLines || [], app.procurementNames || {}, sets.procItemsExtra || {}),
+      products: detail.products, orders: detail.orders, shipments: detail.shipments, today: new Date().toISOString().slice(0, 10) };
+    aiDataRef.current = { D, lines: procSalesLines, at: Date.now() };
+    return D;
+  }, [procSalesLines]);
+
   const sendChat = useCallback(async (text) => {
-    setChatMessages(p=>[...p,{role:'user',content:text}]); setChatThinking(true);
+    setChatMessages(p=>[...p,{role:'user',content:text}]); setChatThinking(true); setChatStatus('אוסף נתונים…');
     try {
-      // ── Smart context builder ───────────────────────────────────
-      const lowerQ = text.toLowerCase();
-      const totalSales = salesData.reduce((a,c)=>a+c.total,0);
-      const totalExp   = suppliersData.reduce((a,c)=>a+c.total,0);
-      const months     = [...new Set(salesData.map(d=>d.date).filter(Boolean))].length;
-      const allMonthsSorted = [...new Set(salesData.map(d=>d.date).filter(Boolean))].sort((a,b)=>getDateVal(a)-getDateVal(b));
-      const trend = (() => { if(allMonthsSorted.length<2)return''; const last=salesData.filter(d=>d.date===allMonthsSorted[allMonthsSorted.length-1]).reduce((a,c)=>a+c.total,0); const prev=salesData.filter(d=>d.date===allMonthsSorted[allMonthsSorted.length-2]).reduce((a,c)=>a+c.total,0); return prev>0?' מגמה: '+((last-prev)/prev*100).toFixed(0)+'% לעומת חודש קודם':''; })();
-
-      // The products / suppliers the question is about, with their real numbers from the invoice lines
-      const supMap  = suppliersData.reduce((m,d)=>{ if(!d.supplier)return m; m[d.supplier]=(m[d.supplier]||0)+d.total; return m; },{});
-      const rd = (k) => { try { return JSON.parse(localStorage.getItem(k) || '{}') || {}; } catch { return {}; } };
-      const ctxOf = (q) => buildChatContext({ question: q, lines: procSalesLines, names: cardNamesApp, stock: rd('procurementStock'), supplier: rd('procurementSupplier'), suppliersTotals: supMap });
-      let ctx = ctxOf(text);
-      // a follow-up that names nothing ("ומי הלקוח?") keeps the subject of the earlier questions
-      if (!ctx.found.length && !ctx.suppliers.length) {
-        const prevQs = chatMessages.filter(m => m.role === 'user').slice(-2).map(m => m.content);
-        for (let i = prevQs.length - 1; i >= 0; i--) { const c = ctxOf(prevQs[i] + ' ' + text); if (c.found.length || c.suppliers.length) { ctx = c; break; } }
-      }
-      const prodMap = salesData.reduce((m,d)=>{ if(!d.description)return m; (m[d.description] ||= {total:0}).total+=d.total; return m; },{});
-      const specificCtx = '\n' + ctx.text;
-      // the last few turns, so a follow-up question ("ומה עם השנה שעברה?") keeps its subject
-      const history = chatMessages.slice(-6).map(m => (m.role==='user' ? 'משתמש: ' : 'עוזר: ') + String(m.content).slice(0, 600)).join('\n');
-
-      // Top products & suppliers summary
-      const topProds = Object.entries(prodMap).sort((a,b)=>b[1].total-a[1].total).slice(0,5).map(([n,v])=>n+': '+formatCurrency(v.total)).join(', ');
-      const topSups  = Object.entries(supMap).sort((a,b)=>b[1]-a[1]).slice(0,3).map(([n,v])=>n+': '+formatCurrency(v)).join(', ');
-
-      const dataCtx = salesData.length > 0
-        ? '=== נתוני העסק ===\n'
-          +'• סה"כ מכירות: '+formatCurrency(totalSales)+trend+'\n'
-          +'• סה"כ הוצאות: '+formatCurrency(totalExp)+'\n'
-          +'• רווח גולמי: '+formatCurrency(totalSales-totalExp)+' ('+(totalSales>0?((totalSales-totalExp)/totalSales*100).toFixed(1):0)+'%)\n'
-          +'• תקופה: '+months+' חודשים | חודש אחרון: '+(allMonthsSorted[allMonthsSorted.length-1]||'')+'\n'
-          +'• מוצרים מובילים: '+(topProds||'אין')+'\n'
-          +'• ספקים מובילים: '+(topSups||'אין')+'\n'
-          +'=================\n'
-        : '';
-      const fullCtx = dataCtx + specificCtx;
-      if (!apiKey) {
-        setChatMessages(p=>[...p,{role:'assistant',content:'⚠️ לא הוגדר API Key. פתח ⚙️ הגדרות והכנס מפתח Gemini.'}]);
-        setChatThinking(false); return;
-      }
-      const prompt = 'אתה עוזר לניתוח נתונים של עסק לאוטומציה לשערים (דורון שערים). ענה רק מהנתונים שלמטה — אל תמציא מספרים. '
-        + 'אם המוצר שנשאל עליו לא מופיע בנתונים, אמור זאת בפשטות. כשאתה מזכיר מוצר — כתוב את השם שלו (ואת המק"ט בסוגריים).\n\n'
-        + fullCtx + (history ? '\n=== השיחה עד עכשיו ===\n' + history + '\n' : '')
-        + '\nשאלת המשתמש: ' + text + '\nענה בעברית בצורה ברורה וקצרה.';
-      const reply = await callGemini(prompt, apiKey);
-      setChatMessages(p=>[...p,{role:'assistant',content:reply}]);
-    } catch(e) { setChatMessages(p=>[...p,{role:'assistant',content:'❌ '+e.message}]); } finally { setChatThinking(false); }
-  }, [salesData, suppliersData, apiKey, procSalesLines, cardNamesApp, chatMessages]);
+      if (!apiKey) { setChatMessages(p=>[...p,{role:'assistant',content:'⚠️ לא הוגדר API Key. פתח ⚙️ הגדרות והכנס מפתח Gemini.'}]); return; }
+      const D = await loadAiData();
+      const dates = D.sales.map(l => l.d).filter(Boolean);
+      const range = dates.length ? `${dates.reduce((a, d) => d < a ? d : a)} עד ${dates.reduce((a, d) => d > a ? d : a)}` : 'אין עדיין שורות חשבוניות — סנכרן מפריוריטי';
+      // the conversation so far (text only — the model asks the tools again when it needs numbers)
+      const history = chatMessages.slice(-8).map(m => ({ role: m.role === 'user' ? 'user' : 'model', parts: [{ text: String(m.content).slice(0, 2000) }] }));
+      while (history.length && history[0].role !== 'user') history.shift();
+      setChatStatus('חושב…');
+      const { text: reply, steps } = await geminiChatWithTools({ apiKey, system: AI_SYSTEM_PROMPT(D.today, range), history, question: text,
+        tools: aiToolDeclarations(), runTool: (name, args) => runAiTool(D, name, args), onStep: (label) => setChatStatus(label + '…') });
+      setChatMessages(p=>[...p,{role:'assistant',content:reply,sources:steps}]);
+    } catch(e) { setChatMessages(p=>[...p,{role:'assistant',content:'❌ '+e.message}]); }
+    finally { setChatThinking(false); setChatStatus(''); }
+  }, [apiKey, chatMessages, loadAiData]);
 
 
   // YoY comparison data — works for both "מכירות" and "רכש וספקים"
@@ -8480,7 +8553,7 @@ const App = () => {
       {/* FAB Chat */}
       <div className="fixed bottom-6 left-6 z-40">
         {!chatOpen && <button onClick={()=>setChatOpen(true)} aria-label="צ'אט AI" className="max-md:hidden bg-blue-600 hover:bg-blue-700 text-white p-4 rounded-full shadow-xl hover:scale-105 transition-all shadow-blue-500/30"><MessageSquare className="w-6 h-6"/></button>}
-        <ChatWindow isOpen={chatOpen} onClose={()=>setChatOpen(false)} onSend={sendChat} messages={chatMessages} thinking={chatThinking} isDarkMode={isDarkMode}/>
+        <ChatWindow isOpen={chatOpen} onClose={()=>setChatOpen(false)} onSend={sendChat} messages={chatMessages} thinking={chatThinking} status={chatStatus} isDarkMode={isDarkMode}/>
       </div>
 
       {/* Phone bottom navigation — the main screens one tap away; "עוד" opens the full menu */}
