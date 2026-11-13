@@ -8,6 +8,7 @@ import ClothingPage from './ClothingPage.jsx';
 import { loadClothing, dueCount as clothingDueCount } from './clothingModel.js';
 import * as XLSXLib from 'xlsx';
 import { supabase, flushAll, queueDataset, subscribeStatus } from './cloud.js';
+import { fetchItemPrices, fetchCustomersByPriceList } from './itemPrices.js';
 import { OWN_MADE, procStatus, PROC_STATUS_LABEL, procChip, computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './core/procModel.js';
 import { applyCardNames, lineNote, inactiveSkusOf, inactiveWithStock, salesOverview, dueToReorder, supplierReturns, orderCalendar, priceCheck, stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier, withShipMarks, shipDeliveryText, SHIP_TRUCK_TYPES, mergeShipmentFile, withShipSups, shipExtraSups } from './core/data.js';
 
@@ -1764,6 +1765,95 @@ const AIModal = ({ isOpen, onClose, loading, report, isDarkMode }) => {
         </div>
       </div>
     </div>
+  );
+};
+
+// ── Selling prices in the product drawer: live from Priority (src/itemPrices.js) ──
+const curSym = (c) => { const t = String(c || '').trim(); return !t || /ש"?ח|ILS|NIS|₪/i.test(t) ? '₪' : t === 'דולר' ? '$' : t; };
+const fmtPrice = (v, c) => v == null ? '—' : `${curSym(c)}${Number(v).toLocaleString('he-IL', { maximumFractionDigits: 2 })}`;
+const ItemPricesPanel = ({ sku, unitCost, isDarkMode }) => {
+  const [st, setSt] = useState({ loading: true, err: '', data: null });
+  const [custs, setCusts] = useState({ loading: false, err: '', map: null, at: null });
+  const [showAll, setShowAll] = useState(false);
+  const [openPl, setOpenPl] = useState(null);
+  const load = useCallback(async (force = false) => {
+    setSt(s => ({ ...s, loading: true, err: '' }));
+    try { setSt({ loading: false, err: '', data: await fetchItemPrices(sku, { force }) }); }
+    catch (e) { setSt({ loading: false, err: e.message, data: null }); }
+  }, [sku]);
+  const loadCusts = useCallback(async (force = false) => {
+    setCusts(c => ({ ...c, loading: true, err: '' }));
+    try { const r = await fetchCustomersByPriceList({ idbGet, idbSet, force }); setCusts({ loading: false, err: '', map: r.map, at: r.at }); }
+    catch (e) { setCusts(c => ({ ...c, loading: false, err: e.message })); }
+  }, []);
+  useEffect(() => { setShowAll(false); setOpenPl(null); load(); }, [load]);
+  useEffect(() => { if (st.data?.lists?.length && !custs.map && !custs.loading && !custs.err) loadCusts(); }, [st.data, custs.map, custs.loading, custs.err, loadCusts]);
+  const muted = isDarkMode ? 'text-slate-400' : 'text-slate-500', strong = isDarkMode ? 'text-white' : 'text-slate-900';
+  const box = isDarkMode ? 'border-slate-700' : 'border-slate-200';
+  const margin = (price, cur) => (unitCost > 0 && price > 0 && curSym(cur) === '₪') ? Math.round((1 - unitCost / price) * 100) : null;
+  const marginTag = (price, cur, block = false) => { const m = margin(price, cur); return m == null ? null : <span className={`${block ? 'block text-[10px] font-normal' : 'text-[11px]'} ${m < 15 ? (isDarkMode?'text-red-300':'text-red-600') : muted}`}>{block ? '' : ' · '}רווח {m}%</span>; };
+  const d = st.data;
+  const lists = d ? (showAll ? d.lists : d.lists.filter(x => x.approved)) : [];
+  const hidden = d ? d.lists.length - d.lists.filter(x => x.approved).length : 0;
+  return (
+    <section>
+      <h3 className={`text-sm font-bold mb-1 flex items-center gap-2 ${strong}`}>מחירי מכירה
+        <span className={`text-[11px] font-normal ${muted}`}>{st.loading ? 'טוען מפריוריטי…' : d ? `מפריוריטי, ${new Date(d.at).toLocaleTimeString('he-IL',{hour:'2-digit',minute:'2-digit'})}` : ''}</span>
+        {!st.loading && <button type="button" onClick={()=>load(true)} className={`text-xs font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>רענן</button>}
+      </h3>
+      {st.err && <p className={`text-xs ${isDarkMode?'text-red-300':'text-red-600'}`}>לא הצלחתי לקרוא את המחירים מפריוריטי: {st.err}</p>}
+      {d && (
+        <div className="space-y-2">
+          {d.base.length > 0
+            ? <div className="flex flex-wrap gap-2">{d.base.map(b => (
+                <div key={b.label} className={`border rounded-lg px-3 py-1.5 ${box}`}>
+                  <p className={`text-[11px] ${muted}`}>{b.label}</p>
+                  <p className={`text-sm font-bold ${strong}`}>{fmtPrice(b.price, b.cur)}{marginTag(b.price, b.cur)}</p>
+                </div>))}
+              </div>
+            : <p className={`text-xs ${muted}`}>אין מחיר בסיס בכרטיס הפריט.</p>}
+          {d.lists.length > 0 ? (
+            <div className={`border rounded-lg overflow-hidden ${box}`}>
+              <div className={`grid gap-2 px-3 py-1.5 text-[11px] font-semibold ${isDarkMode?'bg-slate-900/60 text-slate-400':'bg-slate-50 text-slate-500'}`} style={{gridTemplateColumns:'minmax(0,1fr) 72px 44px 80px 64px'}}>
+                <span>מחירון לקוח</span><span>מחיר</span><span>הנחה</span><span>אחרי הנחה</span><span>לקוחות</span>
+              </div>
+              {lists.map((x, i) => {
+                const cl = custs.map?.[x.pl]; const open = openPl === `${x.pl}|${i}`;
+                return (
+                  <div key={`${x.pl}|${i}`} className={`border-t ${box}`}>
+                    <div className="grid gap-2 px-3 py-1.5 text-xs items-center" style={{gridTemplateColumns:'minmax(0,1fr) 72px 44px 80px 64px'}}>
+                      <span className="min-w-0">
+                        <span className={`block truncate ${strong}`} title={x.name}>{x.name}{!x.approved && <span className={`mr-1 text-[10px] ${muted}`}>({x.status || 'לא מאושר'})</span>}</span>
+                        <span className={`text-[10px] ${muted}`}>{x.qty > 1 ? `מ-${x.qty} ${x.unit || 'יח׳'} · ` : ''}{x.date ? `עודכן ${isoToDisplay(x.date)}` : ''}</span>
+                      </span>
+                      <span>{fmtPrice(x.price, x.cur)}</span>
+                      <span className={muted}>{x.discount ? `${x.discount}%` : '—'}</span>
+                      <span className={`font-semibold ${strong}`}>{fmtPrice(x.net ?? x.price, x.cur)}{marginTag(x.net ?? x.price, x.cur, true)}</span>
+                      <span>{custs.loading && !cl ? <span className={muted}>…</span> : cl?.length
+                        ? <button type="button" onClick={()=>setOpenPl(open ? null : `${x.pl}|${i}`)} className={`underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>{cl.length}</button>
+                        : <span className={muted}>{custs.map ? '0' : '—'}</span>}</span>
+                    </div>
+                    {open && cl && <p className={`px-3 pb-2 text-[11px] leading-relaxed ${muted}`}>{cl.join(' · ')}</p>}
+                  </div>
+                );
+              })}
+              {hidden > 0 && <button type="button" onClick={()=>setShowAll(v=>!v)} className={`w-full text-right px-3 py-1.5 text-[11px] border-t ${box} ${isDarkMode?'text-blue-300':'text-blue-700'}`}>{showAll ? 'הסתר מחירונים לא מאושרים' : `הצג גם ${hidden} מחירונים לא מאושרים`}</button>}
+            </div>
+          ) : <p className={`text-xs ${muted}`}>הפריט לא מופיע באף מחירון לקוח.</p>}
+          {custs.err && <p className={`text-[11px] ${muted}`}>שיוך הלקוחות למחירונים לא נטען: {custs.err} <button type="button" onClick={()=>loadCusts(true)} className="underline">נסה שוב</button></p>}
+          {d.custPrices.length > 0 && (
+            <div>
+              <p className={`text-xs font-semibold mb-1 ${strong}`}>מחירים מיוחדים ללקוחות</p>
+              <ul className="text-xs space-y-0.5">{d.custPrices.map((c, i) => (
+                <li key={i} className="flex justify-between gap-2"><bdi className="truncate">{c.name}</bdi>
+                  <span className={strong}>{c.price ? fmtPrice(c.price, c.cur) : ''}{c.discount ? ` · הנחה ${c.discount}%` : ''}{c.familyDiscount ? ` · הנחת משפחה ${c.familyDiscount}%` : ''}{c.price ? marginTag(c.price, c.cur) : null}</span></li>))}
+              </ul>
+            </div>
+          )}
+          {unitCost > 0 && <p className={`text-[11px] ${muted}`}>הרווח מחושב מול עלות ₪{Number(unitCost).toLocaleString('he-IL',{maximumFractionDigits:2})} ליחידה (מחירים לפני מע״מ).</p>}
+        </div>
+      )}
+    </section>
   );
 };
 
@@ -3911,6 +4001,9 @@ const renderProductRow = (p) => {
                 </section>
               );
             })()}
+
+            {/* Selling prices — live from Priority */}
+            {p.sku && <ItemPricesPanel sku={p.sku} unitCost={p.unitCost} isDarkMode={isDarkMode}/>}
 
             {/* Purchase price over time */}
             {(() => {
@@ -7228,12 +7321,13 @@ const geminiChatWithTools = async ({ apiKey, system, history = [], question, too
     const calls = parts.filter(p => p.functionCall);
     if (calls.length && !last) {
       contents.push({ role: 'model', parts }); // sent back as is (keeps the model's thought signatures)
-      const responses = calls.map(p => {
+      const responses = [];
+      for (const p of calls) {
         const { name, args, id } = p.functionCall;
-        const r = runTool(name, args || {});
+        const r = await runTool(name, args || {});
         steps.push(r.label); onStep?.(r.label);
-        return { functionResponse: { name, ...(id ? { id } : {}), response: r.result } };
-      });
+        responses.push({ functionResponse: { name, ...(id ? { id } : {}), response: r.result } });
+      }
       contents.push({ role: 'user', parts: responses });
       continue;
     }
@@ -8036,7 +8130,7 @@ const App = () => {
     let detail = { products: [], orders: [], shipments: [] };
     try { detail = buildDigest({ app, sets: { ...sets, procSalesLines } }, { withDetail: true }).detail || detail; } catch (e) { console.error('ai data', e); }
     const D = { sales: procSalesLines, purchases: applyCardNames(sets.procPurchaseLines || [], app.procurementNames || {}, sets.procItemsExtra || {}),
-      products: detail.products, orders: detail.orders, shipments: detail.shipments, today: new Date().toISOString().slice(0, 10) };
+      products: detail.products, orders: detail.orders, shipments: detail.shipments, today: new Date().toISOString().slice(0, 10), fetchPrices: (sku) => fetchItemPrices(sku) };
     aiDataRef.current = { D, lines: procSalesLines, at: Date.now() };
     return D;
   }, [procSalesLines]);

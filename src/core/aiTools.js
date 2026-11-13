@@ -280,6 +280,26 @@ const TOOLS = {
     },
     label: (a) => `משלוחים${a.supplier ? ` · ${a.supplier}` : ''}`,
   },
+
+  item_prices: {
+    description: 'מחירי מכירה של מוצר, ישר מפריוריטי: מחיר בסיס, מחירון בסיס/סיטונאי/מינימום, המחירונים ללקוחות שהמוצר מופיע בהם (מחיר, הנחה, מחיר אחרי הנחה, כמות מינימלית, אם המחירון מאושר) ומחירים מיוחדים ללקוחות מסוימים. '
+      + 'גם עלות הקנייה ליחידה (לחישוב רווח). עד 5 מוצרים בבקשה.',
+    params: { products: ['array', 'מק"טים או שמות מוצרים (עד 5)'] },
+    required: ['products'],
+    run: async (D, a) => {
+      if (!D.fetchPrices) return { error: 'קריאת מחירים מפריוריטי לא זמינה כאן' };
+      const pr = resolveProducts(D, a.products); const out = [];
+      for (const sku of pr.skus.slice(0, 5)) {
+        const p = productIndex(D)[sku] || {};
+        try {
+          const r = await D.fetchPrices(sku);
+          out.push({ sku, name: p.name || sku, unitCostILS: p.unitCost ?? null, base: r.base, priceLists: r.lists.slice(0, 40), customerPrices: r.custPrices.slice(0, 30) });
+        } catch (e) { out.push({ sku, name: p.name || sku, error: String(e?.message || e) }); }
+      }
+      return { notFound: pr.unknown.length ? pr.unknown : undefined, moreMatches: pr.skus.length > 5 ? pr.skus.length : undefined, items: out };
+    },
+    label: (a) => `מחירי מכירה מפריוריטי: ${[].concat(a.products || []).join(', ')}`,
+  },
 };
 
 // Gemini function declarations
@@ -292,11 +312,11 @@ export const aiToolDeclarations = () => Object.entries(TOOLS).map(([name, t]) =>
   },
 }));
 
-export const runAiTool = (D, name, args = {}) => {
+export const runAiTool = async (D, name, args = {}) => {
   const t = TOOLS[name];
   if (!t) return { result: { error: `אין כלי בשם ${name}` }, label: name };
   let result;
-  try { result = t.run(D, args || {}); } catch (e) { result = { error: String(e?.message || e) }; }
+  try { result = await t.run(D, args || {}); } catch (e) { result = { error: String(e?.message || e) }; }
   // keep what goes back to the model small
   let json = JSON.stringify(result);
   if (json.length > 30000 && Array.isArray(result.rows)) { result = { ...result, rows: result.rows.slice(0, 40), cut: true }; json = JSON.stringify(result); }
@@ -305,7 +325,7 @@ export const runAiTool = (D, name, args = {}) => {
 
 export const AI_SYSTEM_PROMPT = (today, range) => `אתה העוזר של אתר ניתוח הנתונים של "דורון שערים" — עסק לאוטומציה לשערים (מנועים, פיקודים, שלטים, מחסומים ועוד), שמוכר בעיקר למתקינים.
 היום ${today}. נתוני חשבוניות המכירה מכסים ${range}.
-יש לך כלים שקוראים את נתוני האתר (מכירות, לקוחות, מלאי, קניות מספקים, הזמנות פתוחות, משלוחים). כללים:
+יש לך כלים שקוראים את נתוני האתר (מכירות, לקוחות, מלאי, קניות מספקים, הזמנות פתוחות, משלוחים) ומחירי מכירה ומחירונים מפריוריטי. כללים:
 - כל מספר בתשובה חייב להגיע מתוצאה של כלי. אל תנחש ואל תחשב מהזיכרון. אם צריך חישוב — בקש את הנתונים בכלי המתאים.
 - כשלא ברור לאיזה מוצר / לקוח הכוונה — חפש קודם (find_products / find_customers). אם יש כמה התאמות, ציין אותן.
 - "השנה" = מתחילת השנה הנוכחית עד היום; "שנה שעברה"/"אשתקד" = אותה תקופה בשנה הקודמת; "רבעון" = 3 חודשים קלנדריים.
