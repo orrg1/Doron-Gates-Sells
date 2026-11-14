@@ -6227,7 +6227,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                 <span className={`max-sm:hidden text-xs px-1.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{gLabel}</span>
                 {tabs.map(([mode,label,badge]) => (
                   <button key={mode} type="button" role="tab" aria-selected={viewMode===mode}
-                    onClick={(e) => { setViewMode(mode); if (mode!=='products') setActionFilter('all'); if (mode==='suppliers' && viewMode==='suppliers') setVendor(null); e.currentTarget.scrollIntoView?.({block:'nearest',inline:'center',behavior:'smooth'}); }}
+                    onClick={(e) => { setViewMode(mode); if (mode!=='products') startViewTransition(() => setActionFilter('all')); if (mode==='suppliers' && viewMode==='suppliers') setVendor(null); e.currentTarget.scrollIntoView?.({block:'nearest',inline:'center',behavior:'smooth'}); }}
                     className={`shrink-0 flex items-center gap-2 px-3 py-2 max-sm:py-2.5 rounded-lg text-sm font-semibold whitespace-nowrap transition-colors ${viewMode===mode
                       ? (isDarkMode?'bg-slate-200 text-slate-900':'bg-slate-900 text-white')
                       : (isDarkMode?'text-slate-300 hover:bg-slate-700':'text-slate-600 hover:bg-slate-100')}`}>
