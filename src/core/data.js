@@ -318,7 +318,7 @@ export const SERVICE_LEVEL = { A:{ z:2.05, pct:98 }, B:{ z:1.65, pct:95 }, C:{ z
 // then rounded up to the supplier's MOQ.
 // leadTimeStd (months): how much the supplier's real delivery time varies — an
 // unreliable supplier needs more safety stock than a steady one with the same average.
-export const calcOrderPlan = ({ avgMonthly, stdDev, abc, leadTime, leadTimeStd = 0, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq, multiplier = 1 }) => {
+export const calcOrderPlan = ({ avgMonthly, stdDev, abc, leadTime, leadTimeStd = 0, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq, pack = 1, multiplier = 1 }) => {
   const base = avgMonthly * multiplier;
   const horizon = Math.max(0, leadTime + monthsToStock);
   let projectedDemand = 0;
@@ -336,7 +336,9 @@ export const calcOrderPlan = ({ avgMonthly, stdDev, abc, leadTime, leadTimeStd =
   const safetyStock = Math.ceil(sl.z * sigma);
   const buffer = Math.max(safetyStock, minStock || 0);
   const raw = Math.max(0, Math.ceil(projectedDemand + buffer - (effectiveStock || 0)));
-  const rounded = (moq && moq > 0 && raw > 0) ? Math.ceil(raw / moq) * moq : raw;
+  let rounded = (moq && moq > 0 && raw > 0) ? Math.ceil(raw / moq) * moq : raw;
+  // bought in packs (e.g. 10 per pack) → whole packs
+  if (pack > 1 && rounded > 0) rounded = Math.ceil(rounded / pack - 1e-9) * pack;
   const rawFlat = Math.max(0, Math.ceil(flatDemand + buffer - (effectiveStock || 0)));
   return { suggestedOrder: rounded, suggestedOrderRaw: raw, suggestedOrderFlat: rawFlat, projectedDemand, safetyStock, buffer, serviceLevel: sl.pct, seasonalApplied: useSeason && Math.abs(projectedDemand - flatDemand) > 0.5 };
 };
@@ -540,6 +542,7 @@ export const parsePurchaseLines = (rows) => {
     n: colIndex(H,'תאור מוצר','תיאור מוצר'), q: colIndex(H,'כמות'), p: colIndex(H,'מחיר ליחידה'),
     cur: colIndex(H,'מטבע שורה','מטבע חשבונית'), tot: colIndex(H,'סה"כ אחרי הנחה','סה"כ מחיר'),
     rate: colIndex(H,'שער חליפין'), po: colIndex(H,'הזמנת רכש'), pod: colIndex(H,'תאריך ההזמנה','תאריך הזמנה'), pos: colIndex(H,'תאריך שליחה'), dc: colIndex(H,'חיוב/זכוי'),
+    pk: colIndex(H,'יחידות באריזה'), pu: colIndex(H,'יחידת רכש'),
   };
   const out = [];
   for (let i = hi + 1; i < rows.length; i++) {
@@ -551,7 +554,8 @@ export const parsePurchaseLines = (rows) => {
     const cur = normCurrency(r[c.cur]);
     const rate = c.rate!==-1 ? (num(r[c.rate]) || 1) : 1;
     out.push({ d, inv:String(r[c.inv]??''), s, k, n, junk: isJunkSku(k, n), q: num(r[c.q]) * sign, p: num(r[c.p]), cur,
-      tot: num(r[c.tot]) * sign, rate: cur==='ILS' ? 1 : rate, po: c.po!==-1 ? String(r[c.po]??'').trim() : '', pod: c.pod!==-1 ? toIsoDate(r[c.pod]) : '', pos: c.pos!==-1 ? toIsoDate(r[c.pos]) : '' });
+      tot: num(r[c.tot]) * sign, rate: cur==='ILS' ? 1 : rate, po: c.po!==-1 ? String(r[c.po]??'').trim() : '', pod: c.pod!==-1 ? toIsoDate(r[c.pod]) : '', pos: c.pos!==-1 ? toIsoDate(r[c.pos]) : '',
+      ...(c.pk!==-1 && num(r[c.pk]) > 1 ? { pk: num(r[c.pk]), pu: c.pu!==-1 ? String(r[c.pu]??'').trim() : '' } : {}) });
   }
   out.sort((a,b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0);
   return out;

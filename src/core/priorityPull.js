@@ -86,6 +86,9 @@ const F = {
   lineDue: ['REQDATE', 'DUEDATE', 'SUPDATE'],
   linePrice: ['PRICE', 'IPRICE'], lineTotal: ['QPRICE', 'IVPRICE', 'TOTPRICE'],
   quant: ['TQUANT', 'QUANT'],
+  // Units: QUANT = quantity in stock units, TQUANT = in the document's unit (TUNITNAME) — e.g. 5 packs = 50 units.
+  // Everything here is kept in stock units (what the stock balance and the sales use); the pack size is remembered.
+  invQuant: ['QUANT'], txQuant: ['TQUANT'], txUnit: ['TUNITNAME'], invUnit: ['UNITNAME'], buyUnit: ['PUNITNAME'], conv: ['CONV'],
   ivNum: ['IVNUM'], ivDate: ['IVDATE', 'CURDATE'],
   custNum: ['CUSTNAME'], custName: ['CDES', 'CUSTDES'],
   supInvName: ['CDES', 'SUPDES', 'SUPNAME'],
@@ -108,10 +111,11 @@ async function pullItems(forms, query) {
     cur = pick(f, F.buyCur), min = pick(f, F.minStock), moq = pick(f, F.moq);
   const fam = pick(f, F.family), famCode = pick(f, F.familyCode), typ = pick(f, F.partType), avg = pick(f, F.avgCost),
     list = pick(f, F.listPrice), lastSale = pick(f, F.lastSale), lastBuy = pick(f, F.lastBuy), created = pick(f, F.created);
+  const unitF = pick(f, F.invUnit), buyUnitF = pick(f, F.buyUnit), convF = pick(f, F.conv);
   const balSub = Object.keys(d.subforms || {}).find(n => /BAL/.test(n));
   const balField = balSub ? pick(d.subforms[balSub], F.balance) : null;
   const rows = await query('LOGPART', {
-    select: sel(sku, des, st, inv, sup, price, cur, min, moq, fam, famCode, typ, avg, list, lastSale, lastBuy, created),
+    select: sel(sku, des, st, inv, sup, price, cur, min, moq, fam, famCode, typ, avg, list, lastSale, lastBuy, created, unitF, buyUnitF, convF),
     expand: balSub && balField ? `${balSub}($select=${balField})` : '',
   });
   const out = [], extra = {};
@@ -131,6 +135,8 @@ async function pullItems(forms, query) {
       fam: fam ? r[fam] || '' : '', famCode: famCode ? r[famCode] || '' : '', type: typ ? r[typ] || '' : '',
       avgCost: avg ? numv(r[avg]) || null : null, listPrice: list ? numv(r[list]) || null : null,
       lastSale: lastSale ? iso(r[lastSale]) : '', lastBuy: lastBuy ? iso(r[lastBuy]) : '', created: created ? iso(r[created]) : '',
+      ...(unitF && r[unitF] ? { unit: r[unitF] } : {}), ...(buyUnitF && r[buyUnitF] ? { buyUnit: r[buyUnitF] } : {}),
+      ...(convF && numv(r[convF]) > 0 && numv(r[convF]) !== 1 ? { conv: numv(r[convF]) } : {}),
     };
     if (inv && r[inv] && r[inv] !== 'Y') continue;
     const bal = balSub && balField ? (r[balSub] || []).reduce((s, b) => s + numv(b[balField]), 0) : null;
@@ -174,10 +180,11 @@ const poShape = (forms) => {
   const sku = need(it.fields, F.part, 'מק"ט', it.name), des = pick(it.fields, F.partDes);
   const bal = need(it.fields, F.lineBalance, 'יתרה לאספקה', it.name);
   const due = pick(it.fields, F.lineDue), price = pick(it.fields, F.linePrice);
+  const qInv = pick(it.fields, F.invQuant), qTx = pick(it.fields, F.txQuant), txUnit = pick(it.fields, F.txUnit);
   const logSub = Object.keys(d.subforms || {}).find(n => /^DOCTODOLISTLOG/.test(n));
   const logFields = logSub ? d.subforms[logSub] : [];
   const log = logSub && logFields.includes('UDATE') && logFields.includes('STATDES') ? logSub : null;
-  return { ord, date, sup, st, it, sku, des, bal, due, price, log };
+  return { ord, date, sup, st, it, sku, des, bal, due, price, log, qInv, qTx, txUnit };
 };
 const poMetaOf = (r, s) => {
   const hist = s.log ? (r[s.log] || []).filter(x => x.UDATE).sort((a, b) => a.UDATE < b.UDATE ? -1 : 1) : [];
@@ -196,15 +203,19 @@ async function pullOpenPOs(forms, query) {
   const filter = s.st ? `(${s.st} eq 'נשלחה' or ${s.st} eq 'אושרה')` : '';
   const rows = await query('PORDERS', {
     select: sel(s.ord, s.date, s.sup, s.st), filter, orderby: s.ord,
-    expand: [`${s.it.name}($select=${sel(s.sku, s.des, s.bal, s.due, s.price)})`, s.log ? `${s.log}($select=UDATE,STATDES)` : ''].filter(Boolean).join(','),
+    expand: [`${s.it.name}($select=${sel(s.sku, s.des, s.bal, s.due, s.price, s.qInv, s.qTx, s.txUnit)})`, s.log ? `${s.log}($select=UDATE,STATDES)` : ''].filter(Boolean).join(','),
   });
   const lines = [], meta = {};
   for (const r of rows) {
     const m = poMetaOf(r, s); meta[r[s.ord]] = m;
     for (const l of r[s.it.name] || []) {
-      const q = numv(l[s.bal]); if (q <= 0) continue;
+      const qb = numv(l[s.bal]); if (qb <= 0) continue;
+      // the balance is in the line's unit (packs) — convert to stock units with the line's own ratio
+      const inv = s.qInv ? numv(l[s.qInv]) : 0, tx = s.qTx ? numv(l[s.qTx]) : 0;
+      const pack = inv > 0 && tx > 0 && Math.abs(inv / tx - 1) > 1e-6 ? inv / tx : 1;
+      const q = Math.round(qb * pack * 1000) / 1000;
       lines.push({ 'הזמנה': r[s.ord], 'מק"ט': l[s.sku], 'תאור מוצר': s.des ? l[s.des] : '', 'יתרה לאספקה': q,
-        'שווי יתרה': s.price ? q * numv(l[s.price]) : '', 'ת. הזמנה': dmy(r[s.date]), 'ת. אספקה': s.due ? dmy(l[s.due]) : '',
+        'שווי יתרה': s.price ? qb * numv(l[s.price]) : '', ...(pack !== 1 ? { 'יחידות באריזה': Math.round(pack * 1000) / 1000, 'יחידת רכש': s.txUnit ? l[s.txUnit] || '' : '' } : {}), 'ת. הזמנה': dmy(r[s.date]), 'ת. אספקה': s.due ? dmy(l[s.due]) : '',
         'שם ספק': s.sup ? r[s.sup] : '', 'סטטוס הזמנה': m.status, 'ת. שליחה': m.sent ? dmy(m.sent) : '' });
     }
   }
@@ -231,7 +242,7 @@ async function pullSalesWindow(forms, query, form, [a, b]) {
   const st = pick(f, F.docStatus), gross = pick(f, F.hdrGross), net = pick(f, F.hdrNet);
   const it = subformOf(d, n => /ITEMS/.test(n), form);
   const sku = need(it.fields, F.part, 'מק"ט', it.name), des = pick(it.fields, F.partDes);
-  const q = need(it.fields, F.quant, 'כמות', it.name), tot = pick(it.fields, F.lineTotal), ord = pick(it.fields, F.ordName);
+  const q = pick(it.fields, F.invQuant) || need(it.fields, F.quant, 'כמות', it.name), tot = pick(it.fields, F.lineTotal), ord = pick(it.fields, F.ordName);
   const exch = pick(it.fields, F.lineExch);
   const rows = await query(form, {
     select: sel(iv, date, cn, cd, st, gross, net), filter: `${date} ge ${a} and ${date} lt ${b}${finalFilter(f)}`, orderby: iv,
@@ -254,7 +265,7 @@ async function pullSalesWindow(forms, query, form, [a, b]) {
 }
 
 // ── 5. supplier invoice lines (one window); PO dates are filled in at the end ──
-export const PURCH_HEADERS = ['תאריך', 'חשבונית', 'שם ספק', 'מק"ט', 'תאור מוצר', 'כמות', 'מחיר ליחידה', 'מטבע שורה', 'סה"כ אחרי הנחה', 'שער חליפין', 'הזמנת רכש', 'תאריך ההזמנה', 'חיוב/זכוי', 'תאריך שליחה'];
+export const PURCH_HEADERS = ['תאריך', 'חשבונית', 'שם ספק', 'מק"ט', 'תאור מוצר', 'כמות', 'מחיר ליחידה', 'מטבע שורה', 'סה"כ אחרי הנחה', 'שער חליפין', 'הזמנת רכש', 'תאריך ההזמנה', 'חיוב/זכוי', 'תאריך שליחה', 'יחידות באריזה', 'יחידת רכש'];
 async function pullPurchaseWindow(forms, query, [a, b]) {
   const form = 'YINVOICES';
   const d = describe(forms, form);
@@ -265,17 +276,23 @@ async function pullPurchaseWindow(forms, query, [a, b]) {
   const sku = need(it.fields, F.part, 'מק"ט', it.name), des = pick(it.fields, F.partDes);
   const q = need(it.fields, F.quant, 'כמות', it.name), price = pick(it.fields, F.linePrice), tot = pick(it.fields, F.lineTotal);
   const lcur = pick(it.fields, F.lineCur), ord = pick(it.fields, F.ordName);
+  const qInv = pick(it.fields, F.invQuant), qTx = pick(it.fields, F.txQuant), txUnit = pick(it.fields, F.txUnit);
   const rows = await query(form, {
     select: sel(iv, date, sup, cur, rate, deb, st), filter: `${date} ge ${a} and ${date} lt ${b}${finalFilter(f)}`, orderby: iv,
-    expand: `${it.name}($select=${sel(sku, des, q, price, tot, lcur, ord)})`,
+    expand: `${it.name}($select=${sel(sku, des, q, price, tot, lcur, ord, qInv, qTx, txUnit)})`,
   });
   const out = [];
   for (const r of rows) {
     if (isCancelled(r, f)) continue;
     for (const l of r[it.name] || []) {
-      out.push([dmy(r[date]), r[iv], r[sup], l[sku], des ? l[des] : '', numv(l[q]), price ? numv(l[price]) : 0,
+      // quantity in stock units and the price per stock unit (a line of 5 packs × ₪100 = 50 units × ₪10)
+      const txq = numv(l[q]), invq = qInv ? numv(l[qInv]) : 0;
+      const pack = invq && txq && Math.abs(invq / txq - 1) > 1e-6 ? invq / txq : 1;
+      const qty = pack !== 1 ? invq : txq;
+      const unitPrice = price ? numv(l[price]) / pack : 0;
+      out.push([dmy(r[date]), r[iv], r[sup], l[sku], des ? l[des] : '', qty, Math.round(unitPrice * 10000) / 10000,
         (lcur && l[lcur]) || (cur ? r[cur] : '') || '', tot ? numv(l[tot]) : 0, rate ? numv(r[rate]) || '' : '',
-        ord ? l[ord] || '' : '', '', deb ? r[deb] || '' : '', '']);
+        ord ? l[ord] || '' : '', '', deb ? r[deb] || '' : '', '', pack !== 1 ? Math.round(pack * 1000) / 1000 : '', pack !== 1 && txUnit ? l[txUnit] || '' : '']);
     }
   }
   return { rows: out };

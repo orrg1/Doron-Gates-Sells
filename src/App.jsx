@@ -1400,7 +1400,7 @@ const CustomersPage = ({ requestedTab = null, onRequestedTabHandled = null, mont
 // Same numbers as the weekly email and the procurement page (buildDigest on the stored data).
 const OVERVIEW_APP_KEYS = ['procurementStock','procurementSupplier','procurementCost','procurementCurrency','exchangeRates','openOrders','procShipSupplierMap',
   'procOutlierDecisions','procurementLeadTime','procLeadAddTransit','excludeCurrentMonth','procSkipStockoutMonths','procurementMinStock','procurementCostHistory',
-  'procurementMOQ','procurementNames','prioritySyncAt','procAvgWindow','procMonthsToStock','procDefaultLeadTime','procOrderBlock','procShipPoLinks','procShipReceived','procShipDelivery','procShipExtraSups','procAlertSnooze','procOwnMadeAlertDays'];
+  'procurementMOQ','procurementNames','prioritySyncAt','procAvgWindow','procMonthsToStock','procDefaultLeadTime','procOrderBlock','procShipPoLinks','procShipReceived','procShipDelivery','procShipExtraSups','procAlertSnooze','procOwnMadeAlertDays','procPackSize'];
 const readAppState = (keys) => { const o = {}; keys.forEach(k => { let v = null; try { v = localStorage.getItem(k); } catch { /* none */ } if (v == null) return; try { o[k] = JSON.parse(v); } catch { o[k] = v; } }); return o; };
 const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpenProc, salesLines = [], stoppedCount = 0, dueCount = 0 }) => {
   const [sets, setSets] = useState(null);
@@ -1766,6 +1766,13 @@ const AIModal = ({ isOpen, onClose, loading, report, isDarkMode }) => {
       </div>
     </div>
   );
+};
+
+// Bought in packs, sold by the unit: "= 4 חב׳ של 10" next to a quantity in units
+const packText = (p, qty) => {
+  if (!(p?.packSize > 1) || !(qty > 0)) return '';
+  const n = qty / p.packSize, unit = p.packUnit && !/^יח/.test(p.packUnit) ? p.packUnit : 'חב׳';
+  return `= ${Number.isInteger(Math.round(n * 1000) / 1000) ? Math.round(n) : n.toFixed(1)} ${unit} של ${p.packSize}`;
 };
 
 // ── A SKU anywhere on the site opens the product card (the procurement drawer, over the current page) ──
@@ -2245,6 +2252,9 @@ const ProcurementPage = ({ sharedSalesLines = null, cardRequest = null, isVisibl
   // (still ordered from a supplier that is being phased out). Saved on the server → the email and alerts follow it.
   const [orderBlock, setOrderBlockState] = useState(() => { try { const v = JSON.parse(localStorage.getItem('procOrderBlock')||'{}'); return { suppliers: v.suppliers||{}, products: v.products||{} }; } catch { return { suppliers:{}, products:{} }; } });
   // "Don't remind me" for the morning email: { sku: { until:'YYYY-MM-DD' } | { untilStock:true, stock } } (saved to the server)
+  // pack size set by hand per SKU (bought in packs, sold by the unit) — { sku: n }; 1 = "not a pack" (overrides Priority)
+  const [packOverride, setPackOverrideState] = useState(() => { try { return JSON.parse(localStorage.getItem('procPackSize')||'{}') || {}; } catch { return {}; } });
+  const setPackSize = (sku, n) => setPackOverrideState(prev => { const next = { ...prev }; if (n == null || n === '') delete next[sku]; else next[sku] = Number(n); try { localStorage.setItem('procPackSize', JSON.stringify(next)); } catch { /* best-effort */ } return next; });
   const [alertSnooze, setAlertSnoozeState] = useState(() => { try { return JSON.parse(localStorage.getItem('procAlertSnooze')||'{}') || {}; } catch { return {}; } });
   const setAlertSnooze = (sku, val) => setAlertSnoozeState(prev => {
     const next = { ...prev }; if (val) next[sku] = { ...val, at: new Date().toISOString().slice(0,10) }; else delete next[sku];
@@ -2496,6 +2506,7 @@ const ProcurementPage = ({ sharedSalesLines = null, cardRequest = null, isVisibl
   const [sortConfig, setSortConfig] = useState({ key:'statusRank', direction:'asc' });
   const [editingStock, setEditingStock] = useState(null);
   const [editingMOQ, setEditingMOQ] = useState(null);
+  const [editingPack, setEditingPack] = useState(null);
   const [editingLeadTime, setEditingLeadTime] = useState(null); // supplier name being edited
   const [invLoading, setInvLoading] = useState(false);
   const [invUploadError, setInvUploadError] = useState(null);
@@ -2961,8 +2972,8 @@ const ProcurementPage = ({ sharedSalesLines = null, cardRequest = null, isVisibl
   // dependency, since this feeds into the risk score computed below. ──
   const supplierConcentration = useMemo(() => supplierConcentrationOf(supplierMap), [supplierMap]);
 
-  const productsAll = useMemo(() => computeProducts({ salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions, orderBlock }),
-    [leadFor, stockouts, skipStockoutMonths, outliers, outlierDecisions, salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, leadStats, leadAddTransit, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku, itemsExtra, orderBlock]);
+  const productsAll = useMemo(() => computeProducts({ salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions, orderBlock, packOverride }),
+    [leadFor, stockouts, skipStockoutMonths, outliers, outlierDecisions, salesData, stockMap, costMap, costHistory, minStockMap, supplierMap, moqMap, currencyMap, leadTimeMap, leadStats, leadAddTransit, monthsToStock, leadTime, incomingMap, overdueByProduct, avgWindowMonths, excludeCurrentMonth, supplierConcentration, exchangeRates, lastSupBySku, purchBySku, itemsExtra, orderBlock, packOverride]);
   const products = useMemo(() => productsAll.filter(p => !p.inactive), [productsAll]);
   useEffect(() => {
     if (!jumpPending || !productsAll.length) return;
@@ -3045,7 +3056,7 @@ const ProcurementPage = ({ sharedSalesLines = null, cardRequest = null, isVisibl
               {p.chip && <p className={`inline-block text-[11px] font-semibold px-1.5 py-0.5 rounded ${procChipCls(p.chip.k, isDarkMode)}`}>{p.chip.t}</p>}
               <div className="grid grid-cols-4 gap-2 text-center">
                 {[['מלאי', p.currentStock==null?'—':p.currentStock.toLocaleString()], ['ממוצע לח׳', p.avgMonthly? (Math.round(p.avgMonthly*10)/10).toLocaleString() : '0'],
-                  ['מספיק ל', p.effectiveCoverDays==null?'—':`${Math.round(p.effectiveCoverDays)} י׳`], [p.ownMade?'לייצר':'להזמין', p.currentStock!=null && p.suggestedOrder>0 ? p.suggestedOrder.toLocaleString() : '—']].map(([l,v]) => (
+                  ['מספיק ל', p.effectiveCoverDays==null?'—':`${Math.round(p.effectiveCoverDays)} י׳`], [p.ownMade?'לייצר':'להזמין', p.currentStock!=null && p.suggestedOrder>0 ? `${p.suggestedOrder.toLocaleString()}${p.packSize>1 ? ` (${p.suggestedOrder/p.packSize}×${p.packSize})` : ''}` : '—']].map(([l,v]) => (
                   <div key={l} className={`rounded-lg py-1 ${isDarkMode?'bg-slate-900/50':'bg-slate-50'}`}><p className={`text-[10px] ${muted}`}>{l}</p><p className={`text-sm font-bold tabular-nums ${strong}`}>{v}</p></div>
                 ))}
               </div>
@@ -3419,7 +3430,7 @@ const ProcurementPage = ({ sharedSalesLines = null, cardRequest = null, isVisibl
       const cur = p.currency || 'ILS';
       const line = p.unitCostOriginal ? p.suggestedOrder*p.unitCostOriginal : null;
       if (line!=null) totals[cur] = (totals[cur]||0) + line;
-      body += `<tr><td style="text-align:center">${i+1}</td><td>${escHtml(p.sku||p.name)}</td><td>${escHtml(p.name)}</td><td style="text-align:center;font-weight:bold">${p.suggestedOrder}</td><td style="text-align:center">${p.unitCostOriginal!=null?p.unitCostOriginal.toFixed(2):''}</td><td style="text-align:center">${line!=null?line.toFixed(2):''}</td><td style="text-align:center">${cur}</td></tr>`;
+      body += `<tr><td style="text-align:center">${i+1}</td><td>${escHtml(p.sku||p.name)}</td><td>${escHtml(p.name)}</td><td style="text-align:center;font-weight:bold">${p.suggestedOrder}${p.packSize>1 ? `<br><span style="font-weight:normal;font-size:11px">${escHtml(packText(p, p.suggestedOrder).slice(2))}</span>` : ''}</td><td style="text-align:center">${p.unitCostOriginal!=null?p.unitCostOriginal.toFixed(2):''}</td><td style="text-align:center">${line!=null?line.toFixed(2):''}</td><td style="text-align:center">${cur}</td></tr>`;
     });
     Object.entries(totals).forEach(([cur,amt]) => {
       body += `<tr style="font-weight:bold;background:#f1f5f9"><td colspan="5" style="text-align:left">סה"כ (${cur})</td><td style="text-align:center">${amt.toFixed(2)}</td><td style="text-align:center">${cur}</td></tr>`;
@@ -3768,6 +3779,7 @@ const renderProductRow = (p) => {
                       {p.suggestedOrder>0 ? (
                         <div className="flex flex-col">
                           <span className={`text-lg font-bold tabular-nums leading-tight ${isDarkMode?'text-white':'text-slate-900'}`}>{p.suggestedOrder.toLocaleString()} <span className="text-xs font-medium opacity-60">יח׳</span></span>
+                          {p.packSize > 1 && <span className={`text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{packText(p, p.suggestedOrder)}</span>}
                           {p.orderCost ? <span className={`text-xs tabular-nums ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{formatShort(p.orderCost)}</span>
                             : p.costCurrencyBlocked ? <span className={`text-xs ${isDarkMode?'text-orange-300':'text-orange-700'}`} title="חסר שער חליפין בהגדרות">חסר שער {p.costCurrencyBlocked}</span> : null}
                         </div>
@@ -3844,7 +3856,7 @@ const renderProductRow = (p) => {
       { label: 'פחות מלאי קיים', value: `− ${Math.max(0,p.currentStock??0).toLocaleString()} יח׳` },
       { label: 'פחות מה שבדרך', value: `− ${(p.incomingQty||0).toLocaleString()} יח׳` },
       { label: 'חסר', value: `${need.toLocaleString()} יח׳` },
-      ...(p.moq ? [{ label: `אחרי עיגול למינימום הזמנה (${p.moq})`, value: `${p.suggestedOrder.toLocaleString()} יח׳`, total:true }] : [{ label: 'להזמין', value: `${p.suggestedOrder.toLocaleString()} יח׳`, total:true }]),
+      ...(p.moq || p.packSize > 1 ? [{ label: `אחרי עיגול ${[p.moq ? `למינימום הזמנה (${p.moq})` : '', p.packSize > 1 ? `לאריזות של ${p.packSize}` : ''].filter(Boolean).join(' ו')}`, value: `${p.suggestedOrder.toLocaleString()} יח׳${p.packSize > 1 ? ` (${packText(p, p.suggestedOrder).slice(2)})` : ''}`, total:true }] : [{ label: 'להזמין', value: `${p.suggestedOrder.toLocaleString()} יח׳`, total:true }]),
     ];
     // Portal to <body>: an animated (transformed) ancestor would otherwise
     // turn position:fixed into position-relative-to-that-ancestor.
@@ -4158,6 +4170,22 @@ const renderProductRow = (p) => {
                       className="w-24 px-2 py-1 border-2 border-blue-500 rounded-lg text-sm text-right focus:outline-none"/>
                   ) : (
                     <button type="button" onClick={()=>setEditingMOQ(p.key)} className={`font-semibold underline decoration-dotted underline-offset-4 ${isDarkMode?'text-blue-300':'text-blue-700'}`}>{p.moq ? `${p.moq} יח׳` : 'הוסף'}</button>
+                  )}
+                </dd>
+                <dt className={muted}>אריזת רכש</dt>
+                <dd>
+                  {editingPack===p.key ? (
+                    <input type="number" min="1" autoFocus defaultValue={p.packSize ?? ''} aria-label="יחידות באריזה"
+                      onBlur={e=>{setPackSize(p.sku||p.key, e.target.value===''?null:e.target.value);setEditingPack(null);}}
+                      onKeyDown={e=>{e.stopPropagation(); if(e.key==='Enter'){setPackSize(p.sku||p.key, e.target.value===''?null:e.target.value);setEditingPack(null);} if(e.key==='Escape')setEditingPack(null);}}
+                      style={isDarkMode?{background:'#1e293b',color:'#f1f5f9'}:{}}
+                      className="w-24 px-2 py-1 border-2 border-blue-500 rounded-lg text-sm text-right focus:outline-none"/>
+                  ) : (
+                    <span>
+                      <button type="button" onClick={()=>setEditingPack(p.key)} className={`font-semibold underline decoration-dotted underline-offset-4 ${isDarkMode?'text-blue-300':'text-blue-700'}`}>{p.packSize > 1 ? `${p.packUnit && !/^יח/.test(p.packUnit) ? p.packUnit : 'חבילה'} של ${p.packSize} יח׳` : 'יחידה בודדת'}</button>
+                      {p.packSize > 1 && <span className={`mr-2 text-xs ${muted}`}>{p.packSource==='manual' ? '(נקבע ידנית)' : p.packSource==='invoice' ? '(לפי חשבונית הספק)' : '(לפי כרטיס הפריט)'} · נמכר ביחידה</span>}
+                      {p.packSource==='manual' && <button type="button" onClick={()=>setPackSize(p.sku||p.key, null)} className={`mr-2 text-xs underline ${muted}`}>חזור לפריוריטי</button>}
+                    </span>
                   )}
                 </dd>
                 <dt className={muted}>מינימום מלאי (Priority)</dt><dd className={`font-semibold ${strong}`}>{p.minStock ?? '—'}</dd>
@@ -5588,7 +5616,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                         <p className={`text-sm font-semibold ${strong}`}>{p.incomingQty>0?`${p.incomingQty.toLocaleString()} יח׳`:'—'}</p>
                         {p.incomingQty>0 && eta && <p className={`text-xs truncate ${eta.delayed?(isDarkMode?'text-red-300':'text-red-700'):muted}`} title={eta.src==='ship'?'לפי דוח המשלח — משלוח שמשויך להזמנה':eta.src==='shipGuess'?'לפי המשלוח הקרוב של הספק — לא משויך להזמנה מסוימת':'לפי תאריך האספקה בהזמנה'}>{eta.cont?`${eta.cont} · `:''}{isoToDisplay(eta.iso)}{eta.delayed?' · באיחור':''}</p>}
                       </div>
-                      <div className={`text-sm tabular-nums ${muted}`}>{p.currentStock!=null && p.suggestedOrder>0 ? p.suggestedOrder.toLocaleString() : '—'}</div>
+                      <div className={`text-sm tabular-nums ${muted}`}>{p.currentStock!=null && p.suggestedOrder>0 ? p.suggestedOrder.toLocaleString() : '—'}{p.currentStock!=null && p.suggestedOrder>0 && p.packSize>1 && <span className="block text-[11px]">{packText(p, p.suggestedOrder)}</span>}</div>
                       <div className="flex items-center gap-1">
                         <label htmlFor={`dq-${p.key}`} className="sr-only">כמות להזמנה — {p.name}</label>
                         <input id={`dq-${p.key}`} type="number" min="0" inputMode="numeric" value={q||''} placeholder="0"

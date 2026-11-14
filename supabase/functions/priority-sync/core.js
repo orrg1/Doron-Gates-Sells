@@ -191,7 +191,7 @@ var startOfToday = () => {
   return t;
 };
 var SERVICE_LEVEL = { A: { z: 2.05, pct: 98 }, B: { z: 1.65, pct: 95 }, C: { z: 1.28, pct: 90 } };
-var calcOrderPlan = ({ avgMonthly, stdDev, abc, leadTime, leadTimeStd = 0, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq, multiplier = 1 }) => {
+var calcOrderPlan = ({ avgMonthly, stdDev, abc, leadTime, leadTimeStd = 0, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq, pack = 1, multiplier = 1 }) => {
   const base = avgMonthly * multiplier;
   const horizon = Math.max(0, leadTime + monthsToStock);
   let projectedDemand = 0;
@@ -208,7 +208,8 @@ var calcOrderPlan = ({ avgMonthly, stdDev, abc, leadTime, leadTimeStd = 0, month
   const safetyStock = Math.ceil(sl.z * sigma);
   const buffer = Math.max(safetyStock, minStock || 0);
   const raw = Math.max(0, Math.ceil(projectedDemand + buffer - (effectiveStock || 0)));
-  const rounded = moq && moq > 0 && raw > 0 ? Math.ceil(raw / moq) * moq : raw;
+  let rounded = moq && moq > 0 && raw > 0 ? Math.ceil(raw / moq) * moq : raw;
+  if (pack > 1 && rounded > 0) rounded = Math.ceil(rounded / pack - 1e-9) * pack;
   const rawFlat = Math.max(0, Math.ceil(flatDemand + buffer - (effectiveStock || 0)));
   return { suggestedOrder: rounded, suggestedOrderRaw: raw, suggestedOrderFlat: rawFlat, projectedDemand, safetyStock, buffer, serviceLevel: sl.pct, seasonalApplied: useSeason && Math.abs(projectedDemand - flatDemand) > 0.5 };
 };
@@ -358,7 +359,9 @@ var parsePurchaseLines = (rows) => {
     po: colIndex(H, "\u05D4\u05D6\u05DE\u05E0\u05EA \u05E8\u05DB\u05E9"),
     pod: colIndex(H, "\u05EA\u05D0\u05E8\u05D9\u05DA \u05D4\u05D4\u05D6\u05DE\u05E0\u05D4", "\u05EA\u05D0\u05E8\u05D9\u05DA \u05D4\u05D6\u05DE\u05E0\u05D4"),
     pos: colIndex(H, "\u05EA\u05D0\u05E8\u05D9\u05DA \u05E9\u05DC\u05D9\u05D7\u05D4"),
-    dc: colIndex(H, "\u05D7\u05D9\u05D5\u05D1/\u05D6\u05DB\u05D5\u05D9")
+    dc: colIndex(H, "\u05D7\u05D9\u05D5\u05D1/\u05D6\u05DB\u05D5\u05D9"),
+    pk: colIndex(H, "\u05D9\u05D7\u05D9\u05D3\u05D5\u05EA \u05D1\u05D0\u05E8\u05D9\u05D6\u05D4"),
+    pu: colIndex(H, "\u05D9\u05D7\u05D9\u05D3\u05EA \u05E8\u05DB\u05E9")
   };
   const out = [];
   for (let i = hi + 1; i < rows.length; i++) {
@@ -385,7 +388,8 @@ var parsePurchaseLines = (rows) => {
       rate: cur === "ILS" ? 1 : rate,
       po: c.po !== -1 ? String(r[c.po] ?? "").trim() : "",
       pod: c.pod !== -1 ? toIsoDate(r[c.pod]) : "",
-      pos: c.pos !== -1 ? toIsoDate(r[c.pos]) : ""
+      pos: c.pos !== -1 ? toIsoDate(r[c.pos]) : "",
+      ...c.pk !== -1 && num(r[c.pk]) > 1 ? { pk: num(r[c.pk]), pu: c.pu !== -1 ? String(r[c.pu] ?? "").trim() : "" } : {}
     });
   }
   out.sort((a, b) => a.d < b.d ? 1 : a.d > b.d ? -1 : 0);
@@ -1005,6 +1009,14 @@ var F = {
   linePrice: ["PRICE", "IPRICE"],
   lineTotal: ["QPRICE", "IVPRICE", "TOTPRICE"],
   quant: ["TQUANT", "QUANT"],
+  // Units: QUANT = quantity in stock units, TQUANT = in the document's unit (TUNITNAME) — e.g. 5 packs = 50 units.
+  // Everything here is kept in stock units (what the stock balance and the sales use); the pack size is remembered.
+  invQuant: ["QUANT"],
+  txQuant: ["TQUANT"],
+  txUnit: ["TUNITNAME"],
+  invUnit: ["UNITNAME"],
+  buyUnit: ["PUNITNAME"],
+  conv: ["CONV"],
   ivNum: ["IVNUM"],
   ivDate: ["IVDATE", "CURDATE"],
   custNum: ["CUSTNAME"],
@@ -1039,10 +1051,11 @@ async function pullItems(forms, query) {
   const sku = need(f, F.part, '\u05DE\u05E7"\u05D8', "LOGPART"), des = need(f, F.partDes, "\u05EA\u05D0\u05D5\u05E8", "LOGPART");
   const st = pick(f, F.status), inv = pick(f, F.invFlag), sup = pick(f, F.supName), price = pick(f, F.buyPrice), cur = pick(f, F.buyCur), min = pick(f, F.minStock), moq = pick(f, F.moq);
   const fam = pick(f, F.family), famCode = pick(f, F.familyCode), typ = pick(f, F.partType), avg = pick(f, F.avgCost), list = pick(f, F.listPrice), lastSale = pick(f, F.lastSale), lastBuy = pick(f, F.lastBuy), created = pick(f, F.created);
+  const unitF = pick(f, F.invUnit), buyUnitF = pick(f, F.buyUnit), convF = pick(f, F.conv);
   const balSub = Object.keys(d.subforms || {}).find((n) => /BAL/.test(n));
   const balField = balSub ? pick(d.subforms[balSub], F.balance) : null;
   const rows = await query("LOGPART", {
-    select: sel(sku, des, st, inv, sup, price, cur, min, moq, fam, famCode, typ, avg, list, lastSale, lastBuy, created),
+    select: sel(sku, des, st, inv, sup, price, cur, min, moq, fam, famCode, typ, avg, list, lastSale, lastBuy, created, unitF, buyUnitF, convF),
     expand: balSub && balField ? `${balSub}($select=${balField})` : ""
   });
   const out = [], extra = {};
@@ -1070,7 +1083,10 @@ async function pullItems(forms, query) {
       listPrice: list ? numv(r[list]) || null : null,
       lastSale: lastSale ? iso(r[lastSale]) : "",
       lastBuy: lastBuy ? iso(r[lastBuy]) : "",
-      created: created ? iso(r[created]) : ""
+      created: created ? iso(r[created]) : "",
+      ...unitF && r[unitF] ? { unit: r[unitF] } : {},
+      ...buyUnitF && r[buyUnitF] ? { buyUnit: r[buyUnitF] } : {},
+      ...convF && numv(r[convF]) > 0 && numv(r[convF]) !== 1 ? { conv: numv(r[convF]) } : {}
     };
     if (inv && r[inv] && r[inv] !== "Y") continue;
     const bal = balSub && balField ? (r[balSub] || []).reduce((s, b) => s + numv(b[balField]), 0) : null;
@@ -1125,10 +1141,11 @@ var poShape = (forms) => {
   const sku = need(it.fields, F.part, '\u05DE\u05E7"\u05D8', it.name), des = pick(it.fields, F.partDes);
   const bal = need(it.fields, F.lineBalance, "\u05D9\u05EA\u05E8\u05D4 \u05DC\u05D0\u05E1\u05E4\u05E7\u05D4", it.name);
   const due = pick(it.fields, F.lineDue), price = pick(it.fields, F.linePrice);
+  const qInv = pick(it.fields, F.invQuant), qTx = pick(it.fields, F.txQuant), txUnit = pick(it.fields, F.txUnit);
   const logSub = Object.keys(d.subforms || {}).find((n) => /^DOCTODOLISTLOG/.test(n));
   const logFields = logSub ? d.subforms[logSub] : [];
   const log = logSub && logFields.includes("UDATE") && logFields.includes("STATDES") ? logSub : null;
-  return { ord, date, sup, st, it, sku, des, bal, due, price, log };
+  return { ord, date, sup, st, it, sku, des, bal, due, price, log, qInv, qTx, txUnit };
 };
 var poMetaOf = (r, s) => {
   const hist = s.log ? (r[s.log] || []).filter((x) => x.UDATE).sort((a, b) => a.UDATE < b.UDATE ? -1 : 1) : [];
@@ -1149,21 +1166,25 @@ async function pullOpenPOs(forms, query) {
     select: sel(s.ord, s.date, s.sup, s.st),
     filter,
     orderby: s.ord,
-    expand: [`${s.it.name}($select=${sel(s.sku, s.des, s.bal, s.due, s.price)})`, s.log ? `${s.log}($select=UDATE,STATDES)` : ""].filter(Boolean).join(",")
+    expand: [`${s.it.name}($select=${sel(s.sku, s.des, s.bal, s.due, s.price, s.qInv, s.qTx, s.txUnit)})`, s.log ? `${s.log}($select=UDATE,STATDES)` : ""].filter(Boolean).join(",")
   });
   const lines = [], meta = {};
   for (const r of rows) {
     const m = poMetaOf(r, s);
     meta[r[s.ord]] = m;
     for (const l of r[s.it.name] || []) {
-      const q = numv(l[s.bal]);
-      if (q <= 0) continue;
+      const qb = numv(l[s.bal]);
+      if (qb <= 0) continue;
+      const inv = s.qInv ? numv(l[s.qInv]) : 0, tx = s.qTx ? numv(l[s.qTx]) : 0;
+      const pack = inv > 0 && tx > 0 && Math.abs(inv / tx - 1) > 1e-6 ? inv / tx : 1;
+      const q = Math.round(qb * pack * 1e3) / 1e3;
       lines.push({
         "\u05D4\u05D6\u05DE\u05E0\u05D4": r[s.ord],
         '\u05DE\u05E7"\u05D8': l[s.sku],
         "\u05EA\u05D0\u05D5\u05E8 \u05DE\u05D5\u05E6\u05E8": s.des ? l[s.des] : "",
         "\u05D9\u05EA\u05E8\u05D4 \u05DC\u05D0\u05E1\u05E4\u05E7\u05D4": q,
-        "\u05E9\u05D5\u05D5\u05D9 \u05D9\u05EA\u05E8\u05D4": s.price ? q * numv(l[s.price]) : "",
+        "\u05E9\u05D5\u05D5\u05D9 \u05D9\u05EA\u05E8\u05D4": s.price ? qb * numv(l[s.price]) : "",
+        ...pack !== 1 ? { "\u05D9\u05D7\u05D9\u05D3\u05D5\u05EA \u05D1\u05D0\u05E8\u05D9\u05D6\u05D4": Math.round(pack * 1e3) / 1e3, "\u05D9\u05D7\u05D9\u05D3\u05EA \u05E8\u05DB\u05E9": s.txUnit ? l[s.txUnit] || "" : "" } : {},
         "\u05EA. \u05D4\u05D6\u05DE\u05E0\u05D4": dmy(r[s.date]),
         "\u05EA. \u05D0\u05E1\u05E4\u05E7\u05D4": s.due ? dmy(l[s.due]) : "",
         "\u05E9\u05DD \u05E1\u05E4\u05E7": s.sup ? r[s.sup] : "",
@@ -1195,7 +1216,7 @@ async function pullSalesWindow(forms, query, form, [a, b]) {
   const st = pick(f, F.docStatus), gross = pick(f, F.hdrGross), net = pick(f, F.hdrNet);
   const it = subformOf(d, (n) => /ITEMS/.test(n), form);
   const sku = need(it.fields, F.part, '\u05DE\u05E7"\u05D8', it.name), des = pick(it.fields, F.partDes);
-  const q = need(it.fields, F.quant, "\u05DB\u05DE\u05D5\u05EA", it.name), tot = pick(it.fields, F.lineTotal), ord = pick(it.fields, F.ordName);
+  const q = pick(it.fields, F.invQuant) || need(it.fields, F.quant, "\u05DB\u05DE\u05D5\u05EA", it.name), tot = pick(it.fields, F.lineTotal), ord = pick(it.fields, F.ordName);
   const exch = pick(it.fields, F.lineExch);
   const rows = await query(form, {
     select: sel(iv, date, cn, cd, st, gross, net),
@@ -1216,7 +1237,7 @@ async function pullSalesWindow(forms, query, form, [a, b]) {
   }
   return { rows: out };
 }
-var PURCH_HEADERS = ["\u05EA\u05D0\u05E8\u05D9\u05DA", "\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05EA", "\u05E9\u05DD \u05E1\u05E4\u05E7", '\u05DE\u05E7"\u05D8', "\u05EA\u05D0\u05D5\u05E8 \u05DE\u05D5\u05E6\u05E8", "\u05DB\u05DE\u05D5\u05EA", "\u05DE\u05D7\u05D9\u05E8 \u05DC\u05D9\u05D7\u05D9\u05D3\u05D4", "\u05DE\u05D8\u05D1\u05E2 \u05E9\u05D5\u05E8\u05D4", '\u05E1\u05D4"\u05DB \u05D0\u05D7\u05E8\u05D9 \u05D4\u05E0\u05D7\u05D4', "\u05E9\u05E2\u05E8 \u05D7\u05DC\u05D9\u05E4\u05D9\u05DF", "\u05D4\u05D6\u05DE\u05E0\u05EA \u05E8\u05DB\u05E9", "\u05EA\u05D0\u05E8\u05D9\u05DA \u05D4\u05D4\u05D6\u05DE\u05E0\u05D4", "\u05D7\u05D9\u05D5\u05D1/\u05D6\u05DB\u05D5\u05D9", "\u05EA\u05D0\u05E8\u05D9\u05DA \u05E9\u05DC\u05D9\u05D7\u05D4"];
+var PURCH_HEADERS = ["\u05EA\u05D0\u05E8\u05D9\u05DA", "\u05D7\u05E9\u05D1\u05D5\u05E0\u05D9\u05EA", "\u05E9\u05DD \u05E1\u05E4\u05E7", '\u05DE\u05E7"\u05D8', "\u05EA\u05D0\u05D5\u05E8 \u05DE\u05D5\u05E6\u05E8", "\u05DB\u05DE\u05D5\u05EA", "\u05DE\u05D7\u05D9\u05E8 \u05DC\u05D9\u05D7\u05D9\u05D3\u05D4", "\u05DE\u05D8\u05D1\u05E2 \u05E9\u05D5\u05E8\u05D4", '\u05E1\u05D4"\u05DB \u05D0\u05D7\u05E8\u05D9 \u05D4\u05E0\u05D7\u05D4', "\u05E9\u05E2\u05E8 \u05D7\u05DC\u05D9\u05E4\u05D9\u05DF", "\u05D4\u05D6\u05DE\u05E0\u05EA \u05E8\u05DB\u05E9", "\u05EA\u05D0\u05E8\u05D9\u05DA \u05D4\u05D4\u05D6\u05DE\u05E0\u05D4", "\u05D7\u05D9\u05D5\u05D1/\u05D6\u05DB\u05D5\u05D9", "\u05EA\u05D0\u05E8\u05D9\u05DA \u05E9\u05DC\u05D9\u05D7\u05D4", "\u05D9\u05D7\u05D9\u05D3\u05D5\u05EA \u05D1\u05D0\u05E8\u05D9\u05D6\u05D4", "\u05D9\u05D7\u05D9\u05D3\u05EA \u05E8\u05DB\u05E9"];
 async function pullPurchaseWindow(forms, query, [a, b]) {
   const form = "YINVOICES";
   const d = describe(forms, form);
@@ -1227,31 +1248,38 @@ async function pullPurchaseWindow(forms, query, [a, b]) {
   const sku = need(it.fields, F.part, '\u05DE\u05E7"\u05D8', it.name), des = pick(it.fields, F.partDes);
   const q = need(it.fields, F.quant, "\u05DB\u05DE\u05D5\u05EA", it.name), price = pick(it.fields, F.linePrice), tot = pick(it.fields, F.lineTotal);
   const lcur = pick(it.fields, F.lineCur), ord = pick(it.fields, F.ordName);
+  const qInv = pick(it.fields, F.invQuant), qTx = pick(it.fields, F.txQuant), txUnit = pick(it.fields, F.txUnit);
   const rows = await query(form, {
     select: sel(iv, date, sup, cur, rate, deb, st),
     filter: `${date} ge ${a} and ${date} lt ${b}${finalFilter(f)}`,
     orderby: iv,
-    expand: `${it.name}($select=${sel(sku, des, q, price, tot, lcur, ord)})`
+    expand: `${it.name}($select=${sel(sku, des, q, price, tot, lcur, ord, qInv, qTx, txUnit)})`
   });
   const out = [];
   for (const r of rows) {
     if (isCancelled(r, f)) continue;
     for (const l of r[it.name] || []) {
+      const txq = numv(l[q]), invq = qInv ? numv(l[qInv]) : 0;
+      const pack = invq && txq && Math.abs(invq / txq - 1) > 1e-6 ? invq / txq : 1;
+      const qty = pack !== 1 ? invq : txq;
+      const unitPrice = price ? numv(l[price]) / pack : 0;
       out.push([
         dmy(r[date]),
         r[iv],
         r[sup],
         l[sku],
         des ? l[des] : "",
-        numv(l[q]),
-        price ? numv(l[price]) : 0,
+        qty,
+        Math.round(unitPrice * 1e4) / 1e4,
         lcur && l[lcur] || (cur ? r[cur] : "") || "",
         tot ? numv(l[tot]) : 0,
         rate ? numv(r[rate]) || "" : "",
         ord ? l[ord] || "" : "",
         "",
         deb ? r[deb] || "" : "",
-        ""
+        "",
+        pack !== 1 ? Math.round(pack * 1e3) / 1e3 : "",
+        pack !== 1 && txUnit ? l[txUnit] || "" : ""
       ]);
     }
   }
@@ -1439,7 +1467,7 @@ var procChip = (p) => {
   return null;
 };
 var computeProducts = (ctx) => {
-  const { salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions, orderBlock } = ctx;
+  const { salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions, orderBlock, packOverride = {} } = ctx;
   if (!salesData.length) return [];
   const map = {};
   salesData.forEach((row) => {
@@ -1527,7 +1555,12 @@ var computeProducts = (ctx) => {
     const ex = itemsExtra[p.sku] ?? itemsExtra[key] ?? null;
     const ownMade = isOwnMadeFamily(ex?.fam);
     const supplier = ownMade ? OWN_MADE : supplierMap[key] ?? supplierMap[p.sku] ?? supplierMap[p.name] ?? lastP?.s ?? null;
-    const catalogCost = costMap[key] ?? costMap[p.sku] ?? costMap[p.name] ?? null;
+    const packSet = Number(packOverride[p.sku] ?? packOverride[key]) || null;
+    const packSize = packSet > 1 ? packSet : packSet === 1 ? null : lastP?.pk > 1 ? lastP.pk : ex?.conv > 1 && ex.buyUnit && ex.unit && ex.buyUnit !== ex.unit ? ex.conv : null;
+    const packSource = !packSize ? null : packSet > 1 ? "manual" : lastP?.pk > 1 ? "invoice" : "card";
+    const packUnit = packSize ? lastP?.pu || ex?.buyUnit || "" : "";
+    let catalogCost = costMap[key] ?? costMap[p.sku] ?? costMap[p.name] ?? null;
+    if (packSize && catalogCost > 0 && lastP?.p > 0 && Math.abs(catalogCost / packSize - lastP.p) < Math.abs(catalogCost - lastP.p)) catalogCost = catalogCost / packSize;
     const costFromPurchase = catalogCost == null && lastP && lastP.p > 0;
     const costFromAvg = catalogCost == null && !costFromPurchase && ex?.avgCost > 0;
     const currency = costFromPurchase ? lastP.cur : costFromAvg ? "ILS" : currencyMap[key] ?? currencyMap[p.sku] ?? currencyMap[p.name] ?? null;
@@ -1610,7 +1643,7 @@ var computeProducts = (ctx) => {
     const effectiveCoverMonths = currentStock !== null && avgMonthly > 0 ? effectiveStock / avgMonthly : null;
     const moq = moqMap[key] ?? moqMap[p.sku] ?? moqMap[p.name] ?? null;
     const orderBlocked = orderBlockOf(orderBlock, p.sku || key, supplier);
-    const plan = calcOrderPlan({ avgMonthly, stdDev, abc: p.abc, leadTime: effectiveLeadTime, leadTimeStd: lf.std, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq });
+    const plan = calcOrderPlan({ avgMonthly, stdDev, abc: p.abc, leadTime: effectiveLeadTime, leadTimeStd: lf.std, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq, pack: packSize || 1 });
     const { suggestedOrderRaw, suggestedOrderFlat, safetyStock, projectedDemand, serviceLevel, seasonalApplied } = plan;
     const suggestedOrder = orderBlocked ? 0 : plan.suggestedOrder;
     const orderCost = suggestedOrder > 0 && unitCost ? suggestedOrder * unitCost : null;
@@ -1627,7 +1660,7 @@ var computeProducts = (ctx) => {
     const riskScore = Math.round(
       coverageRiskScore * 0.4 + volatilityRiskScore * 0.2 + xyzRiskScore * 0.15 + leadTimeRiskScore * 0.15 + supplierRiskScore * 0.1
     );
-    const out = { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, serviceLevel, projectedDemand, seasonalApplied, suggestedOrderFlat, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, priceChangePct, prevPrice, priceChangedAt, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, leadTimeSource, leadTimeStd: lf.std, nextMonIdx, coverageMonths, coverageDays, incomingQty, overdue, effectiveStock, effectiveCoverDays, effectiveCoverMonths, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, risk, physicalRisk, shortNowCoveredByPO, riskScore };
+    const out = { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, serviceLevel, projectedDemand, seasonalApplied, suggestedOrderFlat, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, priceChangePct, prevPrice, priceChangedAt, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, leadTimeSource, leadTimeStd: lf.std, nextMonIdx, coverageMonths, coverageDays, incomingQty, overdue, effectiveStock, effectiveCoverDays, effectiveCoverMonths, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, packSize, packSource, packUnit, risk, physicalRisk, shortNowCoveredByPO, riskScore };
     out.orderBlocked = orderBlocked;
     out.orderMark = orderBlock?.products?.[p.sku || key] || null;
     if (p.inactive) {
@@ -1893,7 +1926,8 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now(), withDetail = fal
     supplierConcentration: supplierConcentrationOf(supplierMap),
     outliers,
     outlierDecisions: decisions,
-    orderBlock: app.procOrderBlock || {}
+    orderBlock: app.procOrderBlock || {},
+    packOverride: app.procPackSize || {}
   });
   const products = productsAll.filter((p) => !p.inactive);
   const bySup = {};
@@ -2027,7 +2061,8 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now(), withDetail = fal
         coverDays: p.effectiveCoverDays != null ? Math.round(p.effectiveCoverDays) : null,
         leadMonths: p.effectiveLeadTime,
         qty: p.suggestedOrder,
-        abc: p.abc
+        abc: p.abc,
+        ...p.packSize > 1 ? { pack: p.packSize } : {}
       })),
       ships: delayed.map((s) => ({ id: s.id, cont: s.cont, file: s.file || "", sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays }))
     },
@@ -2054,7 +2089,8 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now(), withDetail = fal
         suggestedOrder: p.suggestedOrder || 0,
         unitCost: p.unitCost != null ? Math.round(p.unitCost * 100) / 100 : null,
         minStock: p.minStock ?? null,
-        lifecycle: p.lifecycle || ""
+        lifecycle: p.lifecycle || "",
+        ...p.packSize > 1 ? { packSize: p.packSize } : {}
       })),
       orders: ordersEnriched.map((o) => ({
         po: o.poNumber || "",
@@ -2175,7 +2211,7 @@ var renderMorningHtml = (m, ships = [], { siteUrl }) => {
     x.stock ?? "\u2014",
     x.incoming || "\u2014",
     x.coverDays == null ? "\u2014" : `<b style="color:#C8322B">${x.coverDays} \u05D9\u05DE\u05D9\u05DD</b>`,
-    `<b>${(x.qty || 0).toLocaleString("en-US")}</b> ${verb}`
+    `<b>${(x.qty || 0).toLocaleString("en-US")}</b> ${verb}${x.pack > 1 && x.qty > 0 ? `<br><span style="color:#64748b;font-size:11px">${Math.round(x.qty / x.pack * 10) / 10} \u05D0\u05E8\u05D9\u05D6\u05D5\u05EA \u05E9\u05DC ${x.pack}</span>` : ""}`
   ]);
   const cols = (verb) => head(["\u05DE\u05D5\u05E6\u05E8", "\u05DE\u05DC\u05D0\u05D9", "\u05D1\u05D3\u05E8\u05DA", "\u05DE\u05E1\u05E4\u05D9\u05E7 \u05DC", verb]);
   const buy = m.buy || m.current.filter((x) => !x.ownMade), make = m.make || m.current.filter((x) => x.ownMade);

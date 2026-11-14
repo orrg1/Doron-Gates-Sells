@@ -145,7 +145,7 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now(), withDet
   const productsAll = computeProducts({ salesData, excludeCurrentMonth: app.excludeCurrentMonth !== false, avgWindowMonths: Number.isFinite(Number(app.procAvgWindow)) && app.procAvgWindow != null ? Number(app.procAvgWindow) : 12, stockouts, skipStockoutMonths: app.procSkipStockoutMonths !== '0' && app.procSkipStockoutMonths !== 0,
     stockMap, minStockMap: app.procurementMinStock || {}, lastSupBySku, supplierMap, costMap, itemsExtra: sets.procItemsExtra || {}, currencyMap, exchangeRates,
     costHistory: app.procurementCostHistory || {}, purchBySku, leadFor, incomingMap: incomingMapOf(openOrders), overdueByProduct: overdueByProductOf(ordersEnriched),
-    moqMap: app.procurementMOQ || {}, monthsToStock: Number(app.procMonthsToStock) || 2, supplierConcentration: supplierConcentrationOf(supplierMap), outliers, outlierDecisions: decisions, orderBlock: app.procOrderBlock || {} });
+    moqMap: app.procurementMOQ || {}, monthsToStock: Number(app.procMonthsToStock) || 2, supplierConcentration: supplierConcentrationOf(supplierMap), outliers, outlierDecisions: decisions, orderBlock: app.procOrderBlock || {}, packOverride: app.procPackSize || {} });
   const products = productsAll.filter(p => !p.inactive);
 
   // 1. what to order, by supplier
@@ -230,7 +230,7 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now(), withDet
     alertSource: {
       stock: products.filter(p => p.status === 'now' && /^[AB]/.test(p.abc || '') && p.avgMonthly > 0)
         .map(p => ({ k: p.sku || p.key, name: p.name, supplier: p.supplier || '', ownMade: !!p.ownMade, stock: p.currentStock, incoming: p.incomingQty || 0,
-          coverDays: p.effectiveCoverDays != null ? Math.round(p.effectiveCoverDays) : null, leadMonths: p.effectiveLeadTime, qty: p.suggestedOrder, abc: p.abc })),
+          coverDays: p.effectiveCoverDays != null ? Math.round(p.effectiveCoverDays) : null, leadMonths: p.effectiveLeadTime, qty: p.suggestedOrder, abc: p.abc, ...(p.packSize > 1 ? { pack: p.packSize } : {}) })),
       ships: delayed.map(s => ({ id: s.id, cont: s.cont, file: s.file || '', sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays })),
     },
     week, productsUp: productMoves.up.slice(0, 10), productsDown: productMoves.down.slice(0, 6), returnSpikes,
@@ -239,7 +239,7 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now(), withDet
       products: productsAll.map(p => ({ sku: p.sku || '', name: p.name, supplier: p.supplier || '', abc: p.abc || '', status: p.status, inactive: !!p.inactive, ownMade: !!p.ownMade,
         orderBlocked: p.orderBlocked || null, stock: p.currentStock, incoming: p.incomingQty || 0, avgMonthly: p.avgMonthly != null ? Math.round(p.avgMonthly * 10) / 10 : null,
         coverDays: p.effectiveCoverDays, leadMonths: p.effectiveLeadTime, suggestedOrder: p.suggestedOrder || 0, unitCost: p.unitCost != null ? Math.round(p.unitCost * 100) / 100 : null,
-        minStock: p.minStock ?? null, lifecycle: p.lifecycle || '' })),
+        minStock: p.minStock ?? null, lifecycle: p.lifecycle || '', ...(p.packSize > 1 ? { packSize: p.packSize } : {}) })),
       orders: ordersEnriched.map(o => ({ po: o.poNumber || '', supplier: o.supplier || '', sku: o.productKey || '', name: names[o.productKey] || o.productName || '', qty: o.orderedQty || 0,
         ordered: o.orderDate || '', expected: o.expectedDate || '', late: o.isOverdue ? o.daysLate : 0, valueILS: o.valueILS != null ? Math.round(o.valueILS) : null })),
       shipments: shipments.map(s => { const w = withShipSups({ ...s, matched: supOf(s) }, app.procShipExtraSups || {}); const st = shipmentStage(s, today);
@@ -361,7 +361,7 @@ export const renderMorningHtml = (m, ships = [], { siteUrl }) => {
   const tag = (x) => x.isNew ? '<span style="background:#C8322B;color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:bold">חדש</span> '
     : `<span style="color:#b45309;font-size:11px;font-weight:bold">ברשימה ${x.days} ${x.days === 1 ? 'יום' : 'ימים'}</span> `;
   const itemRow = (x, verb) => row([`${tag(x)}<b>${prodLink(siteUrl, x.name, x.k || x.sku)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}</span>`,
-    x.stock ?? '—', x.incoming || '—', x.coverDays == null ? '—' : `<b style="color:#C8322B">${x.coverDays} ימים</b>`, `<b>${(x.qty || 0).toLocaleString('en-US')}</b> ${verb}`]);
+    x.stock ?? '—', x.incoming || '—', x.coverDays == null ? '—' : `<b style="color:#C8322B">${x.coverDays} ימים</b>`, `<b>${(x.qty || 0).toLocaleString('en-US')}</b> ${verb}${x.pack > 1 && x.qty > 0 ? `<br><span style="color:#64748b;font-size:11px">${Math.round(x.qty / x.pack * 10) / 10} אריזות של ${x.pack}</span>` : ''}`]);
   const cols = (verb) => head(['מוצר', 'מלאי', 'בדרך', 'מספיק ל', verb]);
   const buy = m.buy || m.current.filter(x => !x.ownMade), make = m.make || m.current.filter(x => x.ownMade);
   let shown = 0; const LIMIT = 60;

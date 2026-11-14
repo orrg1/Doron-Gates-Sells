@@ -42,7 +42,7 @@ export const procChip = (p) => {
 // ─── The product plan (one row per product) — used by the procurement page AND the server (weekly email) ───
 // Pure: everything it needs comes in `ctx`; the same numbers wherever it runs.
 export const computeProducts = (ctx) => {
-  const { salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions, orderBlock } = ctx;
+  const { salesData, excludeCurrentMonth, avgWindowMonths, stockouts, skipStockoutMonths, stockMap, minStockMap, lastSupBySku, supplierMap, costMap, itemsExtra, currencyMap, exchangeRates, costHistory, purchBySku, leadFor, incomingMap, overdueByProduct, moqMap, monthsToStock, supplierConcentration, outliers, outlierDecisions, orderBlock, packOverride = {} } = ctx;
   if (!salesData.length) return [];
   const map = {};
   salesData.forEach(row => {
@@ -142,7 +142,16 @@ export const computeProducts = (ctx) => {
     const ex = itemsExtra[p.sku] ?? itemsExtra[key] ?? null;
     const ownMade = isOwnMadeFamily(ex?.fam);
     const supplier     = ownMade ? OWN_MADE : (supplierMap[key]??supplierMap[p.sku]??supplierMap[p.name]??lastP?.s??null);
-    const catalogCost  = costMap[key]??costMap[p.sku]??costMap[p.name]??null;
+    // Bought in packs, sold by the unit: the pack size — set by hand on the site, else from the last supplier
+    // invoice (stock units per document unit), else from the item card (purchase unit ≠ stock unit).
+    const packSet = Number(packOverride[p.sku] ?? packOverride[key]) || null;
+    const packSize = packSet > 1 ? packSet : packSet === 1 ? null
+      : lastP?.pk > 1 ? lastP.pk : (ex?.conv > 1 && ex.buyUnit && ex.unit && ex.buyUnit !== ex.unit ? ex.conv : null);
+    const packSource = !packSize ? null : packSet > 1 ? 'manual' : lastP?.pk > 1 ? 'invoice' : 'card';
+    const packUnit = packSize ? (lastP?.pu || ex?.buyUnit || '') : '';
+    let catalogCost  = costMap[key]??costMap[p.sku]??costMap[p.name]??null;
+    // the item card's purchase price may be per pack — when it is ~pack × the per-unit invoice price, use it per unit
+    if (packSize && catalogCost > 0 && lastP?.p > 0 && Math.abs(catalogCost / packSize - lastP.p) < Math.abs(catalogCost - lastP.p)) catalogCost = catalogCost / packSize;
     const costFromPurchase = catalogCost==null && lastP && lastP.p>0;
     // Last resort: Priority's average cost (always in ₪) when there is no item-card price and no supplier invoice.
     const costFromAvg = catalogCost==null && !costFromPurchase && ex?.avgCost>0;
@@ -243,7 +252,7 @@ export const computeProducts = (ctx) => {
     // ── Suggested order (shared with the what-if scenario) ──
     const moq = moqMap[key] ?? moqMap[p.sku] ?? moqMap[p.name] ?? null;
     const orderBlocked = orderBlockOf(orderBlock, p.sku || key, supplier);
-    const plan = calcOrderPlan({ avgMonthly, stdDev, abc:p.abc, leadTime:effectiveLeadTime, leadTimeStd: lf.std, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq });
+    const plan = calcOrderPlan({ avgMonthly, stdDev, abc:p.abc, leadTime:effectiveLeadTime, leadTimeStd: lf.std, monthsToStock, seasonalityIdx, seasonalityReliable, nextMonIdx, effectiveStock, minStock, moq, pack: packSize || 1 });
     const { suggestedOrderRaw, suggestedOrderFlat, safetyStock, projectedDemand, serviceLevel, seasonalApplied } = plan;
     const suggestedOrder = orderBlocked ? 0 : plan.suggestedOrder; // not ordered any more → no recommendation
     const orderCost = (suggestedOrder>0&&unitCost)?suggestedOrder*unitCost:null;
@@ -275,7 +284,7 @@ export const computeProducts = (ctx) => {
       coverageRiskScore*0.40 + volatilityRiskScore*0.20 + xyzRiskScore*0.15 + leadTimeRiskScore*0.15 + supplierRiskScore*0.10
     );
 
-    const out = { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, serviceLevel, projectedDemand, seasonalApplied, suggestedOrderFlat, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, priceChangePct, prevPrice, priceChangedAt, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, leadTimeSource, leadTimeStd: lf.std, nextMonIdx, coverageMonths, coverageDays, incomingQty, overdue, effectiveStock, effectiveCoverDays, effectiveCoverMonths, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, risk, physicalRisk, shortNowCoveredByPO, riskScore };
+    const out = { ...p, key, avgMonthly, avgDataMonths, isLimitedData, windowMonths: allMonths.length, avgDaily, sparkline, trendSeries, trend, forecastNext, seasonalFactor, seasonalityReliable, seasonalityIdx, monthlyAvgs, cv, stdDev, xyz, abcXyz, safetyStock, serviceLevel, projectedDemand, seasonalApplied, suggestedOrderFlat, lifecycle, currentStock, unitCost, unitCostOriginal, costConverted, costCurrencyBlocked, priceChangePct, prevPrice, priceChangedAt, minStock, supplier, currency, moq, effectiveLeadTime, leadTimeOverridden, leadTimeSource, leadTimeStd: lf.std, nextMonIdx, coverageMonths, coverageDays, incomingQty, overdue, effectiveStock, effectiveCoverDays, effectiveCoverMonths, suggestedOrder, suggestedOrderRaw, orderCost, orderCostOriginal, packSize, packSource, packUnit, risk, physicalRisk, shortNowCoveredByPO, riskScore };
     out.orderBlocked = orderBlocked; out.orderMark = orderBlock?.products?.[p.sku || key] || null;
     if (p.inactive) { out.suggestedOrder = 0; out.orderCost = 0; out.orderBlocked = out.orderBlocked || 'inactive'; }
     out.status = procStatus(out);

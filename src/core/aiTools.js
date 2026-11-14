@@ -225,7 +225,7 @@ const TOOLS = {
           || (f === 'excess' && p.avgMonthly > 0 && p.stock / p.avgMonthly > 12)))
         .map(p => ({ sku: p.sku, name: p.name, supplier: p.supplier, abc: p.abc, stock: p.stock, incoming: p.incoming, avgMonthly: p.avgMonthly, coverDays: p.coverDays,
           leadMonths: p.leadMonths, suggestedOrder: p.suggestedOrder, status: PROC_STATUS_LABEL[p.status] || p.status,
-          ownMade: p.ownMade || undefined, madeToOrder: p.orderBlocked === 'mto' || undefined }))
+          ownMade: p.ownMade || undefined, madeToOrder: p.orderBlocked === 'mto' || undefined, boughtInPacksOf: p.packSize || undefined }))
         .sort((x, y) => (x.coverDays ?? 1e9) - (y.coverDays ?? 1e9));
       return { filter: f, notFound: pr?.unknown?.length ? pr.unknown : undefined, total: rows.length, rows: rows.slice(0, LIMIT(a.limit)) };
     },
