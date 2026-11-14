@@ -3028,7 +3028,7 @@ const ProcurementPage = ({ cardRequest = null, isVisible = true, onShowPage = nu
               <div className="flex items-start gap-2">
                 <div className="flex-1 min-w-0">
                   <p className={`font-semibold text-sm leading-snug ${strong}`}>{p.name}</p>
-                  <p className={`text-[11px] font-mono ${muted}`}><SkuLink sku={p.sku}/>{p.supplier ? <span className="font-sans"> · {p.supplier}</span> : null}</p>
+                  <p className={`text-[11px] font-mono ${muted}`}>{p.sku}{p.supplier ? <span className="font-sans"> · {p.supplier}</span> : null}</p>
                 </div>
                 <span className={`shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${procStatusCls(p.status, isDarkMode)}`}><span className="w-1.5 h-1.5 rounded-full" style={{background:procDotColor[p.status]}}/>{PROC_STATUS_LABEL[p.status]}</span>
               </div>
@@ -4720,7 +4720,7 @@ const renderProductRow = (p) => {
               <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
                 {rows.map(p => (
                   <tr key={p.key} onClick={()=>setDrawerKey(p.key)} className={`cursor-pointer ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}`}>
-                    <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[260px] ${strong}`} title={p.name}>{p.name}</p><p className={`text-[11px] font-mono ${muted}`}><SkuLink sku={p.sku}/>{p.stockout.estimated ? ' · משוער' : ''}</p></td>
+                    <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[260px] ${strong}`} title={p.name}>{p.name}</p><p className={`text-[11px] font-mono ${muted}`}>{p.sku}{p.stockout.estimated ? ' · משוער' : ''}</p></td>
                     <td className="px-4 py-2.5 text-xs">{p.supplier || '—'}</td>
                     <td className="px-4 py-2.5 tabular-nums font-semibold">{p.outDays}</td>
                     <td className="px-4 py-2.5 tabular-nums">{p.avgMonthly.toFixed(p.avgMonthly<10?1:0)}</td>
@@ -5279,7 +5279,7 @@ const renderProductRow = (p) => {
               <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
                 {rows.map(p => (
                   <tr key={p.key} onClick={()=>setDrawerKey(p.key)} className={`cursor-pointer ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}`}>
-                    <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[240px] ${strong}`} title={p.name}>{p.name}</p><p className={`text-[11px] font-mono ${muted}`}><SkuLink sku={p.sku}/></p></td>
+                    <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[240px] ${strong}`} title={p.name}>{p.name}</p><p className={`text-[11px] font-mono ${muted}`}>{p.sku}</p></td>
                     <td className="px-4 py-2.5 text-xs">{p.supplier || '—'}</td>
                     <td className="px-4 py-2.5 tabular-nums">{p.currentStock.toLocaleString()}</td>
                     <td className="px-4 py-2.5 tabular-nums">{p.incomingQty ? p.incomingQty.toLocaleString() : '—'}</td>
@@ -5567,7 +5567,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                       <button type="button" onClick={()=>setDrawerKey(p.key)} className={`text-right min-w-0 group focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded sticky right-0 z-[1] -mr-4 pr-4 py-1 ${drawerKey===p.key?(isDarkMode?'bg-slate-700':'bg-blue-50'):(isDarkMode?'bg-slate-800':'bg-white')}`}>
                         <p className={`text-sm font-semibold truncate group-hover:underline ${strong}`} title={p.name}>{p.name}</p>
                         <p className="flex items-center gap-1.5 min-w-0">
-                          <span className={`text-xs font-mono ${muted}`}><SkuLink sku={p.sku}/></span>
+                          <span className={`text-xs font-mono ${muted}`}>{p.sku}</span>
                           {p.chip && <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded truncate ${procChipCls(p.chip.k, isDarkMode)}`}>{p.chip.t}</span>}
                         </p>
                       </button>
