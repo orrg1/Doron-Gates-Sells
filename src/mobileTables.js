@@ -36,24 +36,24 @@ const tooWide = (el) => {
   return el.scrollWidth > avail + 8 || el.scrollWidth > window.innerWidth;
 };
 
-const processTable = (table) => {
-  if (table.closest('[data-proctable],[data-no-mcards]')) return;
+// A table/grid that fitted is measured again only when the screen width or its number of rows changes —
+// measuring (scrollWidth) forces the browser to lay the page out, and this runs after every change on the page.
+const fitted = new WeakMap(); // el → 'width|rows' when it was last found to fit
+const sig = (el, rows) => `${window.innerWidth}|${rows}`;
+
+const tableCandidate = (table) => {
+  if (table.closest('[data-proctable],[data-no-mcards]')) return null;
   const labels = headerLabels(table);
-  if (!labels || labels.length < 3) return;
-  if (!table.classList.contains('m-cards')) {
-    if (!tooWide(table)) return;
-    table.classList.add('m-cards');
-  }
-  labelRows(table, labels);
+  if (!labels || labels.length < 3) return null;
+  return { el: table, labels, rows: table.rows.length };
+};
+const gridCandidate = (header) => {
+  if (header.closest('[data-proctable],[data-no-mcards]')) return null;
+  const box = header.parentElement; if (!box) return null;
+  return { el: box, header, rows: box.children.length };
 };
 
-const processGrid = (header) => {
-  if (header.closest('[data-proctable],[data-no-mcards]')) return;
-  const box = header.parentElement; if (!box) return;
-  if (!box.classList.contains('m-grid-cards')) {
-    if (!tooWide(box)) return;
-    box.classList.add('m-grid-cards');
-  }
+const labelGrid = (box, header) => {
   const heads = [...header.children];
   const labels = heads.map(c => c.dataset.mlabelText ?? clean(c.textContent));
   [...box.children].forEach(row => {
@@ -77,8 +77,20 @@ export function installMobileTables() {
   const run = () => {
     queued = false;
     if (!mq.matches) return;
-    document.querySelectorAll('main table').forEach(processTable);
-    document.querySelectorAll('main [data-rz-grid]').forEach(processGrid);
+    const tables = [...document.querySelectorAll('main table')].map(tableCandidate).filter(Boolean);
+    const grids = [...document.querySelectorAll('main [data-rz-grid]')].map(gridCandidate).filter(Boolean);
+    const all = [...tables.map(c => ({ ...c, cls: 'm-cards' })), ...grids.map(c => ({ ...c, cls: 'm-grid-cards' }))];
+    // 1) reads only (one layout for the whole batch): which unconverted, visible ones are too wide
+    const toCheck = all.filter(c => !c.el.classList.contains(c.cls) && fitted.get(c.el) !== sig(c.el, c.rows));
+    const wide = new Set(), fits = [];
+    toCheck.forEach(c => { if (c.el.offsetParent === null) return; (tooWide(c.el) ? wide.add(c.el) : fits.push(c)); });
+    // 2) writes
+    fits.forEach(c => fitted.set(c.el, sig(c.el, c.rows)));
+    all.forEach(c => {
+      if (wide.has(c.el)) c.el.classList.add(c.cls);
+      if (!c.el.classList.contains(c.cls)) return;
+      if (c.cls === 'm-cards') labelRows(c.el, c.labels); else labelGrid(c.el, c.header);
+    });
   };
   const schedule = () => { if (!queued) { queued = true; requestAnimationFrame(run); } };
   const obs = new MutationObserver(schedule);
