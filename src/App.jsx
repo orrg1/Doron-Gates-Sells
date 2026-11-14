@@ -3024,9 +3024,9 @@ const ProcurementPage = ({ sharedSalesLines = null, cardRequest = null, isVisibl
   // sluggish — most of that cost is rows the user can't even see yet. Instead
   // we render an initial batch and grow it as the user scrolls near the
   // bottom, via an IntersectionObserver sentinel row.
-  const PROC_BATCH_SIZE = 150;
-  const [visibleCount, setVisibleCount] = useState(PROC_BATCH_SIZE);
   const isNarrow = useIsNarrow();
+  const PROC_BATCH_SIZE = isNarrow ? 40 : 150; // a phone shows ~6 cards at a time — build fewer up front, more as you scroll
+  const [visibleCount, setVisibleCount] = useState(PROC_BATCH_SIZE);
   const renderProductCards = () => {
     const muted = isDarkMode?'text-slate-400':'text-slate-500', strong = isDarkMode?'text-slate-100':'text-slate-800';
     if (!filtered.length) return <p className={`px-4 py-16 text-center text-sm ${muted}`}>לא נמצאו מוצרים</p>;
@@ -3053,7 +3053,7 @@ const ProcurementPage = ({ sharedSalesLines = null, cardRequest = null, isVisibl
           </li>
         ))}
         {visibleCount < filtered.length && (
-          <li><button type="button" onClick={()=>setVisibleCount(c=>c+PROC_BATCH_SIZE)} className={`w-full py-3 text-sm font-semibold ${isDarkMode?'text-blue-300':'text-blue-700'}`}>הצג עוד ({(filtered.length-visibleCount).toLocaleString()})</button></li>
+          <li ref={loadMoreSentinelRef}><button type="button" onClick={()=>setVisibleCount(c=>c+PROC_BATCH_SIZE)} className={`w-full py-3 text-sm font-semibold ${isDarkMode?'text-blue-300':'text-blue-700'}`}>הצג עוד ({(filtered.length-visibleCount).toLocaleString()})</button></li>
         )}
       </ul>
     );
@@ -3070,7 +3070,7 @@ const ProcurementPage = ({ sharedSalesLines = null, cardRequest = null, isVisibl
     }, { rootMargin: '600px' });
     obs.observe(el);
     return () => obs.disconnect();
-  }, [filtered.length]);
+  }, [filtered.length, viewMode, isNarrow, visibleCount < filtered.length]); // eslint-disable-line react-hooks/exhaustive-deps
   const visibleProducts = useMemo(() => filtered.slice(0, visibleCount), [filtered, visibleCount]);
 
   // ── Data completeness stats ────────────────────────────────
