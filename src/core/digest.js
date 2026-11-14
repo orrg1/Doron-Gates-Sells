@@ -264,6 +264,9 @@ const moveNote = (x) => { const t = moveNoteText(x); return t ? ' · ' + esc(t) 
 
 // container number, and the forwarder's file number under it (what the forwarder asks for on the phone)
 const contCell = (x) => `${esc(x.cont || '—')}${x.file ? `<br><span style="color:#94a3b8;font-size:11px">תיק ${esc(x.file)}</span>` : ''}`;
+// a product name in an email links to its card on the site (…/#sku=…)
+const prodLink = (siteUrl, name, sku) => sku && siteUrl
+  ? `<a href="${siteUrl}#sku=${encodeURIComponent(sku)}" style="color:inherit;text-decoration:underline">${esc(name)}</a>` : esc(name);
 export const renderDigestHtml = (d, { siteUrl }) => {
   const sec = (title, inner, link) => `<tr><td style="padding:18px 22px;border-top:1px solid #e2e8f0">
     <h2 style="margin:0 0 10px;font-size:16px;color:#0f172a">${esc(title)}</h2>${inner}
@@ -282,19 +285,19 @@ export const renderDigestHtml = (d, { siteUrl }) => {
       p('<b>להזמין מספקים</b>') +
       table(['ספק', 'מוצרים', 'דחוף', 'שווי משוער', 'זמן אספקה'], d.toOrder.slice(0, 12).map(s => [esc(s.name), s.n, s.now ? `<b style="color:#C8322B">${s.now}</b>` : '—', s.value ? ils(s.value) : '—', `${s.lead} ח׳`])) +
       ((d.toMakeList || []).length ? '<div style="height:12px"></div>' + p(`<b>לייצור</b> — ${d.toMake} מוצרים${d.toMakeNow ? ` (מהם <b style="color:#C8322B">${d.toMakeNow}</b> דחופים)` : ''}`) +
-        table(['מוצר', 'מלאי', 'מספיק ל', 'לייצר'], d.toMakeList.map(x => [`${x.now ? '<b style="color:#C8322B">●</b> ' : ''}${esc(x.name)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.sku || '')}</span>`, x.stock ?? '—', x.coverDays == null ? '—' : `${x.coverDays} ימים`, `<b>${(x.qty || 0).toLocaleString('en-US')}</b>`]))
+        table(['מוצר', 'מלאי', 'מספיק ל', 'לייצר'], d.toMakeList.map(x => [`${x.now ? '<b style="color:#C8322B">●</b> ' : ''}${prodLink(siteUrl, x.name, x.k || x.sku)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.sku || '')}</span>`, x.stock ?? '—', x.coverDays == null ? '—' : `${x.coverDays} ימים`, `<b>${(x.qty || 0).toLocaleString('en-US')}</b>`]))
         + (d.toMake > d.toMakeList.length ? p(`<span style="font-size:12px;color:#64748b">ועוד ${d.toMake - d.toMakeList.length} — באתר</span>`) : '') : ''), proc)}
     ${sec('מה בדרך — באיחור ונדחה', p(`הזמנות רכש באיחור: <b>${d.latePOLines}</b> שורות`) +
       table(['ספק', 'שורות', 'איחור מרבי', 'הזמנות'], d.latePOs.slice(0, 8).map(s => [esc(s.name), s.lines, `${s.maxDays} ימים`, esc(s.pos.slice(0, 4).join(', '))])) +
       (d.delayed.length ? '<div style="height:10px"></div>' + table(['מכולה / תיק', 'ספק', 'הגעה', 'נדחה'], d.delayed.map(s => [contCell(s), esc(s.sup), esc(isoToDisplay(s.arr)), `${s.delayDays} ימים (היה ${esc(isoToDisplay(s.from))})`])) : ''), proc)}
-    ${sec('התייקרויות בחשבוניות ספק השבוע', table(['מוצר', 'ספק', 'קודם', 'עכשיו', 'שינוי'], d.priceUps.map(x => [esc(x.name), esc(x.s), `${x.prevP} ${esc(x.cur)}`, `<b>${x.p} ${esc(x.cur)}</b>`, `<b style="color:#C8322B">${pctS(x.pct)}</b>`])), proc)}
+    ${sec('התייקרויות בחשבוניות ספק השבוע', table(['מוצר', 'ספק', 'קודם', 'עכשיו', 'שינוי'], d.priceUps.map(x => [prodLink(siteUrl, x.name, x.k || x.sku), esc(x.s), `${x.prevP} ${esc(x.cur)}`, `<b>${x.p} ${esc(x.cur)}</b>`, `<b style="color:#C8322B">${pctS(x.pct)}</b>`])), proc)}
     ${sec('מלאי עודף', p(`כסף שיושב במלאי עודף: <b>${ils(d.excessValue)}</b> · הזמנות פתוחות על מוצרים בעודף: <b>${d.excessPOCount}</b>`) +
-      table(['מוצר', 'ספק', 'בהזמנה מיותרת', 'שווי'], d.excessPOs.map(x => [esc(x.name), esc(x.supplier || '—'), `${x.poExcess} יח׳`, x.value ? ils(x.value) : '—'])), proc)}
+      table(['מוצר', 'ספק', 'בהזמנה מיותרת', 'שווי'], d.excessPOs.map(x => [prodLink(siteUrl, x.name, x.k || x.sku), esc(x.supplier || '—'), `${x.poExcess} יח׳`, x.value ? ils(x.value) : '—'])), proc)}
     ${sec('מכירות', p(`7 הימים האחרונים: <b>${ils(d.week.v)}</b>${d.week.lastYear ? ` · אותו שבוע אשתקד ${ils(d.week.lastYear)} (<b>${pctS((d.week.v / d.week.lastYear - 1) * 100)}</b>)` : ''}`) +
       ((d.productsUp || []).length ? '<div style="height:6px"></div>' + p('<b>מוצרים בעלייה</b> — נמכר ב-30 הימים האחרונים מול הממוצע החודשי הרגיל שלו בשנה שלפני (מאז שהגיע למלאי, בלי ימים שהיה חסר)') +
-        table(['מוצר', '30 יום', 'ממוצע רגיל לחודש', 'שינוי', 'מלאי מספיק ל'], d.productsUp.map(x => [`${esc(x.name)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}${moveNote(x)}</span>`, x.q.toLocaleString('en-US'), x.isNew ? 'חדש' : x.noPrev ? 'לא נמכר' : x.prevQ.toLocaleString('en-US'), x.pct != null ? `<b style="color:#2E8B57">${pctS(x.pct)}</b>` : '—', x.coverWeeks == null ? '—' : x.coverWeeks < 4 ? `<b style="color:#C8322B">${x.coverWeeks} שבועות</b>` : `${x.coverWeeks} שבועות`])) : '') +
+        table(['מוצר', '30 יום', 'ממוצע רגיל לחודש', 'שינוי', 'מלאי מספיק ל'], d.productsUp.map(x => [`${prodLink(siteUrl, x.name, x.k || x.sku)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}${moveNote(x)}</span>`, x.q.toLocaleString('en-US'), x.isNew ? 'חדש' : x.noPrev ? 'לא נמכר' : x.prevQ.toLocaleString('en-US'), x.pct != null ? `<b style="color:#2E8B57">${pctS(x.pct)}</b>` : '—', x.coverWeeks == null ? '—' : x.coverWeeks < 4 ? `<b style="color:#C8322B">${x.coverWeeks} שבועות</b>` : `${x.coverWeeks} שבועות`])) : '') +
       ((d.productsDown || []).length ? '<div style="height:10px"></div>' + p('<b>מוצרים בירידה</b> — אותו חישוב; מוצר שהיה חסר במלאי לא מופיע כאן') +
-        table(['מוצר', '30 יום', 'ממוצע רגיל לחודש', 'שינוי'], d.productsDown.map(x => [`${esc(x.name)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}${moveNote(x)}</span>`, x.q.toLocaleString('en-US'), x.prevQ.toLocaleString('en-US'), `<b style="color:#C8322B">${pctS(x.pct)}</b>`])) : '') +
+        table(['מוצר', '30 יום', 'ממוצע רגיל לחודש', 'שינוי'], d.productsDown.map(x => [`${prodLink(siteUrl, x.name, x.k || x.sku)}<br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}${moveNote(x)}</span>`, x.q.toLocaleString('en-US'), x.prevQ.toLocaleString('en-US'), `<b style="color:#C8322B">${pctS(x.pct)}</b>`])) : '') +
       (d.returnSpikes.length ? '<div style="height:6px"></div>' + p('<b>מוצרים עם הרבה החזרות ב-30 הימים האחרונים:</b>') + table(['מוצר', 'נמכרו', 'חזרו', 'אחוז'], d.returnSpikes.map(x => [esc(x.n), x.soldQ, x.retQ, `<b style="color:#C8322B">${x.rate.toFixed(0)}%</b>`])) : ''), proc)}
     <tr><td style="padding:14px 22px;border-top:1px solid #e2e8f0;color:#94a3b8;font-size:11px">נשלח אוטומטית כל יום ראשון מהאתר BizData · הנתונים מ-Priority (קריאה בלבד)</td></tr>
   </table></td></tr></table></body></html>`;
@@ -357,7 +360,7 @@ export const renderMorningHtml = (m, ships = [], { siteUrl }) => {
   const head = (cells) => `<tr style="background:#f1f5f9;color:#475569">${cells.map(c => `<th align="right" style="padding:6px;font-size:12px;font-weight:600">${esc(c)}</th>`).join('')}</tr>`;
   const tag = (x) => x.isNew ? '<span style="background:#C8322B;color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:bold">חדש</span> '
     : `<span style="color:#b45309;font-size:11px;font-weight:bold">ברשימה ${x.days} ${x.days === 1 ? 'יום' : 'ימים'}</span> `;
-  const itemRow = (x, verb) => row([`${tag(x)}<b>${esc(x.name)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}</span>`,
+  const itemRow = (x, verb) => row([`${tag(x)}<b>${prodLink(siteUrl, x.name, x.k || x.sku)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}</span>`,
     x.stock ?? '—', x.incoming || '—', x.coverDays == null ? '—' : `<b style="color:#C8322B">${x.coverDays} ימים</b>`, `<b>${(x.qty || 0).toLocaleString('en-US')}</b> ${verb}`]);
   const cols = (verb) => head(['מוצר', 'מלאי', 'בדרך', 'מספיק ל', verb]);
   const buy = m.buy || m.current.filter(x => !x.ownMade), make = m.make || m.current.filter(x => x.ownMade);
@@ -392,7 +395,7 @@ export const renderMorningHtml = (m, ships = [], { siteUrl }) => {
 export const renderAlertsHtml = (a, { siteUrl }) => {
   const row = (cells) => `<tr>${cells.map(c => `<td align="right" style="padding:6px;border-bottom:1px solid #f1f5f9;font-size:13px">${c}</td>`).join('')}</tr>`;
   const head = (cells) => `<tr style="background:#f1f5f9;color:#475569">${cells.map(c => `<th align="right" style="padding:6px;font-size:12px;font-weight:600">${esc(c)}</th>`).join('')}</tr>`;
-  const stockRows = a.stock.slice(0, 25).map(x => row([`<b>${esc(x.name)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)} · ${esc(x.ownMade ? 'ייצור עצמי' : x.supplier || 'ספק לא ידוע')}</span>`,
+  const stockRows = a.stock.slice(0, 25).map(x => row([`<b>${prodLink(siteUrl, x.name, x.k || x.sku)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)} · ${esc(x.ownMade ? 'ייצור עצמי' : x.supplier || 'ספק לא ידוע')}</span>`,
     x.stock ?? '—', x.incoming || '—', x.coverDays == null ? '—' : `<b style="color:#C8322B">${x.coverDays} ימים</b>`, `${x.leadMonths} ח׳`, `<b>${(x.qty || 0).toLocaleString('en-US')}</b> ${x.ownMade ? 'לייצר' : 'להזמין'}`]));
   const shipRows = a.ships.map(x => row([contCell(x), esc(x.sup), esc(isoToDisplay(x.from || '')), `<b>${esc(isoToDisplay(x.arr || ''))}</b>`, `<b style="color:#C8322B">+${x.delayDays} ימים</b>`]));
   return `<!doctype html><html dir="rtl" lang="he"><body style="margin:0;background:#f1f5f9;font-family:Arial,Helvetica,sans-serif">

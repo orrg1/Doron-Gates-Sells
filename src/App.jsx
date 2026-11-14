@@ -453,7 +453,7 @@ const StockCountPage = ({ isDarkMode }) => {
                     className={`w-full text-right px-3 py-2.5 flex items-center gap-3 ${inList.has(x.k) ? 'opacity-50' : (isDarkMode ? 'active:bg-slate-700' : 'active:bg-slate-100')}`}>
                     <span className="flex-1 min-w-0">
                       <span className={`block text-sm font-semibold leading-snug ${strong}`}>{x.n || x.k}</span>
-                      <span className={`text-xs font-mono ${muted}`}>{x.k}</span>
+                      <span className={`text-xs font-mono ${muted}`}><SkuLink sku={x.k}/></span>
                     </span>
                     <span className={`text-xs ${muted}`}>ב-Priority: <b className={strong}>{fmt(x.q)}</b></span>
                     <span className={`shrink-0 w-8 h-8 rounded-full flex items-center justify-center text-lg font-bold ${inList.has(x.k) ? (isDarkMode ? 'bg-slate-700 text-slate-400' : 'bg-slate-100 text-slate-400') : 'bg-blue-600 text-white'}`}>{inList.has(x.k) ? '✓' : '+'}</span>
@@ -490,7 +490,7 @@ const StockCountPage = ({ isDarkMode }) => {
                   <div className="flex items-start gap-2">
                     <div className="flex-1 min-w-0">
                       <p className={`text-sm font-semibold leading-snug ${strong}`}>{x.n || x.k}</p>
-                      <p className={`text-xs font-mono ${muted}`}>{x.k}</p>
+                      <p className={`text-xs font-mono ${muted}`}><SkuLink sku={x.k}/></p>
                     </div>
                     <button type="button" onClick={() => remove(x.k)} aria-label={`הסר את ${x.n || x.k}`} className={`p-1.5 rounded-lg ${muted}`}><X className="w-4 h-4" /></button>
                   </div>
@@ -590,7 +590,7 @@ const CustomersPage = ({ requestedTab = null, onRequestedTabHandled = null, mont
               {shown.map(x => (
                 <tr key={(x.cid||x.c)+'|'+x.k} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
                   <td className={`px-4 py-2.5 font-semibold ${strong}`}>{x.c}</td>
-                  <td className="px-4 py-2.5"><p className={strong}>{x.n}</p><p className={`text-[11px] font-mono ${muted}`}>{x.k}</p></td>
+                  <td className="px-4 py-2.5"><p className={strong}>{x.n}</p><p className={`text-[11px] font-mono ${muted}`}><SkuLink sku={x.k}/></p></td>
                   <td className="px-4 py-2.5 text-xs">כל ~{x.everyDays} ימים · ~{x.avgQty} יח׳ בפעם</td>
                   <td className="px-4 py-2.5 text-xs">{isoToDisplay(x.last)}</td>
                   <td className="px-4 py-2.5 text-xs">{isoToDisplay(x.expected)}</td>
@@ -649,7 +649,7 @@ const CustomersPage = ({ requestedTab = null, onRequestedTabHandled = null, mont
               {shown.map(x => (
                 <tr key={(x.cid||x.c)+'|'+x.k} className={isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}>
                   <td className="px-4 py-2.5"><p className={`font-semibold ${strong}`}>{x.c}</p>{!x.customerActive && x.customerLast && <p className={`text-[11px] ${isDarkMode?'text-orange-300':'text-orange-700'}`}>לא קנה כלום מאז {isoToDisplay(x.customerLast)}</p>}</td>
-                  <td className="px-4 py-2.5"><p className={strong}>{x.n}</p><p className={`text-[11px] font-mono ${muted}`}>{x.k}</p></td>
+                  <td className="px-4 py-2.5"><p className={strong}>{x.n}</p><p className={`text-[11px] font-mono ${muted}`}><SkuLink sku={x.k}/></p></td>
                   <td className="px-4 py-2.5 text-xs">כל ~{x.everyDays} ימים · ~{x.monthlyQty} יח׳ לחודש</td>
                   <td className="px-4 py-2.5 text-xs">{isoToDisplay(x.last)}</td>
                   <td className={`px-4 py-2.5 text-xs font-bold ${isDarkMode?'text-red-300':'text-red-700'}`}>{x.silence} ימים</td>
@@ -1358,7 +1358,7 @@ const CustomersPage = ({ requestedTab = null, onRequestedTabHandled = null, mont
                                     {sortRows('custProducts', myProducts, { pct: p => p.revenue }).map((p,i) => (
                                       <tr key={i}>
                                         <td className={`px-2 py-1.5 ${isDarkMode?'text-slate-200':'text-slate-700'}`}>{p.product}</td>
-                                        <td className={`px-2 py-1.5 font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.sku}</td>
+                                        <td className={`px-2 py-1.5 font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}><SkuLink sku={p.sku}/></td>
                                         <td className={`px-2 py-1.5 ${isDarkMode?'text-slate-300':'text-slate-600'}`}>{p.quantity.toLocaleString()}</td>
                                         <td className={`px-2 py-1.5 font-bold ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>{formatCurrency(p.revenue)}</td>
                                         <td className={`px-2 py-1.5 ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{myTotal>0?((p.revenue/myTotal)*100).toFixed(1):'0'}%</td>
@@ -1481,7 +1481,7 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
             return (
               <li key={x.k} className="text-sm" title={how}>
                 <div role="button" tabIndex={0} aria-expanded={openMove === x.k} onClick={() => setOpenMove(openMove === x.k ? null : x.k)} onKeyDown={e => { if (e.key === 'Enter') setOpenMove(openMove === x.k ? null : x.k); }} className="flex items-center gap-2 cursor-pointer">
-                  <span className={`flex-1 min-w-0 truncate ${strong}`}>{x.name}</span>
+                  <span className={`flex-1 min-w-0 truncate ${strong}`}><SkuLink sku={x.k}>{x.name}</SkuLink></span>
                   <span className={`text-xs tabular-nums whitespace-nowrap ${muted}`}>{x.q} מול {usual}</span>
                   <span className={`text-xs font-bold w-14 text-left ${x.pct == null ? muted : up ? 'text-emerald-500' : 'text-red-500'}`} dir="ltr">{x.pct == null ? '—' : `${x.pct > 0 ? '+' : ''}${x.pct.toFixed(0)}%`}</span>
                 </div>
@@ -1768,6 +1768,20 @@ const AIModal = ({ isOpen, onClose, loading, report, isDarkMode }) => {
   );
 };
 
+// ── A SKU anywhere on the site opens the product card (the procurement drawer, over the current page) ──
+const ProductCardCtx = React.createContext(null);
+const SkuLink = ({ sku, children, className = '', title }) => {
+  const ctx = React.useContext(ProductCardCtx);
+  const label = children ?? sku;
+  if (!ctx || !sku) return <span className={className}>{label}</span>;
+  return (
+    <span role="button" tabIndex={0} title={title || `פתח כרטיס פריט ${sku}`}
+      onClick={(e) => { e.stopPropagation(); e.preventDefault(); ctx.open(sku); }}
+      onKeyDown={(e) => { if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); e.stopPropagation(); ctx.open(sku); } }}
+      className={`${className} cursor-pointer underline decoration-dotted decoration-1 underline-offset-2 hover:decoration-solid hover:text-blue-600 focus-visible:outline focus-visible:outline-2 focus-visible:outline-blue-500 rounded-sm`}>{label}</span>
+  );
+};
+
 // ── Selling prices in the product drawer: live from Priority (src/itemPrices.js) ──
 const curSym = (c) => { const t = String(c || '').trim(); return !t || /ש"?ח|ILS|NIS|₪/i.test(t) ? '₪' : t === 'דולר' ? '$' : t; };
 const fmtPrice = (v, c) => v == null ? '—' : `${curSym(c)}${Number(v).toLocaleString('he-IL', { maximumFractionDigits: 2 })}`;
@@ -1859,7 +1873,14 @@ const ItemPricesPanel = ({ sku, unitCost, isDarkMode }) => {
 
 // Chat Window
 // The assistant writes light markdown: **bold**, "- " / "* " / "1. " lists. Rendered as plain elements (no HTML injection).
-const ChatInline = ({ text }) => String(text).split(/(\*\*[^*]+\*\*)/g).map((t, i) => /^\*\*[^*]+\*\*$/.test(t) ? <b key={i}>{t.slice(2, -2)}</b> : <React.Fragment key={i}>{t}</React.Fragment>);
+const ChatSkus = ({ text }) => {
+  const ctx = React.useContext(ProductCardCtx);
+  if (!ctx) return text;
+  // a known SKU in the answer ("WOLF 600 (959008206)", "מק״ט 959008206") → a link to its card
+  const parts = String(text).split(/([A-Za-z0-9][A-Za-z0-9.\-_/]{2,})/g);
+  return parts.map((t, i) => (i % 2 && ctx.isSku(t)) ? <SkuLink key={i} sku={t} className="font-mono"/> : <React.Fragment key={i}>{t}</React.Fragment>);
+};
+const ChatInline = ({ text }) => String(text).split(/(\*\*[^*]+\*\*)/g).map((t, i) => /^\*\*[^*]+\*\*$/.test(t) ? <b key={i}><ChatSkus text={t.slice(2, -2)}/></b> : <ChatSkus key={i} text={t}/>);
 const ChatText = ({ text }) => {
   const lines = String(text || '').replace(/\r/g, '').split('\n');
   const out = []; let list = null;
@@ -2149,7 +2170,7 @@ const containerLinks = (contText) => {
   });
 };
 
-const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncRequest = null, onSyncRequestHandled, onSyncDone, onSalesLinesChange, onCustomersChange, salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
+const ProcurementPage = ({ cardRequest = null, isVisible = true, onShowPage = null, requestedView = null, onRequestedViewHandled, syncRequest = null, onSyncRequestHandled, onSyncDone, onSalesLinesChange, onCustomersChange, salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
   // SKU → product name, captured from the inventory file. Needed so items
   // that are in stock but never appear in sales can still be shown by name
@@ -2941,6 +2962,19 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
     if (hits.length === 1 || exact.length === 1) setDrawerKey((exact[0] || hits[0]).key);
     setJumpPending(null);
   }, [jumpPending, productsAll]);
+  // A SKU clicked anywhere on the site (App → cardRequest): open its card, even while this page is hidden
+  const [cardPending, setCardPending] = useState(null);
+  const [cardMissing, setCardMissing] = useState(null);
+  useEffect(() => { if (cardRequest?.sku) setCardPending(cardRequest); }, [cardRequest]);
+  useEffect(() => {
+    if (!cardPending || !productsAll.length) return;
+    const t = String(cardPending.sku).trim().toLowerCase();
+    const hit = productsAll.find(p => String(p.sku || '').trim().toLowerCase() === t) || productsAll.find(p => p.key === cardPending.sku)
+      || productsAll.find(p => String(p.name || '').trim().toLowerCase() === t);
+    if (hit) setDrawerKey(hit.key); else setCardMissing(cardPending.sku);
+    setCardPending(null);
+  }, [cardPending, productsAll]);
+  useEffect(() => { if (!cardMissing) return; const t = setTimeout(() => setCardMissing(null), 4500); return () => clearTimeout(t); }, [cardMissing]);
 
   const filtered = useMemo(() => {
     let data = searchTerm ? productsAll : products; // inactive products only when searched for
@@ -2994,7 +3028,7 @@ const ProcurementPage = ({ requestedView = null, onRequestedViewHandled, syncReq
               <div className="flex items-start gap-2">
                 <div className="flex-1 min-w-0">
                   <p className={`font-semibold text-sm leading-snug ${strong}`}>{p.name}</p>
-                  <p className={`text-[11px] font-mono ${muted}`}>{p.sku}{p.supplier ? <span className="font-sans"> · {p.supplier}</span> : null}</p>
+                  <p className={`text-[11px] font-mono ${muted}`}><SkuLink sku={p.sku}/>{p.supplier ? <span className="font-sans"> · {p.supplier}</span> : null}</p>
                 </div>
                 <span className={`shrink-0 inline-flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-semibold ${procStatusCls(p.status, isDarkMode)}`}><span className="w-1.5 h-1.5 rounded-full" style={{background:procDotColor[p.status]}}/>{PROC_STATUS_LABEL[p.status]}</span>
               </div>
@@ -4017,7 +4051,7 @@ const renderProductRow = (p) => {
               return (
                 <section>
                   <h3 className={`text-sm font-bold mb-1 flex items-center gap-2 ${strong}`}>מחיר קנייה לאורך זמן
-                    <button type="button" onClick={()=>{ setPriceSku(p.sku); setViewMode('prices'); setDrawerKey(null); }} className={`text-xs font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>בדיקת מחיר מלאה</button>
+                    <button type="button" onClick={()=>{ setPriceSku(p.sku); setViewMode('prices'); setDrawerKey(null); if (!isVisible) onShowPage?.(); }} className={`text-xs font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>בדיקת מחיר מלאה</button>
                   </h3>
                   <p className={`text-xs mb-2 ${muted}`}>{pts.length} חשבוניות ספק{chg!=null ? ` · מ-${isoToDisplay(first.d)}: ${chg>=0?'+':''}${chg.toFixed(1)}% ב-${mainCur==='ILS'?'₪':mainCur}` : ''}{mainCur!=='ILS' ? ' · כחול = מטבע הספק, אפור = בשקלים' : ''}</p>
                   <div style={{height:120}} dir="ltr">
@@ -4686,7 +4720,7 @@ const renderProductRow = (p) => {
               <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
                 {rows.map(p => (
                   <tr key={p.key} onClick={()=>setDrawerKey(p.key)} className={`cursor-pointer ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}`}>
-                    <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[260px] ${strong}`} title={p.name}>{p.name}</p><p className={`text-[11px] font-mono ${muted}`}>{p.sku}{p.stockout.estimated ? ' · משוער' : ''}</p></td>
+                    <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[260px] ${strong}`} title={p.name}>{p.name}</p><p className={`text-[11px] font-mono ${muted}`}><SkuLink sku={p.sku}/>{p.stockout.estimated ? ' · משוער' : ''}</p></td>
                     <td className="px-4 py-2.5 text-xs">{p.supplier || '—'}</td>
                     <td className="px-4 py-2.5 tabular-nums font-semibold">{p.outDays}</td>
                     <td className="px-4 py-2.5 tabular-nums">{p.avgMonthly.toFixed(p.avgMonthly<10?1:0)}</td>
@@ -4889,7 +4923,7 @@ const renderProductRow = (p) => {
                             <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
                               {sortRows('cal', s.joinItems).map(i => (
                                 <tr key={i.k} className={i.late ? (isDarkMode?'bg-red-500/5':'bg-red-50/40') : ''}>
-                                  <td className={`px-3 py-1.5 text-xs font-mono whitespace-nowrap ${muted}`}>{i.k}</td>
+                                  <td className={`px-3 py-1.5 text-xs font-mono whitespace-nowrap ${muted}`}><SkuLink sku={i.k}/></td>
                                   <td className={`px-3 py-1.5 ${strong}`}>{i.n}</td>
                                   <td className={`px-3 py-1.5 text-xs tabular-nums ${i.stock<=0?'text-red-500 font-bold':''}`}>{i.stock?.toLocaleString() ?? '—'}</td>
                                   <td className="px-3 py-1.5 text-xs tabular-nums">{i.incoming ? i.incoming.toLocaleString() : '—'}</td>
@@ -5009,7 +5043,7 @@ const renderProductRow = (p) => {
                   {matches.map(x => (
                     <li key={x.k}><button type="button" onClick={()=>openPrice(x.k)} className={`w-full text-right px-3 py-2 text-sm ${isDarkMode?'hover:bg-slate-700':'hover:bg-slate-50'}`}>
                       <span className={`block font-semibold truncate ${strong}`}>{x.name}</span>
-                      <span className={`text-[11px] ${muted}`}><span className="font-mono">{x.k}</span> · {x.last.s} · {formatUnitCost(x.last.p, curOf(x.last.cur))} · <span className={`px-1 rounded ${VERDICT[x.verdict].c}`}>{VERDICT[x.verdict].t}</span></span>
+                      <span className={`text-[11px] ${muted}`}><span className="font-mono"><SkuLink sku={x.k}/></span> · {x.last.s} · {formatUnitCost(x.last.p, curOf(x.last.cur))} · <span className={`px-1 rounded ${VERDICT[x.verdict].c}`}>{VERDICT[x.verdict].t}</span></span>
                     </button></li>
                   ))}
                 </ul>
@@ -5023,7 +5057,7 @@ const renderProductRow = (p) => {
               <div className="flex flex-wrap items-start gap-3">
                 <div className="flex-1 min-w-[220px]">
                   <p className={`text-lg font-bold leading-snug ${strong}`}>{sel.name}</p>
-                  <p className={`text-xs ${muted}`}><span className="font-mono">{sel.k}</span> · {sel.nAll} חשבוניות ספק · ספק אחרון: {sel.last.s}</p>
+                  <p className={`text-xs ${muted}`}><span className="font-mono"><SkuLink sku={sel.k}/></span> · {sel.nAll} חשבוניות ספק · ספק אחרון: {sel.last.s}</p>
                 </div>
                 <span className={`px-3 py-1 rounded-full text-sm font-bold ${VERDICT[sel.verdict].c}`}>{VERDICT[sel.verdict].t}</span>
                 <button type="button" onClick={()=>setPriceSku(null)} aria-label="סגור בדיקת מחיר" className={`p-1.5 rounded-lg ${isDarkMode?'text-slate-400 hover:bg-slate-700':'text-slate-500 hover:bg-slate-100'}`}><X className="w-4 h-4"/></button>
@@ -5127,7 +5161,7 @@ const renderProductRow = (p) => {
                   {rows.slice(0, 300).map(x => (
                     <tr key={x.k} onClick={()=>openPrice(x.k)} className={`cursor-pointer ${priceSku===x.k?(isDarkMode?'bg-blue-500/10':'bg-blue-50'):''} ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}`}>
                       <td className="px-4 py-2.5"><span className={`px-2 py-0.5 rounded-full text-[11px] font-bold whitespace-nowrap ${VERDICT[x.verdict].c}`}>{VERDICT[x.verdict].t}</span></td>
-                      <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[220px] ${strong}`} title={x.name}>{x.name}</p><p className={`text-[11px] font-mono ${muted}`}>{x.k}</p></td>
+                      <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[220px] ${strong}`} title={x.name}>{x.name}</p><p className={`text-[11px] font-mono ${muted}`}><SkuLink sku={x.k}/></p></td>
                       <td className="px-4 py-2.5 text-xs">{x.s}</td>
                       <td className="px-4 py-2.5 text-xs tabular-nums"><b className={strong}>{formatUnitCost(x.last.p, curOf(x.last.cur))}</b> <span className={muted}>{isoToDisplay(x.last.d)}</span></td>
                       <td className="px-4 py-2.5 text-xs">{pctEl(x.vsPrev)}</td>
@@ -5245,7 +5279,7 @@ const renderProductRow = (p) => {
               <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
                 {rows.map(p => (
                   <tr key={p.key} onClick={()=>setDrawerKey(p.key)} className={`cursor-pointer ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50'}`}>
-                    <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[240px] ${strong}`} title={p.name}>{p.name}</p><p className={`text-[11px] font-mono ${muted}`}>{p.sku}</p></td>
+                    <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[240px] ${strong}`} title={p.name}>{p.name}</p><p className={`text-[11px] font-mono ${muted}`}><SkuLink sku={p.sku}/></p></td>
                     <td className="px-4 py-2.5 text-xs">{p.supplier || '—'}</td>
                     <td className="px-4 py-2.5 tabular-nums">{p.currentStock.toLocaleString()}</td>
                     <td className="px-4 py-2.5 tabular-nums">{p.incomingQty ? p.incomingQty.toLocaleString() : '—'}</td>
@@ -5436,7 +5470,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                   <ul className="space-y-1">
                     {sc.retProducts.slice(0, 5).map(x => (
                       <li key={x.k} className="flex items-center gap-2 text-xs">
-                        <span className={`font-mono w-28 shrink-0 ${muted}`}>{x.k}</span>
+                        <span className={`font-mono w-28 shrink-0 ${muted}`}><SkuLink sku={x.k}/></span>
                         <span className={`flex-1 min-w-0 truncate ${strong}`} title={x.n}>{x.n}</span>
                         <span className={muted}>{Math.round(x.retQ)} מתוך {Math.round(x.soldQ)}</span>
                         <b className={`w-12 text-left ${x.rate>=5?'text-red-500':strong}`}>{x.rate==null?'—':`${x.rate.toFixed(0)}%`}</b>
@@ -5490,7 +5524,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                     const soon = p.effectiveCoverDays != null && p.effectiveCoverDays < 60;
                     return (
                       <tr key={p.key}>
-                        <td className={`px-3 py-2 text-xs font-mono ${muted}`}>{p.sku}</td>
+                        <td className={`px-3 py-2 text-xs font-mono ${muted}`}><SkuLink sku={p.sku}/></td>
                         <td className={`px-3 py-2 ${strong}`}>{p.name}</td>
                         <td className="px-3 py-2 text-xs tabular-nums">{p.avgMonthly.toFixed(p.avgMonthly<10?1:0)}</td>
                         <td className="px-3 py-2 text-xs tabular-nums">{p.currentStock ?? '—'}</td>
@@ -5533,7 +5567,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                       <button type="button" onClick={()=>setDrawerKey(p.key)} className={`text-right min-w-0 group focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded sticky right-0 z-[1] -mr-4 pr-4 py-1 ${drawerKey===p.key?(isDarkMode?'bg-slate-700':'bg-blue-50'):(isDarkMode?'bg-slate-800':'bg-white')}`}>
                         <p className={`text-sm font-semibold truncate group-hover:underline ${strong}`} title={p.name}>{p.name}</p>
                         <p className="flex items-center gap-1.5 min-w-0">
-                          <span className={`text-xs font-mono ${muted}`}>{p.sku}</span>
+                          <span className={`text-xs font-mono ${muted}`}><SkuLink sku={p.sku}/></span>
                           {p.chip && <span className={`text-[11px] font-semibold px-1.5 py-0.5 rounded truncate ${procChipCls(p.chip.k, isDarkMode)}`}>{p.chip.t}</span>}
                         </p>
                       </button>
@@ -5576,7 +5610,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
             <div className={`rounded-lg border divide-y text-sm max-h-80 overflow-y-auto ${isDarkMode?'border-slate-700 divide-slate-700':'border-slate-200 divide-slate-100'}`}>
               {toOrder.length ? toOrder.map(p => (
                 <div key={p.key} className="flex items-center gap-2 px-3 py-2">
-                  <span className={`font-mono text-xs shrink-0 ${muted}`}>{p.sku}</span>
+                  <span className={`font-mono text-xs shrink-0 ${muted}`}><SkuLink sku={p.sku}/></span>
                   <span className={`flex-1 truncate text-xs ${strong}`}>{p.name}</span>
                   <b className={`tabular-nums ${strong}`}>{orderQtyFor(p).toLocaleString()}</b>
                 </div>
@@ -5843,6 +5877,10 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
       </div>
     )}
     {renderProductDrawer()}
+    {cardMissing && createPortal(
+      <div role="status" className={`fixed bottom-6 right-1/2 translate-x-1/2 z-[60] px-4 py-2.5 rounded-xl shadow-lg text-sm ${isDarkMode?'bg-slate-700 text-white':'bg-slate-900 text-white'}`} dir="rtl">
+        המוצר <bdi className="font-mono">{cardMissing}</bdi> לא נמצא ברשימת המוצרים (אין לו מכירות או נתוני מלאי)
+      </div>, document.body)}
     {renderDocPreview()}
     <div className="space-y-5 animate-in fade-in slide-in-from-bottom-4 duration-500">
 
@@ -6741,7 +6779,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                       <tr key={p.key} className={`transition-all ${isDarkMode?'hover:bg-red-900/10':'hover:bg-red-50/50'}`}>
                         <td className="px-4 py-3.5">
                           <p className={`font-medium text-sm truncate max-w-[200px] ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{p.name}</p>
-                          {p.sku&&p.sku!==p.name&&<p className={`text-xs font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}>{p.sku}{p.inactive && <InactiveBadge isDarkMode={isDarkMode}/>}</p>}
+                          {p.sku&&p.sku!==p.name&&<p className={`text-xs font-mono ${isDarkMode?'text-slate-600':'text-slate-400'}`}><SkuLink sku={p.sku}/>{p.inactive && <InactiveBadge isDarkMode={isDarkMode}/>}</p>}
                         </td>
                         <td className="px-4 py-3.5"><ABCBadge cls={p.abc} xyz={p.xyz} abcXyz={p.abcXyz}/></td>
                         <td className="px-4 py-3.5">
@@ -7274,6 +7312,14 @@ const callGemini = async (prompt, apiKey) => {
   throw new Error(lastErr || 'כל המודלים נכשלו');
 };
 
+// Kept mounted (hidden) after first use — re-render only when a non-function prop changes
+// (the function props are App's setters and small wrappers around them).
+const ProcurementPageMemo = React.memo(ProcurementPage, (a, b) => {
+  const keys = new Set([...Object.keys(a), ...Object.keys(b)]);
+  for (const k of keys) { if (typeof a[k] === 'function' && typeof b[k] === 'function') continue; if (a[k] !== b[k]) return false; }
+  return true;
+});
+
 // ─── AI assistant with tools: the model asks for data, the site computes it (src/core/aiTools.js) ───
 let geminiToolModel = null; // the first model that answered — used for the rest of the session
 const geminiGoneModels = new Set(); // models this key cannot use (not found / retired) — skipped from then on
@@ -7381,6 +7427,10 @@ const App = () => {
   const [priorityCustomers, setPriorityCustomers] = useState({});
   // Item-card extras (family, average cost) for the brands view in "מכירות"
   const [itemsExtraApp, setItemsExtraApp] = useState({});
+  // Product card from anywhere: the procurement page stays mounted (hidden) once used, and opens its drawer on request
+  const [procMounted, setProcMounted] = useState(false);
+  const [cardReq, setCardReq] = useState(null);
+  const openProductCard = useCallback((sku) => { if (!sku) return; setProcMounted(true); setCardReq({ sku: String(sku), ts: Date.now() }); }, []);
   const reloadItemsExtra = () => { try { setCardNamesApp(JSON.parse(localStorage.getItem('procurementNames') || '{}') || {}); } catch { /* keep */ } return idbGet('procItemsExtra').then(v => { if (v && typeof v === 'object') setItemsExtraApp(v); }).catch(() => {}); };
   useEffect(() => { reloadItemsExtra(); }, []);
   const procSalesLines = useMemo(() => applyCardNames(procSalesLinesRaw, cardNamesApp, itemsExtraApp), [procSalesLinesRaw, cardNamesApp, itemsExtraApp]);
@@ -7457,6 +7507,19 @@ const App = () => {
   }, []);
 
   const [activeTab, setActiveTab] = useState('overview');
+  useEffect(() => { if (activeTab === 'procurement') setProcMounted(true); }, [activeTab]);
+  // links from the emails: …/#sku=959008206 opens that card
+  useEffect(() => {
+    const h = () => { const m = window.location.hash.match(/(?:^#|&)sku=([^&]+)/); if (!m) return; openProductCard(decodeURIComponent(m[1])); try { window.history.replaceState(null, '', window.location.pathname + window.location.search); } catch { /* ignore */ } };
+    h(); window.addEventListener('hashchange', h); return () => window.removeEventListener('hashchange', h);
+  }, [openProductCard]);
+  const knownSkus = useMemo(() => {
+    const set = new Set([...Object.keys(cardNamesApp || {}), ...Object.keys(itemsExtraApp || {})]);
+    procSalesLines.forEach(l => { if (l.k) set.add(l.k); });
+    return set;
+  }, [cardNamesApp, itemsExtraApp, procSalesLines]);
+  const cardCtx = useMemo(() => ({ open: openProductCard, isSku: (t) => knownSkus.has(t) }), [openProductCard, knownSkus]);
+
   const [loading, setLoading] = useState(false);
   const [xlsxLoaded, setXlsxLoaded] = useState(false);
   // One-time cleanup: 'procurementImportedFiles' was replaced by 'procurementInvSlots'
@@ -8482,7 +8545,7 @@ const App = () => {
               <tbody className={`divide-y ${isDarkMode?'divide-slate-700/50':'divide-slate-100'}`}>
                 {prods.slice(0,300).map(p => (
                   <tr key={p.k} className={rowCls}>
-                    <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[260px] ${strong}`} title={p.n}>{p.n}</p><p className={`text-[11px] font-mono ${muted}`}>{p.k}</p></td>
+                    <td className="px-4 py-2.5"><p className={`font-medium truncate max-w-[260px] ${strong}`} title={p.n}>{p.n}</p><p className={`text-[11px] font-mono ${muted}`}><SkuLink sku={p.k}/></p></td>
                     <td className="px-4 py-2.5 tabular-nums">{p.soldQ.toLocaleString()}</td>
                     <td className="px-4 py-2.5 tabular-nums font-semibold">{p.retQ.toLocaleString()}</td>
                     <td className={`px-4 py-2.5 tabular-nums font-bold ${flagged(p)?'text-red-500':''}`}>{p.rate!=null ? `${p.rate.toFixed(1)}%` : '—'}</td>
@@ -8630,6 +8693,7 @@ const App = () => {
   }
 
   return (
+    <ProductCardCtx.Provider value={cardCtx}>
     <div className={`flex min-h-screen font-sans transition-colors duration-300 ${isDarkMode?'bg-slate-950 text-slate-100':'bg-slate-50 text-slate-800'}`} dir="rtl">
       <SettingsModal isOpen={settingsOpen} onClose={()=>setSettingsOpen(false)} apiKey={apiKey} onSave={setApiKey} isDarkMode={isDarkMode} exchangeRates={exchangeRates} onSaveRates={setExchangeRates} legacyFiles={renderLegacyFiles()}/>
       <AIModal isOpen={aiModalOpen} onClose={()=>setAiModalOpen(false)} loading={aiLoading} report={aiReport} isDarkMode={isDarkMode}/>
@@ -8895,8 +8959,10 @@ const App = () => {
           )}
 
           {/* Procurement Planning */}
-          {activeTab==='procurement' && (
-            <ProcurementPage requestedView={procView} onRequestedViewHandled={()=>setProcView(null)} syncRequest={syncRequest} onSyncRequestHandled={()=>setSyncRequest(null)} onSyncDone={(at)=>{ setLastSyncAt(at); reloadItemsExtra(); }} onSalesLinesChange={setProcSalesLines} onCustomersChange={setPriorityCustomers} salesData={salesFileData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
+          {(activeTab==='procurement' || procMounted) && (
+            <div style={activeTab==='procurement' ? undefined : { display:'none' }}>
+            <ProcurementPageMemo cardRequest={cardReq} isVisible={activeTab==='procurement'} onShowPage={()=>setActiveTab('procurement')} requestedView={procView} onRequestedViewHandled={()=>setProcView(null)} syncRequest={syncRequest} onSyncRequestHandled={()=>setSyncRequest(null)} onSyncDone={(at)=>{ setLastSyncAt(at); reloadItemsExtra(); }} onSalesLinesChange={setProcSalesLines} onCustomersChange={setPriorityCustomers} salesData={salesFileData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
+            </div>
           )}
 
           {/* Summary */}
@@ -9360,7 +9426,7 @@ const App = () => {
                         {paginatedData.length>0 ? paginatedData.map(row=>(
                           <tr key={row.id} className={`transition-colors ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50/80'}`}>
                             {visibleColumns.date && <td className={`px-5 py-3.5 text-xs ${isDarkMode?'text-slate-400':'text-slate-500'}`}>{row.date}</td>}
-                            {visibleColumns.sku && activeTab==='sales' && <td className={`px-5 py-3.5 font-mono text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{row.sku}</td>}
+                            {visibleColumns.sku && activeTab==='sales' && <td className={`px-5 py-3.5 font-mono text-xs ${isDarkMode?'text-slate-500':'text-slate-400'}`}><SkuLink sku={row.sku}/></td>}
                             {visibleColumns.description && <td className={`px-5 py-3.5 font-medium ${isDarkMode?'text-slate-100':'text-slate-800'}`}>{activeTab==='sales'?row.description:row.supplier}{activeTab==='sales' && inactiveSetApp.has(row.sku) && <InactiveBadge isDarkMode={isDarkMode}/>}</td>}
                             {visibleColumns.quantity && <td className="px-5 py-3.5"><span className={`px-2 py-0.5 rounded-md text-xs font-medium ${isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-100 text-slate-600'}`}>{row.quantity}</span></td>}
                             {visibleColumns.total && <td className={`px-5 py-3.5 font-bold tabular-nums ${isDarkMode?'text-emerald-400':'text-emerald-600'}`}>{formatCurrency(row.total)}</td>}
@@ -9429,7 +9495,7 @@ const App = () => {
                           <tr key={p.sku||p.name} className={`transition-colors ${isDarkMode?'hover:bg-slate-700/30':'hover:bg-slate-50/80'}`}>
                             <td className={`px-5 py-3.5 font-medium ${isDarkMode?'text-slate-100':'text-slate-800'}`}>
                               {p.name}
-                              {p.sku && <span className={`ml-2 text-xs font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}>{p.sku}</span>}
+                              {p.sku && <span className={`ml-2 text-xs font-mono ${isDarkMode?'text-slate-500':'text-slate-400'}`}><SkuLink sku={p.sku}/></span>}
                               {inactiveSetApp.has(p.sku) && <InactiveBadge isDarkMode={isDarkMode}/>}
                             </td>
                             <td className="px-5 py-3.5">
@@ -9469,6 +9535,7 @@ const App = () => {
         </main>
       </div>
     </div>
+    </ProductCardCtx.Provider>
   );
 };
 
