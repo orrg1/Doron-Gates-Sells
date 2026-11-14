@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useMemo, useEffect, useRef, useCallback, useTransition } from 'react';
 import { createPortal } from 'react-dom';
 import { buildDigest, moveNoteText } from './core/digest.js';
 import { aiToolDeclarations, runAiTool, AI_SYSTEM_PROMPT } from './core/aiTools.js';
@@ -2170,7 +2170,7 @@ const containerLinks = (contText) => {
   });
 };
 
-const ProcurementPage = ({ cardRequest = null, isVisible = true, onShowPage = null, requestedView = null, onRequestedViewHandled, syncRequest = null, onSyncRequestHandled, onSyncDone, onSalesLinesChange, onCustomersChange, salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
+const ProcurementPage = ({ sharedSalesLines = null, cardRequest = null, isVisible = true, onShowPage = null, requestedView = null, onRequestedViewHandled, syncRequest = null, onSyncRequestHandled, onSyncDone, onSalesLinesChange, onCustomersChange, salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
   // SKU → product name, captured from the inventory file. Needed so items
   // that are in stock but never appear in sales can still be shown by name
@@ -2258,15 +2258,24 @@ const ProcurementPage = ({ cardRequest = null, isVisible = true, onShowPage = nu
   // Order quantities the user typed (SKU → qty), kept until the PO shows up in Priority's open-orders file.
   const [draftQty, setDraftQty] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementDraftQty')||'{}'); } catch { return {}; } });
   const saveDraft = (next) => { setDraftQty(next); try { localStorage.setItem('procurementDraftQty', JSON.stringify(next)); } catch { /* best-effort */ } };
-  const [vendor, setVendor] = useState(null);       // supplier page open (name) or null = supplier list
+  // Switching view / supplier re-renders a big page — as a transition, the tap answers at once and the
+  // heavy render can be interrupted (scrolling and taps stay responsive meanwhile); a thin bar shows it is working.
+  const [viewPending, startViewTransition] = useTransition();
+  const [vendor, setVendorNow] = useState(null);       // supplier page open (name) or null = supplier list
+  const setVendor = useCallback((v) => startViewTransition(() => setVendorNow(v)), []);
   const [vendorSearch, setVendorSearch] = useState('');
   const [vendorItemSearch, setVendorItemSearch] = useState(''); // products inside the open supplier
   const [copiedVendor, setCopiedVendor] = useState(null);
+  const sharedSalesLinesRef = useRef(sharedSalesLines); sharedSalesLinesRef.current = sharedSalesLines;
+  // App finished loading the lines after this page mounted (or a sync elsewhere changed them): take them
+  useEffect(() => { if (Array.isArray(sharedSalesLines) && sharedSalesLines.length && sharedSalesLines !== salesLinesRaw) setSalesLinesAll(sharedSalesLines); }, [sharedSalesLines]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
-        const [a, b, c, x, h] = await Promise.all([idbGet('procSalesLines'), idbGet('procPurchaseLines'), idbGet('procShipments'), idbGet('procItemsExtra'), idbGet('stockHistory')]);
+        // the invoice lines are already in memory (App loaded them at start) — read them again only if not
+        const hasShared = Array.isArray(sharedSalesLinesRef.current) && sharedSalesLinesRef.current.length > 0;
+        const [a, b, c, x, h] = await Promise.all([hasShared ? sharedSalesLinesRef.current : idbGet('procSalesLines'), idbGet('procPurchaseLines'), idbGet('procShipments'), idbGet('procItemsExtra'), idbGet('stockHistory')]);
         if (cancelled) return;
         if (h && Array.isArray(h.days)) setStockHistory(h);
         if (x && typeof x === 'object') setItemsExtra(x);
@@ -2649,7 +2658,8 @@ const ProcurementPage = ({ cardRequest = null, isVisible = true, onShowPage = nu
   const [aiInsightOpen, setAiInsightOpen] = useState(false);
   const [aiInsightLoading, setAiInsightLoading] = useState(false);
   const [aiInsightText, setAiInsightText] = useState('');
-  const [viewMode, setViewMode] = useState('suppliers'); // 'products' | 'suppliers'
+  const [viewMode, setViewModeNow] = useState('suppliers'); // 'products' | 'suppliers'
+  const setViewMode = useCallback((v) => startViewTransition(() => setViewModeNow(v)), []);
   // A view asked for from another screen (overview cards)
   useEffect(() => { if (!requestedView) return; setViewMode(requestedView); onRequestedViewHandled?.(); }, [requestedView]); // eslint-disable-line react-hooks/exhaustive-deps
   const [expandedSuppliers, setExpandedSuppliers] = useState(new Set());
@@ -5851,6 +5861,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
 
   return (
     <>
+    {viewPending && isVisible && createPortal(<div className="fixed top-0 inset-x-0 z-[70] h-1 bg-blue-500/80 animate-pulse" aria-hidden="true"/>, document.body)}
     {/* AI Insight Modal */}
     {aiInsightOpen && (
       <div className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/50 backdrop-blur-sm animate-in fade-in duration-200">
@@ -7508,6 +7519,15 @@ const App = () => {
 
   const [activeTab, setActiveTab] = useState('overview');
   useEffect(() => { if (activeTab === 'procurement') setProcMounted(true); }, [activeTab]);
+  // Get the procurement page ready in the background once the site is idle, so opening it is instant
+  useEffect(() => {
+    let idleId = null;
+    const t = setTimeout(() => {
+      const go = () => setProcMounted(true);
+      idleId = window.requestIdleCallback ? window.requestIdleCallback(go, { timeout: 8000 }) : setTimeout(go, 0);
+    }, 3500);
+    return () => { clearTimeout(t); if (idleId != null && window.cancelIdleCallback) window.cancelIdleCallback(idleId); };
+  }, []);
   // links from the emails: …/#sku=959008206 opens that card
   useEffect(() => {
     const h = () => { const m = window.location.hash.match(/(?:^#|&)sku=([^&]+)/); if (!m) return; openProductCard(decodeURIComponent(m[1])); try { window.history.replaceState(null, '', window.location.pathname + window.location.search); } catch { /* ignore */ } };
@@ -8961,7 +8981,7 @@ const App = () => {
           {/* Procurement Planning */}
           {(activeTab==='procurement' || procMounted) && (
             <div style={activeTab==='procurement' ? undefined : { display:'none' }}>
-            <ProcurementPageMemo cardRequest={cardReq} isVisible={activeTab==='procurement'} onShowPage={()=>setActiveTab('procurement')} requestedView={procView} onRequestedViewHandled={()=>setProcView(null)} syncRequest={syncRequest} onSyncRequestHandled={()=>setSyncRequest(null)} onSyncDone={(at)=>{ setLastSyncAt(at); reloadItemsExtra(); }} onSalesLinesChange={setProcSalesLines} onCustomersChange={setPriorityCustomers} salesData={salesFileData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
+            <ProcurementPageMemo sharedSalesLines={procSalesLinesRaw} cardRequest={cardReq} isVisible={activeTab==='procurement'} onShowPage={()=>setActiveTab('procurement')} requestedView={procView} onRequestedViewHandled={()=>setProcView(null)} syncRequest={syncRequest} onSyncRequestHandled={()=>setSyncRequest(null)} onSyncDone={(at)=>{ setLastSyncAt(at); reloadItemsExtra(); }} onSalesLinesChange={setProcSalesLines} onCustomersChange={setPriorityCustomers} salesData={salesFileData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
             </div>
           )}
 
