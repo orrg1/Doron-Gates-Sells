@@ -42,9 +42,10 @@ const applyGrid = (header, widths) => {
 };
 const resetGrid = (header) => { const box = header.parentElement; if (box) { box.style.removeProperty('--rz-cols'); box.style.minWidth = ''; } };
 
+// cell.dataset.rzPos (read in one pass before any writes — reading a computed style after a write forces a layout per cell)
 const addHandle = (cell, onDown, onReset) => {
   if (cell.querySelector(':scope > .rz-handle')) return;
-  if (getComputedStyle(cell).position === 'static') cell.style.position = 'relative';
+  if (cell.dataset.rzPos === 'static') cell.style.position = 'relative';
   const h = document.createElement('span');
   h.className = 'rz-handle';
   h.setAttribute('aria-hidden', 'true');
@@ -77,20 +78,26 @@ const startDrag = (e, cells, idx, apply, save) => {
 
 const enhance = (root) => {
   const saved = read();
-  root.querySelectorAll('table').forEach(table => {
+  // only visible header cells without a handle yet: one batch of style reads, then the writes below
+  const fresh = [...root.querySelectorAll('thead tr:first-child > th, [data-rz-grid] > *')].filter(c => !c.dataset.rzPos && c.offsetParent !== null);
+  const pos = fresh.map(c => getComputedStyle(c).position);
+  fresh.forEach((c, i) => { c.dataset.rzPos = pos[i]; });
+  const tables = [...root.querySelectorAll('table')].filter(t => t.offsetParent !== null);
+  const grids = [...root.querySelectorAll('[data-rz-grid]')].filter(h => h.offsetParent !== null);
+  tables.forEach(table => {
     if (table.hasAttribute('data-proctable') || table.closest('[data-no-resize]')) return;
     const cells = headerCells(table); if (cells.length < 2) return;
     const key = tableKey(table);
     if (table.dataset.rzKey !== key) { table.dataset.rzKey = key; if (saved[key]) applyTable(table, saved[key]); else if (table.dataset.rzFixed) resetTable(table); }
-    cells.forEach((cell, i) => addHandle(cell,
+    cells.forEach((cell, i) => cell.dataset.rzPos && addHandle(cell,
       (e) => startDrag(e, headerCells(table), i, (w) => applyTable(table, w), (w) => { const all = read(); all[key] = w; write(all); }),
       () => { const all = read(); delete all[key]; write(all); resetTable(table); }));
   });
-  root.querySelectorAll('[data-rz-grid]').forEach(header => {
+  grids.forEach(header => {
     const cells = [...header.children]; if (cells.length < 2) return;
     const key = gridKey(header);
     if (header.dataset.rzKey !== key) { header.dataset.rzKey = key; if (saved[key]) applyGrid(header, saved[key]); }
-    cells.forEach((cell, i) => addHandle(cell,
+    cells.forEach((cell, i) => cell.dataset.rzPos && addHandle(cell,
       (e) => startDrag(e, [...header.children], i, (w) => applyGrid(header, w), (w) => { const all = read(); all[key] = w; write(all); }),
       () => { const all = read(); delete all[key]; write(all); resetGrid(header); }));
   });
