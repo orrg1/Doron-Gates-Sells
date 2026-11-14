@@ -55,3 +55,8 @@ table[data-rz-fixed] th, table[data-rz-fixed] td { overflow: hidden; text-overfl
 @media (max-width: 639px) {
   main select, main input[type=search], main input[type=text], main input[type=number] { min-height: 40px; font-size: 16px; }
 }
+
+/* Phones: long lists draw only the rows near the screen (iPhone keeps less of the page in memory → smoother scrolling) */
+@media (max-width: 767px) {
+  .cv-auto { content-visibility: auto; contain-intrinsic-size: auto 160px; }
+}

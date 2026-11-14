@@ -3033,7 +3033,7 @@ const ProcurementPage = ({ sharedSalesLines = null, cardRequest = null, isVisibl
     return (
       <ul className={`divide-y ${isDarkMode?'divide-slate-700/60':'divide-slate-100'}`}>
         {visibleProducts.map(p => (
-          <li key={p.key}>
+          <li key={p.key} className="cv-auto">
             <button type="button" onClick={()=>setDrawerKey(p.key)} className={`w-full text-right px-4 py-3 space-y-1.5 ${isDarkMode?'active:bg-slate-700/40':'active:bg-slate-50'}`}>
               <div className="flex items-start gap-2">
                 <div className="flex-1 min-w-0">
@@ -3851,7 +3851,7 @@ const renderProductRow = (p) => {
     return createPortal(
       <div className={`fixed inset-0 z-50 ${isDarkMode?'dark':''}`} role="dialog" aria-modal="true" aria-label={`פרטי מוצר: ${p.name}`} onKeyDown={e=>{ if (e.key==='Escape') setDrawerKey(null); }}>
         <div className="absolute inset-0 bg-slate-900/30" onClick={()=>setDrawerKey(null)}/>
-        <aside className={`absolute top-0 bottom-0 left-0 w-full max-w-[500px] overflow-y-auto shadow-2xl animate-in slide-in-from-left duration-200 ${isDarkMode?'bg-slate-800 text-slate-200':'bg-white text-slate-700'}`} dir="rtl">
+        <aside className={`absolute top-0 bottom-0 left-0 w-full max-w-[500px] overflow-y-auto overscroll-contain md:shadow-2xl animate-in slide-in-from-left duration-200 ${isDarkMode?'bg-slate-800 text-slate-200':'bg-white text-slate-700'}`} dir="rtl">
           <div className="p-6 space-y-6">
             {/* Header */}
             <div className="flex items-start gap-3">
@@ -4026,7 +4026,7 @@ const renderProductRow = (p) => {
                 <section>
                   <h3 className={`text-sm font-bold mb-1 ${strong}`}>מלאי ב-12 החודשים האחרונים</h3>
                   <p className={`text-xs mb-2 ${muted}`}>{firstSnapshot ? `מ-${isoToDisplay(firstSnapshot)} לפי צילום יומי מ-Priority; לפני כן משוער (מלאי היום פחות קניות ועוד מכירות — בלי ספירות ותיקונים).` : 'משוער — מלאי היום פחות קניות ועוד מכירות. מהסנכרון הלילי הבא נשמר גם צילום יומי אמיתי.'}</p>
-                  <div style={{height:120}} dir="ltr">
+                  <div style={{height:120}} dir="ltr" className="max-md:pointer-events-none">
                     <ResponsiveContainer width="100%" height="100%">
                       <AreaChart data={data} margin={{top:4,right:4,left:-20,bottom:0}}>
                         <XAxis dataKey="d" tick={{fontSize:10}} tickFormatter={d=>d.slice(5,7)+'/'+d.slice(2,4)} interval={Math.max(1, Math.floor(data.length/6))}/>
@@ -4064,7 +4064,7 @@ const renderProductRow = (p) => {
                     <button type="button" onClick={()=>{ setPriceSku(p.sku); setViewMode('prices'); setDrawerKey(null); if (!isVisible) onShowPage?.(); }} className={`text-xs font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>בדיקת מחיר מלאה</button>
                   </h3>
                   <p className={`text-xs mb-2 ${muted}`}>{pts.length} חשבוניות ספק{chg!=null ? ` · מ-${isoToDisplay(first.d)}: ${chg>=0?'+':''}${chg.toFixed(1)}% ב-${mainCur==='ILS'?'₪':mainCur}` : ''}{mainCur!=='ILS' ? ' · כחול = מטבע הספק, אפור = בשקלים' : ''}</p>
-                  <div style={{height:120}} dir="ltr">
+                  <div style={{height:120}} dir="ltr" className="max-md:pointer-events-none">
                     <ResponsiveContainer width="100%" height="100%">
                       <ComposedChart data={data} margin={{top:4,right:4,left:-20,bottom:0}}>
                         <XAxis dataKey="d" tick={{fontSize:10}} tickFormatter={d=>d.slice(5,7)+'/'+d.slice(2,4)}/>
@@ -5376,7 +5376,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                   <button type="button" onClick={()=>{ setVendor(v.name); setDrawerKey(null);
                     // searched for a product (not the supplier's name) → keep that search inside the supplier
                     setVendorItemSearch(vendorSearch && !smartMatch(v.name, vendorSearch) ? vendorSearch : ''); }}
-                    className={`w-full text-right grid gap-4 items-center px-5 py-3.5 border-t transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${isDarkMode?'border-slate-700 hover:bg-slate-700/40':'border-slate-100 hover:bg-slate-50'}`} style={grid}>
+                    className={`cv-auto w-full text-right grid gap-4 items-center px-5 py-3.5 border-t transition-colors focus:outline-none focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-blue-500 ${isDarkMode?'border-slate-700 hover:bg-slate-700/40':'border-slate-100 hover:bg-slate-50'}`} style={grid}>
                     <div className={`min-w-0 sticky right-0 z-[1] -mr-5 pr-5 py-1 ${stickyBg}`}>
                       <p className={`font-bold text-sm truncate flex items-center gap-1.5 ${strong}`} title={v.name}>{v.ownMade && <Factory className="w-4 h-4 shrink-0 text-violet-500" aria-hidden="true"/>}<span className={v.phasing?'opacity-60':''}>{v.name}</span>{v.phasing && <span className={`text-[10px] font-semibold px-1.5 py-0.5 rounded ${procStatusCls('stopped', isDarkMode)}`}>בהפסקה</span>}</p>
                       <p className={`text-xs ${muted}`}>{v.items.length} מוצרים{v.draftCount?` · ${v.draftCount} כמויות שקבעת`:''}</p>
@@ -5573,7 +5573,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
                   const q = orderQtyFor(p);
                   const edited = draftQty[p.key] != null;
                   return (
-                    <div key={p.key} className={`grid gap-3 items-center px-4 py-2.5 border-t ${isDarkMode?'border-slate-700':'border-slate-100'} ${drawerKey===p.key?(isDarkMode?'bg-slate-700/50':'bg-blue-50/60'):''}`} style={grid}>
+                    <div key={p.key} className={`cv-auto grid gap-3 items-center px-4 py-2.5 border-t ${isDarkMode?'border-slate-700':'border-slate-100'} ${drawerKey===p.key?(isDarkMode?'bg-slate-700/50':'bg-blue-50/60'):''}`} style={grid}>
                       <button type="button" onClick={()=>setDrawerKey(p.key)} className={`text-right min-w-0 group focus:outline-none focus-visible:ring-2 focus-visible:ring-blue-500 rounded sticky right-0 z-[1] -mr-4 pr-4 py-1 ${drawerKey===p.key?(isDarkMode?'bg-slate-700':'bg-blue-50'):(isDarkMode?'bg-slate-800':'bg-white')}`}>
                         <p className={`text-sm font-semibold truncate group-hover:underline ${strong}`} title={p.name}>{p.name}</p>
                         <p className="flex items-center gap-1.5 min-w-0">
@@ -6208,7 +6208,7 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
       )}
 
       {/* View tabs — grouped by purpose: decide · follow up · analyze */}
-      <div className={`flex items-center gap-3 flex-wrap max-sm:sticky max-sm:-top-3 max-sm:z-20 max-sm:-mx-3 max-sm:px-3 max-sm:py-1.5 ${isDarkMode?'max-sm:bg-slate-950':'max-sm:bg-slate-50'}`}>
+      <div className={`flex items-center gap-3 flex-wrap max-sm:-mx-3 max-sm:px-3 max-sm:py-1.5`}>
         <div role="tablist" aria-label="תצוגות רכש" className={`flex flex-wrap max-sm:flex-nowrap max-sm:w-full max-sm:overflow-x-auto max-sm:[scrollbar-width:none] items-center gap-1 rounded-xl p-1 border shadow-sm ${isDarkMode?'bg-slate-800 border-slate-700':'bg-white border-slate-200'}`}>
           {(() => {
             const lateCount = overdueOrders.length;
@@ -8735,7 +8735,7 @@ const App = () => {
       </div>
 
       {/* Phone bottom navigation — the main screens one tap away; "עוד" opens the full menu */}
-      <nav aria-label="ניווט ראשי" className={`md:hidden fixed bottom-0 inset-x-0 z-30 border-t flex items-stretch justify-around pb-[env(safe-area-inset-bottom)] ${isDarkMode?'bg-slate-900/95 border-slate-800':'bg-white/95 border-slate-200'} backdrop-blur`}>
+      <nav aria-label="ניווט ראשי" className={`md:hidden fixed bottom-0 inset-x-0 z-30 border-t flex items-stretch justify-around pb-[env(safe-area-inset-bottom)] ${isDarkMode?'bg-slate-900 border-slate-800':'bg-white border-slate-200'}`}>
         {[['overview','סקירה'],['sales','מכירות'],['customers','לקוחות'],['procurement','רכש'],['stockcount','ספירה']].map(([id,short])=>{
           const item = navItems.find(n=>n.id===id); const on = activeTab===id;
           return (
