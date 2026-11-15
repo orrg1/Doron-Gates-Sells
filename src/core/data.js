@@ -1109,23 +1109,76 @@ export const salesOverview = (lines = [], { now = Date.now() } = {}) => {
   };
 };
 
+// ─── Credit lines: a real return, or an invoice corrected (cancelled and issued again)? ───
+// A credit (negative quantity) that cancels an earlier invoice line and is followed — same customer, same product, same
+// quantity — by a new invoice within CORR_DAYS days is a correction (wrong price / details, cancel & re-issue), not goods coming back.
+// Such a pair is left out of returns, and the re-issued sale is not counted twice.
+// Returns a WeakMap: credit line → { kind: 'correction', reissue: line } ; other credit lines are not in it.
+export const CORR_DAYS = 10;
+export const creditKinds = (lines = []) => {
+  const pos = new Map(), out = new WeakMap(), used = new Set();
+  const keyOf = (l) => `${l.k}|${l.cid || l.c || ''}`;
+  lines.forEach(l => { if (!l.x && l.k && l.q > 0) { const k = keyOf(l); if (!pos.has(k)) pos.set(k, []); pos.get(k).push(l); } });
+  const credits = lines.filter(l => !l.x && l.k && l.q < 0).sort((a, b) => (a.d < b.d ? -1 : a.d > b.d ? 1 : 0));
+  credits.forEach(c => {
+    const cands = pos.get(keyOf(c)); if (!cands) return;
+    const t = Date.parse(c.d);
+    const same = (p) => !used.has(p) && p.inv !== c.inv && Math.abs(p.q + c.q) < 1e-9;
+    // the invoice that was cancelled (on or before the credit) AND a new one for the same (on/after it, within CORR_DAYS) —
+    // a sale and a return on the same day are not enough
+    const orig = cands.find(p => same(p) && p.d <= c.d && (t - Date.parse(p.d)) / 86400000 <= 180);
+    const re = orig && cands.find(p => same(p) && p !== orig && p.d >= c.d && (Date.parse(p.d) - t) / 86400000 <= CORR_DAYS && (p.d > orig.d || String(p.inv) > String(orig.inv)));
+    if (re) { used.add(re); used.add(orig); out.set(c, { kind: 'correction', reissue: re, original: orig }); }
+  });
+  return out;
+};
+// the kind of a credit line, for display: 'correction' | 'warranty' | 'return'
+export const creditKindOf = (l, kinds) => {
+  if (kinds?.get(l)?.kind === 'correction') return 'correction';
+  const note = String(l.ln || '');
+  return /אחריות|החלפה/.test(note) ? 'warranty' : 'return';
+};
+// One product's credit lines in the last `days` days (product card): sold / returned / corrections, newest first
+export const productReturns = (lines = [], { now = Date.now(), days = 365 } = {}) => {
+  const from = new Date(now - days * 86400000).toISOString().slice(0, 10);
+  const kinds = creditKinds(lines);
+  let soldQ = 0, retQ = 0, corrQ = 0;
+  const rows = [];
+  lines.forEach(l => {
+    if (l.x || !l.k || l.d < from) return;
+    if (l.q > 0) { soldQ += l.q; return; }
+    if (!(l.q < 0)) return;
+    const kind = creditKindOf(l, kinds);
+    if (kind === 'correction') corrQ += -l.q; else retQ += -l.q;
+    rows.push({ d: l.d, c: l.c, inv: l.inv, q: -l.q, v: -(l.v || 0), note: lineNote(l), kind, reissue: kinds.get(l)?.reissue?.inv || '' });
+  });
+  soldQ -= corrQ; // the re-issued invoice is the same sale
+  rows.sort((a, b) => (a.d < b.d ? 1 : -1));
+  return { soldQ, retQ, corrQ, rate: soldQ > 0 ? retQ / soldQ * 100 : null, rows };
+};
+
 // ─── Customer returns per supplier (goods returns on sales invoices, last 12 months) ───
 // supplierOf(sku) → supplier name. rate = returned units / sold units.
 export const supplierReturns = (lines = [], supplierOf, { now = Date.now(), days = 365 } = {}) => {
   const from = new Date(now - days * 86400000).toISOString().slice(0, 10);
   const by = {};
+  const kinds = creditKinds(lines.filter(l => l.d >= from));
   lines.forEach(l => {
     if (l.x || !l.k || !l.q || l.d < from) return;
     const s = supplierOf(l.k); if (!s) return;
-    const x = (by[s] ||= { name: s, soldQ: 0, soldV: 0, retQ: 0, retV: 0, prods: {} });
-    const p = (x.prods[l.k] ||= { k: l.k, n: l.n, soldQ: 0, retQ: 0, retV: 0 });
+    const x = (by[s] ||= { name: s, soldQ: 0, soldV: 0, retQ: 0, retV: 0, corrQ: 0, prods: {} });
+    const p = (x.prods[l.k] ||= { k: l.k, n: l.n, soldQ: 0, retQ: 0, retV: 0, retN: 0, corrQ: 0 });
     if (l.q > 0) { x.soldQ += l.q; x.soldV += l.v || 0; p.soldQ += l.q; if (!p.n) p.n = l.n; }
-    else { x.retQ += -l.q; x.retV += -(l.v || 0); p.retQ += -l.q; p.retV += -(l.v || 0); }
+    else if (kinds.get(l)) { // cancelled & re-issued: not a return, and the sale is not counted twice
+      x.corrQ += -l.q; p.corrQ += -l.q; x.soldQ += l.q; x.soldV += l.v || 0; p.soldQ += l.q;
+    } else { x.retQ += -l.q; x.retV += -(l.v || 0); p.retQ += -l.q; p.retV += -(l.v || 0); p.retN++; }
   });
   const out = {};
   Object.values(by).forEach(x => {
-    const products = Object.values(x.prods).filter(p => p.retQ > 0).map(p => ({ ...p, rate: p.soldQ > 0 ? p.retQ / p.soldQ * 100 : null })).sort((a, b) => b.retV - a.retV);
-    out[x.name] = { name: x.name, soldQ: x.soldQ, soldV: x.soldV, retQ: x.retQ, retV: x.retV, rate: x.soldQ > 0 ? x.retQ / x.soldQ * 100 : null, valueRate: x.soldV > 0 ? x.retV / x.soldV * 100 : null, products };
+    // most returned first (units), then the share of what was sold
+    const products = Object.values(x.prods).filter(p => p.retQ > 0).map(p => ({ ...p, rate: p.soldQ > 0 ? p.retQ / p.soldQ * 100 : null }))
+      .sort((a, b) => b.retQ - a.retQ || (b.rate ?? 0) - (a.rate ?? 0) || b.retV - a.retV);
+    out[x.name] = { name: x.name, soldQ: x.soldQ, soldV: x.soldV, retQ: x.retQ, retV: x.retV, corrQ: x.corrQ, rate: x.soldQ > 0 ? x.retQ / x.soldQ * 100 : null, valueRate: x.soldV > 0 ? x.retV / x.soldV * 100 : null, products };
   });
   return out;
 };
@@ -1193,9 +1246,14 @@ export const returnsAnalysis = (lines = [], { fromIso, toIso, prevFromIso } = {}
   const inWin = (d) => d >= fromIso && d <= toIso;
   const prod = {}, cust = {}, inv = {}, months = {};
   let sold = 0, goods = 0, money = 0, prevGoods = 0, prevMoney = 0, prevSold = 0;
+  const corrPending = [];
+  const kinds = creditKinds(lines.filter(l => l.d >= (prevFromIso || fromIso)));
   lines.forEach(l => {
     const isPrev = prevFromIso && l.d >= prevFromIso && l.d < fromIso;
     if (!inWin(l.d) && !isPrev) return;
+    // an invoice cancelled and issued again: neither a return nor a second sale
+    const corr = kinds.get(l);
+    if (corr) { if (!isPrev) { sold -= -(l.v || 0); const p = prod[l.k]; if (p) { p.soldQ += l.q; p.soldV += l.v; } else corrPending.push(l); } else prevSold -= -(l.v || 0); return; }
     const goodsRet = !l.x && l.q < 0, moneyCr = l.x && l.v < 0;
     if (isPrev) { if (l.v > 0) prevSold += l.v; if (goodsRet) prevGoods += -l.v; if (moneyCr) prevMoney += -l.v; return; }
     if (l.v > 0) sold += l.v;
@@ -1214,6 +1272,7 @@ export const returnsAnalysis = (lines = [], { fromIso, toIso, prevFromIso } = {}
       const m = l.d.slice(0, 7); (months[m] ||= { m, goods: 0, money: 0 }); months[m][goodsRet ? 'goods' : 'money'] += -l.v;
     }
   });
+  corrPending.forEach(l => { const p = prod[l.k]; if (p) { p.soldQ += l.q; p.soldV += l.v; } });
   const products = Object.values(prod).filter(p => p.retQ > 0).map(p => ({ ...p, rate: p.soldQ > 0 ? p.retQ / p.soldQ * 100 : null,
     topCust: Object.entries(p.cust).sort((a, b) => b[1] - a[1])[0]?.[0] || '' })).sort((a, b) => b.retV - a.retV);
   const customers = Object.values(cust).filter(c => c.goodsV || c.moneyV).map(c => ({ c: c.c, soldV: c.soldV, goodsV: c.goodsV, moneyV: c.moneyV, total: c.goodsV + c.moneyV,

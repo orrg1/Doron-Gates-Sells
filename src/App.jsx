@@ -10,7 +10,7 @@ import * as XLSXLib from 'xlsx';
 import { supabase, flushAll, queueDataset, subscribeStatus } from './cloud.js';
 import { fetchItemPrices, fetchCustomersByPriceList } from './itemPrices.js';
 import { OWN_MADE, procStatus, PROC_STATUS_LABEL, procChip, computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './core/procModel.js';
-import { applyCardNames, lineNote, inactiveSkusOf, inactiveWithStock, salesOverview, dueToReorder, supplierReturns, orderCalendar, priceCheck, stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier, withShipMarks, shipDeliveryText, SHIP_TRUCK_TYPES, mergeShipmentFile, withShipSups, shipExtraSups } from './core/data.js';
+import { applyCardNames, lineNote, productReturns, inactiveSkusOf, inactiveWithStock, salesOverview, dueToReorder, supplierReturns, orderCalendar, priceCheck, stoppedBuying, linkShipmentsToPOs, productStartDates, supplierOnTime, returnsAnalysis, brandsAnalysis, purchasePriceHistory, priceIncreases, supplierPriceIndex, stockTimelines, stockoutSummary, detectOutliers, saleLineId, supplierLeadTimes, applyInventory, applyOpenOrders, mergeLinesSince, HebrewMonthsMap, HebrewMonthsReverse, excelDateToJS, normalizeDate, getDateVal, monthsDiff, parsePriorityOrders, parseInventoryFile, parseCustomerMonthlyFile, parseCustomerProductFile, MONTH_FULL_LABELS, MONTH_ABBR_LABELS_SHORT, parseFlexDate, DAY_MS, startOfToday, SERVICE_LEVEL, calcOrderPlan, normHeader, findHeaderRow, colIndex, toIsoDate, isoToDisplay, isoToMonthKey, daysBetween, num, normCurrency, isJunkSku, linesCoverage, linesRange, NON_PRODUCT_LABEL, mergeLinesIntoMonthly, customerMonthlyFromLines, customerProductsFromLines, PROC_FILE_SIGNATURES, detectProcFileType, parseSalesLines, parsePurchaseLines, parseShipments, shipmentStage, SHIP_NAME_STOP, matchShipSupplier, withShipMarks, shipDeliveryText, SHIP_TRUCK_TYPES, mergeShipmentFile, withShipSups, shipExtraSups } from './core/data.js';
 
 // Excel parsing ships with the site; the CDN copy (loaded later) is only a fallback.
 // Without this, uploads silently fail whenever the CDN is slow or blocked.
@@ -2507,6 +2507,7 @@ const ProcurementPage = ({ sharedSalesLines = null, cardRequest = null, isVisibl
   const [editingStock, setEditingStock] = useState(null);
   const [editingMOQ, setEditingMOQ] = useState(null);
   const [editingPack, setEditingPack] = useState(null);
+  const [retSort, setRetSort] = useState('qty'); // supplier page: most returned products — by units / rate / ₪
   const [editingLeadTime, setEditingLeadTime] = useState(null); // supplier name being edited
   const [invLoading, setInvLoading] = useState(false);
   const [invUploadError, setInvUploadError] = useState(null);
@@ -4006,6 +4007,31 @@ const renderProductRow = (p) => {
               );
             })()}
 
+            {/* Returns, last 12 months — the same count as the supplier page, with every credit line */}
+            {(() => {
+              const r = productReturns(linesBySku[p.sku] || linesBySku[p.key] || []);
+              if (!r.rows.length) return null;
+              const tag = { return: ['החזרה', isDarkMode?'bg-red-900/40 text-red-200':'bg-red-50 text-red-700'], warranty: ['החלפה / אחריות', isDarkMode?'bg-amber-900/40 text-amber-200':'bg-amber-50 text-amber-800'], correction: ['תיקון חשבונית', isDarkMode?'bg-slate-700 text-slate-300':'bg-slate-100 text-slate-600'] };
+              return (
+                <section>
+                  <h3 className={`text-sm font-bold mb-1 ${strong}`}>החזרות ב-12 חודשים</h3>
+                  <p className={`text-xs mb-2 ${muted}`}>הוחזרו <b className={strong}>{Math.round(r.retQ)}</b> מתוך {Math.round(r.soldQ)} שנמכרו{r.rate!=null && <> · <b className={r.rate>=5?'text-red-500':strong}>{r.rate.toFixed(1)}%</b></>}
+                    {r.corrQ > 0 && <> · {Math.round(r.corrQ)} יח׳ זוכו והוחשבנו מחדש (לא נספרו)</>}</p>
+                  <div className={`rounded-xl border overflow-hidden text-xs ${isDarkMode?'border-slate-700':'border-slate-200'}`}>
+                    {r.rows.slice(0, 12).map((x, i) => (
+                      <div key={i} className={`flex items-center gap-2 px-3 py-1.5 flex-wrap ${i?(isDarkMode?'border-t border-slate-700':'border-t border-slate-100'):''}`}>
+                        <span className={`w-16 shrink-0 ${muted}`}>{isoToDisplay(x.d)}</span>
+                        <span className={`flex-1 min-w-[8rem] truncate ${strong}`} title={x.c}>{x.c}{x.note && <span className={`block text-[11px] truncate ${muted}`}>הערה בחשבונית: {x.note}</span>}</span>
+                        <b className={`tabular-nums ${strong}`}>{Math.round(x.q*100)/100}</b>
+                        <span className={`px-1.5 py-0.5 rounded-full text-[10px] font-semibold ${tag[x.kind][1]}`} title={x.kind==='correction' ? `זוכה בחשבונית ${x.inv} והוחשב מחדש בחשבונית ${x.reissue}` : `חשבונית ${x.inv}`}>{tag[x.kind][0]}</span>
+                      </div>
+                    ))}
+                  </div>
+                  {r.rows.length > 12 && <p className={`text-[11px] mt-1 ${muted}`}>ועוד {r.rows.length - 12} שורות זיכוי.</p>}
+                </section>
+              );
+            })()}
+
             {/* Latest transactions */}
             {(() => {
               const lines = (linesBySku[p.sku] || linesBySku[p.key] || []).slice(0,8);
@@ -4852,7 +4878,7 @@ const renderProductRow = (p) => {
       const pi = idx[v.name], rt = supReturns[v.name];
       return { name: v.name, ownMade: v.ownMade, items: v.items.length,
         curPct: pi ? pi.curPct : null, fxPct: pi ? pi.fxPct : null, ilsPct: pi ? pi.ilsPct : null, priceN: pi ? pi.n : 0,
-        retRate: rt?.rate ?? null, retQ: rt?.retQ || 0, retV: rt?.retV || 0, soldQ: rt?.soldQ || 0, topRet: rt?.products?.[0] || null, retProducts: rt?.products || [],
+        retRate: rt?.rate ?? null, retQ: rt?.retQ || 0, retV: rt?.retV || 0, soldQ: rt?.soldQ || 0, corrQ: rt?.corrQ || 0, topRet: rt?.products?.[0] || null, retProducts: rt?.products || [],
         onTime: v.rel?.onTimePct ?? null, onTimeSrc: v.rel?.onTimeSource || null, spend12: v.pb?.spend12 || 0 };
     });
   }, [vendors, supIndex, supReturns]);
@@ -5504,17 +5530,26 @@ ${rows.map(x => `<tr${x.urgent?' class="u"':''}><td>${esc(x.sku)}</td><td>${esc(
               </div>
               {sc.retProducts.length > 0 && (
                 <div>
-                  <p className={`text-xs font-semibold mb-1 ${muted}`}>המוצרים שהכי מוחזרים</p>
-                  <ul className="space-y-1">
-                    {sc.retProducts.slice(0, 5).map(x => (
-                      <li key={x.k} className="flex items-center gap-2 text-xs">
+                  <div className="flex items-center gap-2 flex-wrap mb-1">
+                    <p className={`text-xs font-semibold ${muted}`}>המוצרים שהכי מוחזרים (12 ח׳)</p>
+                    <div className="flex gap-1 text-[11px]" role="group" aria-label="מיון">
+                      {[['qty','לפי כמות'],['rate','לפי אחוז'],['value','לפי ₪']].map(([k,l]) => (
+                        <button key={k} type="button" aria-pressed={retSort===k} onClick={()=>setRetSort(k)}
+                          className={`px-2 py-0.5 rounded-full border ${retSort===k ? (isDarkMode?'bg-slate-600 border-slate-500 text-white':'bg-slate-800 border-slate-800 text-white') : (isDarkMode?'border-slate-600 text-slate-300':'border-slate-300 text-slate-600')}`}>{l}</button>
+                      ))}
+                    </div>
+                  </div>
+                  <ul className="space-y-1.5">
+                    {[...sc.retProducts].sort(retSort==='rate' ? (a,b)=>(b.rate??0)-(a.rate??0) || b.retQ-a.retQ : retSort==='value' ? (a,b)=>b.retV-a.retV : (a,b)=>b.retQ-a.retQ || (b.rate??0)-(a.rate??0)).slice(0, 5).map(x => (
+                      <li key={x.k} className="flex items-center gap-x-2 gap-y-0.5 text-xs flex-wrap">
                         <span className={`font-mono w-28 shrink-0 ${muted}`}><SkuLink sku={x.k}/></span>
-                        <span className={`flex-1 min-w-0 truncate ${strong}`} title={x.n}>{x.n}</span>
-                        <span className={muted}>{Math.round(x.retQ)} מתוך {Math.round(x.soldQ)}</span>
-                        <b className={`w-12 text-left ${x.rate>=5?'text-red-500':strong}`}>{x.rate==null?'—':`${x.rate.toFixed(0)}%`}</b>
+                        <span className={`flex-1 min-w-[10rem] truncate ${strong}`} title={x.n}>{x.n}</span>
+                        <span className={`shrink-0 ${muted}`}>הוחזרו <b className={strong}>{Math.round(x.retQ)}</b> מתוך {Math.round(x.soldQ)} · {formatShort(x.retV)}</span>
+                        <b className={`w-10 shrink-0 text-left ${x.rate>=5?'text-red-500':strong}`}>{x.rate==null?'—':`${x.rate.toFixed(0)}%`}</b>
                       </li>
                     ))}
                   </ul>
+                  {sc.corrQ > 0 && <p className={`text-[11px] mt-1 ${muted}`}>לא נספרו {Math.round(sc.corrQ)} יח׳ שזוכו והוחשבנו מחדש לאותו לקוח (תיקון חשבונית, לא החזרה).</p>}
                 </div>
               )}
             </div>

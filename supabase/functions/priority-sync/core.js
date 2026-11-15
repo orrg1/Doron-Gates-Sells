@@ -856,13 +856,54 @@ var stockoutSummary = (timelines) => {
   });
   return out;
 };
+var CORR_DAYS = 10;
+var creditKinds = (lines = []) => {
+  const pos = /* @__PURE__ */ new Map(), out = /* @__PURE__ */ new WeakMap(), used = /* @__PURE__ */ new Set();
+  const keyOf = (l) => `${l.k}|${l.cid || l.c || ""}`;
+  lines.forEach((l) => {
+    if (!l.x && l.k && l.q > 0) {
+      const k = keyOf(l);
+      if (!pos.has(k)) pos.set(k, []);
+      pos.get(k).push(l);
+    }
+  });
+  const credits = lines.filter((l) => !l.x && l.k && l.q < 0).sort((a, b) => a.d < b.d ? -1 : a.d > b.d ? 1 : 0);
+  credits.forEach((c) => {
+    const cands = pos.get(keyOf(c));
+    if (!cands) return;
+    const t = Date.parse(c.d);
+    const same = (p) => !used.has(p) && p.inv !== c.inv && Math.abs(p.q + c.q) < 1e-9;
+    const orig = cands.find((p) => same(p) && p.d <= c.d && (t - Date.parse(p.d)) / 864e5 <= 180);
+    const re = orig && cands.find((p) => same(p) && p !== orig && p.d >= c.d && (Date.parse(p.d) - t) / 864e5 <= CORR_DAYS && (p.d > orig.d || String(p.inv) > String(orig.inv)));
+    if (re) {
+      used.add(re);
+      used.add(orig);
+      out.set(c, { kind: "correction", reissue: re, original: orig });
+    }
+  });
+  return out;
+};
 var returnsAnalysis = (lines = [], { fromIso, toIso, prevFromIso } = {}) => {
   const inWin = (d) => d >= fromIso && d <= toIso;
   const prod = {}, cust = {}, inv = {}, months = {};
   let sold = 0, goods = 0, money = 0, prevGoods = 0, prevMoney = 0, prevSold = 0;
+  const corrPending = [];
+  const kinds = creditKinds(lines.filter((l) => l.d >= (prevFromIso || fromIso)));
   lines.forEach((l) => {
     const isPrev = prevFromIso && l.d >= prevFromIso && l.d < fromIso;
     if (!inWin(l.d) && !isPrev) return;
+    const corr = kinds.get(l);
+    if (corr) {
+      if (!isPrev) {
+        sold -= -(l.v || 0);
+        const p = prod[l.k];
+        if (p) {
+          p.soldQ += l.q;
+          p.soldV += l.v;
+        } else corrPending.push(l);
+      } else prevSold -= -(l.v || 0);
+      return;
+    }
     const goodsRet = !l.x && l.q < 0, moneyCr = l.x && l.v < 0;
     if (isPrev) {
       if (l.v > 0) prevSold += l.v;
@@ -903,6 +944,13 @@ var returnsAnalysis = (lines = [], { fromIso, toIso, prevFromIso } = {}) => {
       const m = l.d.slice(0, 7);
       months[m] ||= { m, goods: 0, money: 0 };
       months[m][goodsRet ? "goods" : "money"] += -l.v;
+    }
+  });
+  corrPending.forEach((l) => {
+    const p = prod[l.k];
+    if (p) {
+      p.soldQ += l.q;
+      p.soldV += l.v;
     }
   });
   const products = Object.values(prod).filter((p) => p.retQ > 0).map((p) => ({
