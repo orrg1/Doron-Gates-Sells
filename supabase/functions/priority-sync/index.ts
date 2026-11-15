@@ -21,7 +21,7 @@
 //     and { action:'shipments-ping', found, files, version } after every check — so a script that stopped running is noticed.
 // Priority is only ever read (GET).
 import { createClient } from 'npm:@supabase/supabase-js@2.45.4';
-import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml, pickAlerts, renderAlertsHtml, pickMorningAlerts, renderMorningHtml, parseShipments, mergeShipmentFile } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/27ace151a9e42a3a6c6ebdcc7cebee701f27a15e/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
+import { SYNC_FORMS, syncMonthsOf, describeFromMetadata, planSteps, runStep, finalizeSync, MissingFieldError, OVERLAP_DAYS, buildDigest, renderDigestHtml, pickAlerts, renderAlertsHtml, pickMorningAlerts, renderMorningHtml, parseShipments, mergeShipmentFile } from 'https://raw.githubusercontent.com/orrg1/Doron-Gates-Sells/f15ce3691a1e42f3841de80c221b931edf3615e1/supabase/functions/priority-sync/core.js'; // pinned commit of the shared core (scripts/copy-core.sh)
 
 const ROOT = (Deno.env.get('PRIORITY_ROOT') || 'https://p.priority-connect.online/odata/Priority/tabA974E.ini/gate').replace(/\/+$/, '');
 const PAT = Deno.env.get('PRIORITY_PAT') || '';
