@@ -18,6 +18,16 @@ export const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
   auth: { persistSession: true, autoRefreshToken: true, detectSessionInUrl: true, flowType: 'pkce' },
 });
 
+// ── Per-area access (the server enforces it: row-level security on app_state by key) ──
+// A limited user (areas = ['gadish' | 'stockcount' | 'clothing']) reads and writes only these keys.
+export const AREA_KEYS = {
+  gadish: { read: ['whGadish', 'whGadishLog', 'whGadishDays', 'whGadishBring', 'procurementStock', 'procurementNames', 'prioritySyncAt'], write: ['whGadish', 'whGadishLog'] },
+  stockcount: { read: ['stockCount', 'procurementStock', 'procurementNames', 'prioritySyncAt'], write: ['stockCount'] },
+  clothing: { read: ['clothingData'], write: ['clothingData'] },
+};
+export const AREA_LABEL = { gadish: 'מחסן גדיש', stockcount: 'ספירת מלאי', clothing: 'ביגוד' };
+let writableKeys = null; // null = everything (full access)
+
 // Keys that must stay on this device only.
 const LOCAL_ONLY = new Set(['geminiApiKey', 'theme', 'procurementColWidths', 'backupReminderSnoozedUntil', 'lastBackupDate', 'cloudLocalMode']);
 const isSyncedKey = (k) => typeof k === 'string' && !LOCAL_ONLY.has(k) && !k.startsWith('sb-') && !k.startsWith('__cloud');
@@ -66,6 +76,7 @@ let stateTimer = null;
 const updatePending = () => setStatus({ pending: pendingState.size + pendingSets.size, state: (pendingState.size + pendingSets.size) ? 'saving' : status.state === 'saving' ? 'saved' : status.state });
 const queueState = (key, value) => {
   if (!enabled || !isSyncedKey(key)) return;
+  if (writableKeys && !writableKeys.has(key)) return; // limited access: other keys stay in this browser only
   if (value !== null && lastCloudValue.get(key) === value) return;
   if (value === null && !lastCloudValue.has(key)) return;
   pendingState.set(key, value); updatePending();
@@ -93,7 +104,7 @@ async function flushState() {
 const pendingSets = new Map();
 const dsTimers = new Map();
 export const queueDataset = (key, value) => {
-  if (!enabled || !isSyncedDataset(key)) return;
+  if (!enabled || !isSyncedDataset(key) || writableKeys) return; // datasets: full access only
   pendingSets.set(key, value); updatePending();
   clearTimeout(dsTimers.get(key));
   dsTimers.set(key, setTimeout(() => flushDataset(key), 1500));
@@ -149,9 +160,11 @@ const patchStorage = () => {
 
 // Pull the server copy into this browser (server wins), or — on first use when
 // the server is still empty — upload what this browser already has.
-export async function hydrate(email, onProgress = () => {}) {
+export async function hydrate(email, onProgress = () => {}, { areas = null } = {}) {
   userEmail = email || '';
   enabled = false;
+  if (areas && areas.length) return hydrateLimited(areas, onProgress);
+  writableKeys = null;
   onProgress('בודק נתונים בשרת…');
   const [{ data: rows, error: e1 }, { data: sets, error: e2 }] = await Promise.all([
     supabase.from('app_state').select('key,value'),
@@ -195,6 +208,23 @@ export async function hydrate(email, onProgress = () => {}) {
   lsSetRaw('lastBackupDate', new Date().toISOString());
   setStatus({ state: 'saved', lastSaved: Date.now(), message: '' });
   return { migrated: 0 };
+}
+
+// Limited access: take only this person's screens' keys from the server, and remove from this browser
+// anything else a previous (full) user left here — so it is not on screen and not readable on this device.
+async function hydrateLimited(areas, onProgress) {
+  const read = new Set(['tableColWidths']), write = new Set(['tableColWidths']);
+  areas.forEach(a => { (AREA_KEYS[a]?.read || []).forEach(k => read.add(k)); (AREA_KEYS[a]?.write || []).forEach(k => write.add(k)); });
+  writableKeys = write;
+  onProgress('טוען…');
+  const { data: rows, error } = await supabase.from('app_state').select('key,value').in('key', [...read]);
+  if (error) throw error;
+  Object.keys(window.localStorage).filter(k => isSyncedKey(k) && !read.has(k)).forEach(k => lsRemoveRaw(k));
+  try { const keys = await idbKeysRaw(); await idbTx('readwrite', s => { keys.forEach(k => s.delete(k)); return null; }); } catch { /* no IndexedDB */ }
+  rows.forEach(r => { lastCloudValue.set(r.key, r.value); lsSetRaw(r.key, r.value); });
+  patchStorage(); enabled = true;
+  setStatus({ state: 'saved', lastSaved: Date.now(), message: '' });
+  return { migrated: 0, limited: true };
 }
 
 export const stopSync = () => { enabled = false; setStatus({ state: 'off' }); };

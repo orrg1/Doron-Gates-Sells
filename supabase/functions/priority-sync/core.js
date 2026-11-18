@@ -1486,6 +1486,21 @@ function finalizeSync({ prev, payloads, failed = {}, since = {}, sSince, pSince,
   return { appState: outState, datasets: outSets, log, sSince, pSince };
 }
 
+// src/core/warehouse.js
+var gadishBringList = ({ gadish = {}, stock = {}, names = {}, avgDaily = {}, days = 14, targetDays } = {}) => {
+  const target = targetDays || Math.max(30, days * 2);
+  return Object.entries(gadish).map(([k, g]) => {
+    const total = stock[k];
+    if (total == null || !(g > 0)) return null;
+    const main = total - g, perDay = avgDaily[k] || 0;
+    if (perDay <= 0) return main <= 0 ? { k, n: names[k] || "", total, gadish: g, main, perDay: 0, coverDays: 0, qty: Math.min(g, 1) } : null;
+    const coverDays = Math.max(0, main) / perDay;
+    if (coverDays >= days) return null;
+    const qty = Math.min(g, Math.max(1, Math.ceil(target * perDay - Math.max(0, main))));
+    return { k, n: names[k] || "", total, gadish: g, main, perDay: Math.round(perDay * 100) / 100, coverDays: Math.round(coverDays), qty };
+  }).filter(Boolean).sort((a, b) => a.coverDays - b.coverDays);
+};
+
 // src/core/procModel.js
 var OWN_MADE = "\u05D9\u05D9\u05E6\u05D5\u05E8 \u05E2\u05E6\u05DE\u05D9";
 var isOwnMadeFamily = (fam) => /ייצור\s*עצמי/.test(String(fam || ""));
@@ -2118,6 +2133,16 @@ var buildDigest = ({ app = {}, sets = {} }, { now = Date.now(), withDetail = fal
     productsUp: productMoves.up.slice(0, 10),
     productsDown: productMoves.down.slice(0, 6),
     returnSpikes,
+    // second warehouse (גדיש): what to bring to the main one — the main has < N days of sales and גדיש has some
+    gadishBring: (() => {
+      const g = app.whGadish || {};
+      if (!Object.keys(g).length) return [];
+      const avgDaily = {};
+      productsAll.forEach((p) => {
+        if (p.sku && p.avgMonthly > 0) avgDaily[p.sku] = p.avgMonthly / 30.4;
+      });
+      return gadishBringList({ gadish: g, stock: app.procurementStock || {}, names, avgDaily, days: Number(app.whGadishDays) || 14 });
+    })(),
     // the website's AI assistant reads these (the email never asks for them)
     ...withDetail ? { detail: {
       products: productsAll.map((p) => ({
@@ -2250,7 +2275,7 @@ var pickMorningAlerts = (d, state = {}, snooze = {}, { now = Date.now(), ownMade
   const bySupplier = Object.entries(groups).map(([name, items2]) => ({ name, items: items2, newCount: items2.filter((x) => x.isNew).length, minCover: Math.min(...items2.map((x) => x.coverDays ?? 999)) })).sort((a, b) => (b.newCount > 0) - (a.newCount > 0) || a.minCover - b.minCover || b.items.length - a.items.length);
   return { current, buy, make, bySupplier, ownMadeDays, resolved, snoozedCount: snoozed.length, nextState: { items, lastSent: state.lastSent || null } };
 };
-var renderMorningHtml = (m, ships = [], { siteUrl }) => {
+var renderMorningHtml = (m, ships = [], { siteUrl, gadish = [] }) => {
   const row = (cells) => `<tr>${cells.map((c) => `<td align="right" style="padding:6px;border-bottom:1px solid #f1f5f9;font-size:13px;vertical-align:top">${c}</td>`).join("")}</tr>`;
   const head = (cells) => `<tr style="background:#f1f5f9;color:#475569">${cells.map((c) => `<th align="right" style="padding:6px;font-size:12px;font-weight:600">${esc(c)}</th>`).join("")}</tr>`;
   const tag = (x) => x.isNew ? '<span style="background:#C8322B;color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:bold">\u05D7\u05D3\u05E9</span> ' : `<span style="color:#b45309;font-size:11px;font-weight:bold">\u05D1\u05E8\u05E9\u05D9\u05DE\u05D4 ${x.days} ${x.days === 1 ? "\u05D9\u05D5\u05DD" : "\u05D9\u05DE\u05D9\u05DD"}</span> `;
@@ -2285,6 +2310,8 @@ var renderMorningHtml = (m, ships = [], { siteUrl }) => {
   ${make.length ? `<tr><td style="padding:14px 18px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 4px;font-size:15px;color:#475569">\u05DC\u05D9\u05D9\u05E6\u05D5\u05E8 \u2014 \u05E4\u05D7\u05D5\u05EA \u05D3\u05D7\u05D5\u05E3</h2>
     <p style="margin:0 0 8px;font-size:12px;color:#64748b">\u05D9\u05D9\u05E6\u05D5\u05E8 \u05E2\u05E6\u05DE\u05D9 \u05E9\u05E0\u05E9\u05D0\u05E8 \u05DC\u05D5 \u05DE\u05DC\u05D0\u05D9 \u05DC\u05E4\u05D7\u05D5\u05EA \u05DE-${m.ownMadeDays || 14} \u05D9\u05D5\u05DD (\u05D0\u05D5 \u05E9\u05E0\u05D2\u05DE\u05E8).</p>
     <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${cols("\u05DC\u05D9\u05D9\u05E6\u05E8")}${make.slice(0, 25).map((x) => itemRow(x, "\u05DC\u05D9\u05D9\u05E6\u05E8")).join("")}</table></td></tr>` : ""}
+  ${gadish.length ? `<tr><td style="padding:14px 18px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 8px;font-size:15px;color:#0f172a">\u05DC\u05D4\u05D1\u05D9\u05D0 \u05DE\u05D2\u05D3\u05D9\u05E9 \u05DC\u05DE\u05D2\u05D3\u05DC \u05D4\u05E2\u05DE\u05E7 (${gadish.length})</h2>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(["\u05DE\u05D5\u05E6\u05E8", "\u05D1\u05DE\u05D2\u05D3\u05DC \u05D4\u05E2\u05DE\u05E7", "\u05D1\u05D2\u05D3\u05D9\u05E9", "\u05DC\u05D4\u05D1\u05D9\u05D0"])}${gadish.slice(0, 25).map((x) => row([`<b>${prodLink(siteUrl, x.n || x.k, x.k)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}${x.perDay ? ` \xB7 \u05DE\u05E1\u05E4\u05D9\u05E7 \u05DC\u05DB-${x.coverDays} \u05D9\u05DE\u05D9\u05DD` : ""}</span>`, Math.round(x.main * 100) / 100, Math.round(x.gadish * 100) / 100, `<b>${Math.round(x.qty * 100) / 100}</b>`])).join("")}</table></td></tr>` : ""}
   ${ships.length ? `<tr><td style="padding:14px 18px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 8px;font-size:15px;color:#0f172a">\u05DE\u05E9\u05DC\u05D5\u05D7\u05D9\u05DD \u05E9\u05E0\u05D3\u05D7\u05D5 (${ships.length})</h2>
     <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(["\u05DE\u05DB\u05D5\u05DC\u05D4", "\u05E1\u05E4\u05E7", "\u05D4\u05D9\u05D4", "\u05E2\u05DB\u05E9\u05D9\u05D5", "\u05D3\u05D7\u05D9\u05D9\u05D4"])}${shipRows.join("")}</table></td></tr>` : ""}
   <tr><td style="padding:12px 18px;border-top:1px solid #e2e8f0"><a href="${esc(siteUrl)}" style="color:#1F5FBF;font-size:13px">\u05E4\u05EA\u05D7 \u05D1\u05D0\u05EA\u05E8 \u2190</a>

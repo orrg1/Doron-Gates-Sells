@@ -256,7 +256,7 @@ const SITE_URL = 'https://orrg1.github.io/Doron-Gates-Sells/';
 async function digestData() {
   const app = await readState(['procurementStock', 'procurementSupplier', 'procurementCost', 'procurementCurrency', 'exchangeRates', 'openOrders', 'procShipSupplierMap',
     'procOutlierDecisions', 'procurementLeadTime', 'procLeadAddTransit', 'excludeCurrentMonth', 'procSkipStockoutMonths', 'procurementMinStock', 'procurementCostHistory',
-    'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime', 'procOrderBlock', 'procShipPoLinks', 'procShipReceived', 'procShipDelivery', 'procShipExtraSups', 'procAlertSnooze', 'procOwnMadeAlertDays', 'procPackSize']);
+    'procurementMOQ', 'procurementNames', 'prioritySyncAt', 'procAvgWindow', 'procMonthsToStock', 'procDefaultLeadTime', 'procOrderBlock', 'procShipPoLinks', 'procShipReceived', 'procShipDelivery', 'procShipExtraSups', 'procAlertSnooze', 'procOwnMadeAlertDays', 'procPackSize', 'whGadish', 'whGadishDays']);
   const sets: Record<string, unknown> = {};
   for (const k of ['procSalesLines', 'procPurchaseLines', 'procShipments', 'stockHistory', 'procPoMeta', 'procItemsExtra', 'dashboardSalesData']) sets[k] = await readDataset(k);
   // The email looks back at most ~2 years (12-month averages, a year-ago week, the trend year) — older invoice
@@ -354,13 +354,16 @@ async function sendMorning(by: string, force = false) {
   const snooze = ((await readState(['procAlertSnooze'])).procAlertSnooze) || {};
   const m = pickMorningAlerts(d, st.alertsMorning || {}, snooze, { ownMadeDays: Number(st.procOwnMadeAlertDays) || 14 });
   let sent: unknown = null;
-  if (m.current.length || m.resolved.length) {
+  // second warehouse: what to bring from גדיש (also kept for people who see only the warehouses screen)
+  const gadish: any[] = d.gadishBring || [];
+  await writeState({ whGadishBring: { at: new Date().toISOString(), items: gadish } });
+  if (m.current.length || m.resolved.length || gadish.length) {
     const newCount = m.current.filter((x: any) => x.isNew).length;
-    const parts = [m.buy.length ? `${m.buy.length} מוצרים להזמין מ-${m.bySupplier.length} ספקים` : '', m.make.length ? `${m.make.length} לייצור` : ''].filter(Boolean);
-    const subject = m.current.length
+    const parts = [m.buy.length ? `${m.buy.length} מוצרים להזמין מ-${m.bySupplier.length} ספקים` : '', m.make.length ? `${m.make.length} לייצור` : '', gadish.length ? `${gadish.length} להביא מגדיש` : ''].filter(Boolean);
+    const subject = m.current.length || gadish.length
       ? `תזכורת בוקר: ${parts.join(' · ')}${newCount ? ` (${newCount} חדשים)` : ''}`
       : `תזכורת בוקר: כל המוצרים טופלו (${m.resolved.length})`;
-    sent = await sendMail(subject, renderMorningHtml(m, [], { siteUrl: SITE_URL }));
+    sent = await sendMail(subject, renderMorningHtml(m, [], { siteUrl: SITE_URL, gadish }));
   }
   await writeState({ alertsMorning: { ...m.nextState, lastSent: today, lastAt: new Date().toISOString(), by, count: m.current.length } });
   return { sent: !!sent, current: m.current.length, buy: m.buy.length, suppliers: m.bySupplier.length, make: m.make.length, resolved: m.resolved.length, snoozed: m.snoozedCount };
@@ -419,8 +422,9 @@ Deno.serve(async (req) => {
     const { data: u } = await sb.auth.getUser(jwt);
     const email = (u?.user?.email || '').toLowerCase();
     if (!email) return json({ error: 'not signed in' }, 401);
-    const { data: allowed } = await sb.from('allowed_users').select('email').eq('email', email).maybeSingle();
+    const { data: allowed } = await sb.from('allowed_users').select('email,role,areas').eq('email', email).maybeSingle();
     if (!allowed) return json({ error: 'user not allowed' }, 403);
+    if (allowed.role !== 'admin' && Array.isArray(allowed.areas) && allowed.areas.length) return json({ error: 'no access' }, 403); // limited users: their screens only
     caller = email;
   }
   if (!PAT) return json({ error: 'PRIORITY_PAT secret is not set on the server' }, 500);

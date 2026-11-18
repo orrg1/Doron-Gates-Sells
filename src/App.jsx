@@ -5,6 +5,8 @@ import { aiToolDeclarations, runAiTool, AI_SYSTEM_PROMPT } from './core/aiTools.
 import { installResizableColumns } from './resizableColumns.js';
 import { installMobileTables } from './mobileTables.js';
 import ClothingPage from './ClothingPage.jsx';
+import GadishPage from './GadishPage.jsx';
+import { GADISH_KEY, GADISH_DAYS_KEY, MAIN_WH, SECOND_WH, avgDailyBySku, gadishBringList } from './core/warehouse.js';
 import { loadClothing, dueCount as clothingDueCount } from './clothingModel.js';
 import * as XLSXLib from 'xlsx';
 import { supabase, flushAll, queueDataset, subscribeStatus } from './cloud.js';
@@ -24,7 +26,7 @@ import {
   Info, Bell, User, Settings, Eye, EyeOff, TrendingDown, Zap,
   PieChart as PieChartIcon, Target, ArrowUpRight, ArrowDownRight, Home,
   ShoppingCart, ClipboardList, Sliders, TriangleAlert, Star, CircleDot,
-  Minus, RefreshCw, SlidersHorizontal, MoreHorizontal, Factory,
+  Minus, RefreshCw, SlidersHorizontal, MoreHorizontal, Factory, Warehouse,
   Menu, RotateCcw, CheckCircle2, ExternalLink, Shirt, Plus, Pencil, Printer, UserPlus, History,
 } from 'lucide-react';
 import {
@@ -1425,6 +1427,13 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
     try { return buildDigest({ app: readAppState(OVERVIEW_APP_KEYS), sets: { ...sets, procSalesLines: salesLines } }); } catch (e) { console.error('overview', e); return null; }
   }, [sets, salesLines, marksAt]); // eslint-disable-line react-hooks/exhaustive-deps
   const clothingDue = useMemo(() => { try { return clothingDueCount(loadClothing()); } catch { return 0; } }, []);
+  const gadishBring = useMemo(() => {
+    try {
+      const g = JSON.parse(localStorage.getItem(GADISH_KEY) || '{}') || {}; if (!Object.keys(g).length || !salesLines.length) return 0;
+      const stock = JSON.parse(localStorage.getItem('procurementStock') || '{}') || {};
+      return gadishBringList({ gadish: g, stock, avgDaily: avgDailyBySku(salesLines), days: Number(localStorage.getItem(GADISH_DAYS_KEY)) || 14 }).length;
+    } catch { return 0; }
+  }, [salesLines]);
   const countPending = useMemo(() => { try { return (JSON.parse(localStorage.getItem('stockCount') || '{}').items || []).filter(x => x.counted != null && x.sysAtCount != null && x.counted !== x.sysAtCount && !x.done).length; } catch { return 0; } }, []);
   const muted = isDarkMode ? 'text-slate-400' : 'text-slate-500', strong = isDarkMode ? 'text-slate-100' : 'text-slate-800';
   const card = `rounded-2xl border ${isDarkMode ? 'bg-slate-800 border-slate-700' : 'bg-white border-slate-200'}`;
@@ -1458,6 +1467,7 @@ const OverviewPage = ({ isDarkMode, setActiveTab, onOpenCustomers = null, onOpen
     { k: 'price', t: 'מחירים לבדיקה', v: o ? o.priceCheck : '…', sub: o ? `${o.priceHigh} במחיר גבוה` : '', go: () => onOpenProc('prices'), tone: o?.priceHigh ? 'soon' : 'ok' },
     { k: 'due', t: 'לקוחות שהגיע זמנם', v: dueCount, sub: 'עברו את הזמן הרגיל שלהם', go: () => onOpenCustomers ? onOpenCustomers('due') : setActiveTab('customers'), tone: dueCount ? 'soon' : 'ok' },
     { k: 'stop', t: 'לקוחות שהפסיקו', v: stoppedCount, sub: 'מוצר שהפסיקו לקנות', go: () => onOpenCustomers ? onOpenCustomers('stopped') : setActiveTab('customers'), tone: 'ok' },
+    { k: 'gadish', t: `להביא מ${SECOND_WH}`, v: gadishBring, sub: `ב${MAIN_WH} נשאר מעט, ב${SECOND_WH} יש`, go: () => setActiveTab('warehouses'), tone: gadishBring ? 'soon' : 'ok', hide: !gadishBring },
     { k: 'clothing', t: 'סבב ביגוד', v: clothingDue, sub: 'עובדים שהגיע מועד הסבב שלהם', go: () => setActiveTab('clothing'), tone: clothingDue ? 'soon' : 'ok', hide: !clothingDue },
     { k: 'count', t: 'ספירות לעדכון', v: countPending, sub: 'הפרשים שעוד לא עודכנו ב-Priority', go: () => setActiveTab('stockcount'), tone: countPending ? 'soon' : 'ok', hide: !countPending },
   ].filter(a => !a.hide);
@@ -2177,7 +2187,7 @@ const containerLinks = (contText) => {
   });
 };
 
-const ProcurementPage = ({ sharedSalesLines = null, cardRequest = null, isVisible = true, onShowPage = null, requestedView = null, onRequestedViewHandled, syncRequest = null, onSyncRequestHandled, onSyncDone, onSalesLinesChange, onCustomersChange, salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
+const ProcurementPage = ({ onOpenWarehouses = null, sharedSalesLines = null, cardRequest = null, isVisible = true, onShowPage = null, requestedView = null, onRequestedViewHandled, syncRequest = null, onSyncRequestHandled, onSyncDone, onSalesLinesChange, onCustomersChange, salesData: salesDataRaw, suppliersData = [], onOpenSupplierAnalytics, isDarkMode, apiKey, costMap, setCostMap, currencyMap, setCurrencyMap, exchangeRates, jumpTo, onJumpToSales, excludeCurrentMonth, otherSources = [] }) => {
   const [stockMap, setStockMap] = useState(() => { try { return JSON.parse(localStorage.getItem('procurementStock')||'{}'); } catch { return {}; } });
   // SKU → product name, captured from the inventory file. Needed so items
   // that are in stock but never appear in sales can still be shown by name
@@ -3911,6 +3921,21 @@ const renderProductRow = (p) => {
               </div>
               <button type="button" autoFocus onClick={()=>setDrawerKey(null)} aria-label="סגור" className={`p-2 rounded-lg border ${isDarkMode?'border-slate-600 hover:bg-slate-700':'border-slate-200 hover:bg-slate-50'}`}><X className="w-4 h-4"/></button>
             </div>
+
+            {/* Where the stock is: מגדל העמק / גדיש (the site keeps גדיש; Priority has the total) */}
+            {(() => {
+              let g = 0; try { g = Number((JSON.parse(localStorage.getItem(GADISH_KEY) || '{}') || {})[p.sku]) || 0; } catch { /* none */ }
+              if (p.currentStock == null && !g) return null;
+              const main = p.currentStock == null ? null : Math.round((p.currentStock - g) * 100) / 100;
+              return (
+                <div className={`rounded-xl px-3 py-2 text-sm flex items-center gap-x-3 gap-y-1 flex-wrap ${card}`}>
+                  <span><span className={muted}>מלאי בפריוריטי </span><b className={strong}>{p.currentStock ?? '—'}</b></span>
+                  <span><span className={muted}>{MAIN_WH} </span><b className={main != null && main < 0 ? 'text-red-500' : strong}>{main ?? '—'}</b></span>
+                  <span><span className={muted}>{SECOND_WH} </span><b className={strong}>{g}</b></span>
+                  {onOpenWarehouses && <button type="button" onClick={()=>{ setDrawerKey(null); onOpenWarehouses(); }} className={`mr-auto text-xs font-semibold underline ${isDarkMode?'text-blue-300':'text-blue-700'}`}>עדכון {SECOND_WH}</button>}
+                </div>
+              );
+            })()}
 
             {/* Key numbers */}
             <div className="grid grid-cols-3 gap-3">
@@ -7460,7 +7485,12 @@ const geminiChatWithTools = async ({ apiKey, system, history = [], question, too
 };
 
 // ─── MAIN APP ─────────────────────────────────────────
-const App = () => {
+// access: { full: true } — everything; or { full: false, areas: ['gadish' | 'stockcount' | 'clothing'] } — only those screens
+// (the server enforces it too: such a user can read and write only the data of those screens)
+const AREA_TABS = { gadish: 'warehouses', stockcount: 'stockcount', clothing: 'clothing' };
+const App = ({ access = { full: true, areas: [] } }) => {
+  const full = access.full !== false;
+  const allowedTabs = full ? null : (access.areas || []).map(a => AREA_TABS[a]).filter(Boolean);
   const [isDarkMode, setIsDarkMode] = useState(() => typeof window!=='undefined' && localStorage.getItem('theme')==='dark');
   const [apiKey, setApiKey] = useState(() => typeof window!=='undefined' ? (localStorage.getItem('geminiApiKey')||'') : '');
   // Manual exchange rates (₪ per 1 unit of foreign currency) — lets margin be
@@ -7580,11 +7610,13 @@ const App = () => {
     return () => { cancelled = true; };
   }, []);
 
-  const [activeTab, setActiveTab] = useState('overview');
+  const [activeTab, setActiveTabRaw] = useState(() => (full ? 'overview' : (allowedTabs[0] || 'none')));
+  const setActiveTab = useCallback((t) => setActiveTabRaw(prev => { const v = typeof t === 'function' ? t(prev) : t; return (full || allowedTabs.includes(v)) ? v : prev; }), [full]); // eslint-disable-line react-hooks/exhaustive-deps
   useEffect(() => { if (activeTab === 'procurement') setProcMounted(true); }, [activeTab]);
   // Get the procurement page ready in the background once the site is idle, so opening it is instant
   useEffect(() => {
     let idleId = null;
+    if (!full) return undefined;
     const t = setTimeout(() => {
       const go = () => setProcMounted(true);
       idleId = window.requestIdleCallback ? window.requestIdleCallback(go, { timeout: 8000 }) : setTimeout(go, 0);
@@ -7601,7 +7633,11 @@ const App = () => {
     procSalesLines.forEach(l => { if (l.k) set.add(l.k); });
     return set;
   }, [cardNamesApp, itemsExtraApp, procSalesLines]);
-  const cardCtx = useMemo(() => ({ open: openProductCard, isSku: (t) => knownSkus.has(t) }), [openProductCard, knownSkus]);
+  const openWarehouses = useCallback(() => setActiveTab('warehouses'), [setActiveTab]);
+  // מחסנים: sales per day (for "bring from גדיש") and cost per unit (value of what is there) — full access only
+  const gadishAvgDaily = useMemo(() => (full && activeTab === 'warehouses' && procSalesLines.length ? avgDailyBySku(procSalesLines) : null), [full, activeTab, procSalesLines]);
+  const gadishCostOf = useCallback((k) => { const c = itemsExtraApp?.[k]?.avgCost; return c > 0 ? c : 0; }, [itemsExtraApp]);
+  const cardCtx = useMemo(() => full ? ({ open: openProductCard, isSku: (t) => knownSkus.has(t) }) : null, [full, openProductCard, knownSkus]);
 
   const [loading, setLoading] = useState(false);
   const [xlsxLoaded, setXlsxLoaded] = useState(false);
@@ -8760,9 +8796,10 @@ const App = () => {
     // "רכש וספקים" and "תכנון רכש" are one screen now; the old spend analytics stay reachable from "מחירי רכש".
     { id:'procurement', label:'רכש', icon:ShoppingCart, color:'text-orange-400' },
     { id:'stockcount', label:'ספירת מלאי', icon:ClipboardList, color:'text-emerald-400' },
+    { id:'warehouses', label:'מחסנים', icon:Warehouse, color:'text-amber-400' },
     { id:'clothing', label:'ביגוד עובדים', icon:Shirt, color:'text-teal-400' },
     { id:'summary', label:'רווח והפסד', icon:BarChart3, color:'text-violet-400' },
-  ];
+  ].filter(n => full || allowedTabs.includes(n.id));
 
   if (!idbReady) {
     return (
@@ -8793,14 +8830,14 @@ const App = () => {
 
       {/* FAB Chat */}
       <div className="fixed bottom-6 left-6 z-40">
-        {!chatOpen && <button onClick={()=>setChatOpen(true)} aria-label="צ'אט AI" className="max-md:hidden bg-blue-600 hover:bg-blue-700 text-white p-4 rounded-full shadow-xl hover:scale-105 transition-all shadow-blue-500/30"><MessageSquare className="w-6 h-6"/></button>}
+        {full && !chatOpen && <button onClick={()=>setChatOpen(true)} aria-label="צ'אט AI" className="max-md:hidden bg-blue-600 hover:bg-blue-700 text-white p-4 rounded-full shadow-xl hover:scale-105 transition-all shadow-blue-500/30"><MessageSquare className="w-6 h-6"/></button>}
         <ChatWindow isOpen={chatOpen} onClose={()=>setChatOpen(false)} onSend={sendChat} messages={chatMessages} thinking={chatThinking} status={chatStatus} isDarkMode={isDarkMode}/>
       </div>
 
       {/* Phone bottom navigation — the main screens one tap away; "עוד" opens the full menu */}
       <nav aria-label="ניווט ראשי" className={`md:hidden fixed bottom-0 inset-x-0 z-30 border-t flex items-stretch justify-around pb-[env(safe-area-inset-bottom)] ${isDarkMode?'bg-slate-900 border-slate-800':'bg-white border-slate-200'}`}>
-        {[['overview','סקירה'],['sales','מכירות'],['customers','לקוחות'],['procurement','רכש'],['stockcount','ספירה']].map(([id,short])=>{
-          const item = navItems.find(n=>n.id===id); const on = activeTab===id;
+        {(full ? [['overview','סקירה'],['sales','מכירות'],['customers','לקוחות'],['procurement','רכש'],['stockcount','ספירה']] : navItems.map(n => [n.id, n.label])).map(([id,short])=>{
+          const item = navItems.find(n=>n.id===id); if (!item) return null; const on = activeTab===id;
           return (
             <button key={id} type="button" aria-current={on?'page':undefined} onClick={()=>{setActiveTab(id);resetFilters();}}
               className={`flex-1 flex flex-col items-center justify-center gap-0.5 min-h-[56px] text-[11px] font-semibold ${on?(isDarkMode?'text-white':'text-slate-900'):(isDarkMode?'text-slate-500':'text-slate-500')}`}>
@@ -8877,7 +8914,7 @@ const App = () => {
           </div>
           <div className="flex items-center gap-2">
             {/* Global search — across products (sales) and suppliers */}
-            <div className="relative hidden md:block" data-global-search>
+            {full && <div className="relative hidden md:block" data-global-search>
               <Search className={`absolute right-3 top-2.5 w-3.5 h-3.5 ${isDarkMode?'text-slate-500':'text-slate-400'}`}/>
               <input type="text" value={globalQuery}
                 onChange={e=>{setGlobalQuery(e.target.value); setGlobalSearchOpen(true);}}
@@ -8932,16 +8969,16 @@ const App = () => {
                   )}
                 </div>
               )}
-            </div>
+            </div>}
             {/* Quick date filters (the overview and stock count use their own fixed periods) */}
-            {availableDates.length>0 && activeTab!=='overview' && activeTab!=='stockcount' && activeTab!=='clothing' && (
+            {full && availableDates.length>0 && activeTab!=='overview' && activeTab!=='warehouses' && activeTab!=='stockcount' && activeTab!=='clothing' && (
               <div className={`hidden xl:flex items-center p-1 rounded-lg border gap-0.5 ${isDarkMode?'bg-slate-800 border-slate-700':'bg-slate-100 border-slate-200'}`}>
                 {[[3,'3 חודשים'],['year','השנה'],[null,'הכל']].map(([f,l])=>(
                   <button key={l} onClick={()=>setQuickDate(f)} className={`px-3 py-1.5 text-xs font-medium rounded-md transition-colors ${isDarkMode?'text-slate-400 hover:bg-slate-700 hover:text-white':'text-slate-600 hover:bg-white hover:text-slate-900 hover:shadow-sm'}`}>{l}</button>
                 ))}
               </div>
             )}
-            <button onClick={()=>setExcludeCurrentMonth(p=>!p)}
+            {full && <button onClick={()=>setExcludeCurrentMonth(p=>!p)}
               title="חלק מהלקוחות מתחייבים רק בסוף/תחילת חודש, אז החודש הנוכחי בדרך כלל חסר. כשמופעל, האפליקציה מתעלמת מהחודש האחרון בחישובי ממוצע/מגמה/תחזית/נטישה (אבל עדיין מציגה אותו בטבלאות וגרפים)."
               className={`flex items-center gap-2 px-2.5 sm:px-3 py-2 rounded-xl text-xs font-medium border transition-colors ${excludeCurrentMonth?(isDarkMode?'bg-orange-500/10 border-orange-500/30 text-orange-300':'bg-orange-50 border-orange-200 text-orange-700'):(isDarkMode?'border-slate-700 text-slate-500 hover:text-slate-300':'border-slate-200 text-slate-400 hover:text-slate-600')}`}>
               <Calendar className="w-3.5 h-3.5 shrink-0"/>
@@ -8949,7 +8986,7 @@ const App = () => {
               <div className={`relative w-7 h-4 rounded-full shrink-0 transition-colors ${excludeCurrentMonth?'bg-orange-500':(isDarkMode?'bg-slate-600':'bg-slate-300')}`}>
                 <div className={`absolute top-0.5 w-3 h-3 rounded-full bg-white transition-transform ${excludeCurrentMonth?'translate-x-0.5':'translate-x-3.5'}`}/>
               </div>
-            </button>
+            </button>}
             {/* One menu for the rarely-used controls: theme, notifications, settings, backup */}
             <div className="relative">
               <button type="button" onClick={()=>setHeaderMenuOpen(p=>!p)} aria-expanded={headerMenuOpen} aria-label="עוד — מצב כהה, התראות, הגדרות"
@@ -8966,19 +9003,19 @@ const App = () => {
                       className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-right ${isDarkMode?'text-slate-200 hover:bg-slate-700':'text-slate-700 hover:bg-slate-50'}`}>
                       {isDarkMode?<Sun className="w-4 h-4"/>:<Moon className="w-4 h-4"/>}{isDarkMode?'מצב בהיר':'מצב כהה'}
                     </button>
-                    <button role="menuitem" type="button" onClick={()=>{setSettingsOpen(true); setHeaderMenuOpen(false);}}
+                    {full && <button role="menuitem" type="button" onClick={()=>{setSettingsOpen(true); setHeaderMenuOpen(false);}}
                       className={`w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-right ${isDarkMode?'text-slate-200 hover:bg-slate-700':'text-slate-700 hover:bg-slate-50'}`}>
                       <Settings className="w-4 h-4"/>הגדרות ושערי מטבע
                       {!apiKey && <span className={`mr-auto whitespace-nowrap text-[11px] font-semibold px-1.5 py-0.5 rounded ${isDarkMode?'bg-orange-500/15 text-orange-300':'bg-orange-50 text-orange-800'}`}>חסר מפתח AI</span>}
-                    </button>
-                    <button role="menuitem" type="button" onClick={()=>{setChatOpen(true); setHeaderMenuOpen(false);}}
+                    </button>}
+                    {full && <button role="menuitem" type="button" onClick={()=>{setChatOpen(true); setHeaderMenuOpen(false);}}
                       className={`md:hidden w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-right ${isDarkMode?'text-slate-200 hover:bg-slate-700':'text-slate-700 hover:bg-slate-50'}`}>
                       <MessageSquare className="w-4 h-4"/>צ'אט AI — שאל על הנתונים
-                    </button>
-                    <button role="menuitem" type="button" onClick={()=>{generateAI(); setHeaderMenuOpen(false);}}
+                    </button>}
+                    {full && <button role="menuitem" type="button" onClick={()=>{generateAI(); setHeaderMenuOpen(false);}}
                       className={`sm:hidden w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-right ${isDarkMode?'text-slate-200 hover:bg-slate-700':'text-slate-700 hover:bg-slate-50'}`}>
                       <Sparkles className="w-4 h-4"/>תובנות AI
-                    </button>
+                    </button>}
                     <button role="menuitem" type="button" onClick={()=>{window.dispatchEvent(new Event('bizdata:open-account')); setHeaderMenuOpen(false);}}
                       className={`md:hidden w-full flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm text-right ${isDarkMode?'text-slate-200 hover:bg-slate-700':'text-slate-700 hover:bg-slate-50'}`}>
                       <span className="w-4 h-4 flex items-center justify-center"><span className="w-2.5 h-2.5 rounded-full" style={{background:saveDot.color}}/></span>{saveDot.label} · חשבון
@@ -9044,13 +9081,14 @@ const App = () => {
           {/* Procurement Planning */}
           {(activeTab==='procurement' || procMounted) && (
             <div style={activeTab==='procurement' ? undefined : { display:'none' }}>
-            <ProcurementPageMemo sharedSalesLines={procSalesLinesRaw} cardRequest={cardReq} isVisible={activeTab==='procurement'} onShowPage={()=>setActiveTab('procurement')} requestedView={procView} onRequestedViewHandled={()=>setProcView(null)} syncRequest={syncRequest} onSyncRequestHandled={()=>setSyncRequest(null)} onSyncDone={(at)=>{ setLastSyncAt(at); reloadItemsExtra(); }} onSalesLinesChange={setProcSalesLines} onCustomersChange={setPriorityCustomers} salesData={salesFileData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
+            <ProcurementPageMemo onOpenWarehouses={openWarehouses} sharedSalesLines={procSalesLinesRaw} cardRequest={cardReq} isVisible={activeTab==='procurement'} onShowPage={()=>setActiveTab('procurement')} requestedView={procView} onRequestedViewHandled={()=>setProcView(null)} syncRequest={syncRequest} onSyncRequestHandled={()=>setSyncRequest(null)} onSyncDone={(at)=>{ setLastSyncAt(at); reloadItemsExtra(); }} onSalesLinesChange={setProcSalesLines} onCustomersChange={setPriorityCustomers} salesData={salesFileData} suppliersData={suppliersData} onOpenSupplierAnalytics={()=>setActiveTab('suppliers')} isDarkMode={isDarkMode} apiKey={apiKey} costMap={costMap} setCostMap={setCostMap} currencyMap={currencyMap} setCurrencyMap={setCurrencyMap} exchangeRates={exchangeRates} jumpTo={procurementJumpTo} onJumpToSales={jumpToSales} excludeCurrentMonth={excludeCurrentMonth} otherSources={otherSources} />
             </div>
           )}
 
           {/* Summary */}
           {activeTab==='stockcount' && <StockCountPage isDarkMode={isDarkMode}/>}
           {activeTab==='clothing' && <ClothingPage isDarkMode={isDarkMode}/>}
+          {activeTab==='warehouses' && <GadishPage isDarkMode={isDarkMode} full={full} salesAvgDaily={gadishAvgDaily} costOf={full ? gadishCostOf : null} onOpenCard={full ? openProductCard : null}/>}
 
           {activeTab==='summary' && (
             summaryData ? (

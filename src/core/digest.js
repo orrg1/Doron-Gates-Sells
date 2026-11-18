@@ -3,6 +3,7 @@
 // in the email match the website.
 import { mergeLinesIntoMonthly, detectOutliers, saleLineId, supplierLeadTimes, matchShipSupplier, shipmentStage, daysBetween, stockTimelines, stockoutSummary,
   purchasePriceHistory, priceIncreases, priceCheck, linkShipmentsToPOs, returnsAnalysis, productStartDates, inactiveSkusOf, withShipMarks, withShipSups, applyCardNames, DAY_MS, isoToDisplay } from './data.js';
+import { gadishBringList } from './warehouse.js';
 import { computeProducts, enrichOrders, overdueByProductOf, incomingMapOf, supplierConcentrationOf, makeLeadFor } from './procModel.js';
 
 // Items that sell but whose stock + incoming is well beyond the plan's need.
@@ -234,6 +235,12 @@ export const buildDigest = ({ app = {}, sets = {} }, { now = Date.now(), withDet
       ships: delayed.map(s => ({ id: s.id, cont: s.cont, file: s.file || '', sup: s.sup, arr: s.arr, from: s.change?.from, delayDays: s.delayDays })),
     },
     week, productsUp: productMoves.up.slice(0, 10), productsDown: productMoves.down.slice(0, 6), returnSpikes,
+    // second warehouse (גדיש): what to bring to the main one — the main has < N days of sales and גדיש has some
+    gadishBring: (() => {
+      const g = app.whGadish || {}; if (!Object.keys(g).length) return [];
+      const avgDaily = {}; productsAll.forEach(p => { if (p.sku && p.avgMonthly > 0) avgDaily[p.sku] = p.avgMonthly / 30.4; });
+      return gadishBringList({ gadish: g, stock: app.procurementStock || {}, names, avgDaily, days: Number(app.whGadishDays) || 14 });
+    })(),
     // the website's AI assistant reads these (the email never asks for them)
     ...(withDetail ? { detail: {
       products: productsAll.map(p => ({ sku: p.sku || '', name: p.name, supplier: p.supplier || '', abc: p.abc || '', status: p.status, inactive: !!p.inactive, ownMade: !!p.ownMade,
@@ -355,7 +362,7 @@ export const pickMorningAlerts = (d, state = {}, snooze = {}, { now = Date.now()
     .sort((a, b) => (b.newCount > 0) - (a.newCount > 0) || a.minCover - b.minCover || b.items.length - a.items.length);
   return { current, buy, make, bySupplier, ownMadeDays, resolved, snoozedCount: snoozed.length, nextState: { items, lastSent: state.lastSent || null } };
 };
-export const renderMorningHtml = (m, ships = [], { siteUrl }) => {
+export const renderMorningHtml = (m, ships = [], { siteUrl, gadish = [] }) => {
   const row = (cells) => `<tr>${cells.map(c => `<td align="right" style="padding:6px;border-bottom:1px solid #f1f5f9;font-size:13px;vertical-align:top">${c}</td>`).join('')}</tr>`;
   const head = (cells) => `<tr style="background:#f1f5f9;color:#475569">${cells.map(c => `<th align="right" style="padding:6px;font-size:12px;font-weight:600">${esc(c)}</th>`).join('')}</tr>`;
   const tag = (x) => x.isNew ? '<span style="background:#C8322B;color:#fff;border-radius:4px;padding:1px 6px;font-size:11px;font-weight:bold">חדש</span> '
@@ -385,6 +392,8 @@ export const renderMorningHtml = (m, ships = [], { siteUrl }) => {
   ${make.length ? `<tr><td style="padding:14px 18px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 4px;font-size:15px;color:#475569">לייצור — פחות דחוף</h2>
     <p style="margin:0 0 8px;font-size:12px;color:#64748b">ייצור עצמי שנשאר לו מלאי לפחות מ-${m.ownMadeDays || 14} יום (או שנגמר).</p>
     <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${cols('לייצר')}${make.slice(0, 25).map(x => itemRow(x, 'לייצר')).join('')}</table></td></tr>` : ''}
+  ${gadish.length ? `<tr><td style="padding:14px 18px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 8px;font-size:15px;color:#0f172a">להביא מגדיש למגדל העמק (${gadish.length})</h2>
+    <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(['מוצר', 'במגדל העמק', 'בגדיש', 'להביא'])}${gadish.slice(0, 25).map(x => row([`<b>${prodLink(siteUrl, x.n || x.k, x.k)}</b><br><span style="color:#94a3b8;font-size:11px">${esc(x.k)}${x.perDay ? ` · מספיק לכ-${x.coverDays} ימים` : ''}</span>`, Math.round(x.main * 100) / 100, Math.round(x.gadish * 100) / 100, `<b>${Math.round(x.qty * 100) / 100}</b>`])).join('')}</table></td></tr>` : ''}
   ${ships.length ? `<tr><td style="padding:14px 18px;border-top:1px solid #e2e8f0"><h2 style="margin:0 0 8px;font-size:15px;color:#0f172a">משלוחים שנדחו (${ships.length})</h2>
     <table width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse">${head(['מכולה', 'ספק', 'היה', 'עכשיו', 'דחייה'])}${shipRows.join('')}</table></td></tr>` : ''}
   <tr><td style="padding:12px 18px;border-top:1px solid #e2e8f0"><a href="${esc(siteUrl)}" style="color:#1F5FBF;font-size:13px">פתח באתר ←</a>

@@ -1,6 +1,6 @@
 import React, { useEffect, useState } from 'react';
 import App from './App.jsx';
-import { supabase, hydrate, subscribeStatus, flushAll, stopSync } from './cloud.js';
+import { supabase, hydrate, subscribeStatus, flushAll, stopSync, AREA_LABEL } from './cloud.js';
 
 // Sign-in with Google → check the email is allowed → pull the server data into
 // this browser → mount the app. "Local mode" keeps the old browser-only behaviour.
@@ -22,7 +22,21 @@ const GoogleIcon = () => (
   <svg width="18" height="18" viewBox="0 0 48 48" aria-hidden="true"><path fill="#FFC107" d="M43.6 20.5H42V20H24v8h11.3C33.7 32.7 29.3 36 24 36c-6.6 0-12-5.4-12-12s5.4-12 12-12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34.1 6.1 29.3 4 24 4 12.9 4 4 12.9 4 24s8.9 20 20 20 20-8.9 20-20c0-1.3-.1-2.4-.4-3.5z"/><path fill="#FF3D00" d="M6.3 14.7l6.6 4.8C14.7 15.1 19 12 24 12c3.1 0 5.8 1.2 7.9 3.1l5.7-5.7C34.1 6.1 29.3 4 24 4 16.3 4 9.7 8.3 6.3 14.7z"/><path fill="#4CAF50" d="M24 44c5.2 0 9.9-2 13.4-5.2l-6.2-5.2C29.2 35.1 26.7 36 24 36c-5.3 0-9.7-3.3-11.3-8l-6.5 5C9.5 39.6 16.2 44 24 44z"/><path fill="#1976D2" d="M43.6 20.5H42V20H24v8h11.3c-.8 2.2-2.2 4.2-4.1 5.6l6.2 5.2C37 39.2 44 34 44 24c0-1.3-.1-2.4-.4-3.5z"/></svg>
 );
 
-function CloudBadge({ email, isAdmin, onSignOut }) {
+// "גישה מלאה" or a set of screens
+function AreaPicker({ value, onChange, d, label = 'גישה:' }) {
+  const areas = Array.isArray(value) ? value : null;
+  const toggle = (a) => { const cur = areas || []; const next = cur.includes(a) ? cur.filter(x => x !== a) : [...cur, a]; onChange(next.length ? next : null); };
+  const chip = (on) => `px-2 py-0.5 rounded-full border text-[11px] ${on ? 'bg-blue-600 border-blue-600 text-white' : d ? 'border-slate-600' : 'border-slate-300'}`;
+  return (
+    <div className="flex items-center gap-1 flex-wrap mt-1.5" role="group" aria-label={label}>
+      <span className="opacity-60 text-[11px]">{label}</span>
+      <button type="button" aria-pressed={!areas} onClick={() => onChange(null)} className={chip(!areas)}>מלאה</button>
+      {Object.entries(AREA_LABEL).map(([a, l]) => <button key={a} type="button" aria-pressed={!!areas?.includes(a)} onClick={() => toggle(a)} className={chip(!!areas?.includes(a))}>{l}</button>)}
+    </div>
+  );
+}
+
+function CloudBadge({ email, isAdmin, access = { full: true }, onSignOut }) {
   const [st, setSt] = useState({ state: 'off' });
   const [open, setOpen] = useState(false);
   const [users, setUsers] = useState(null);
@@ -41,12 +55,15 @@ function CloudBadge({ email, isAdmin, onSignOut }) {
     window.addEventListener('beforeunload', warn); document.addEventListener('visibilitychange', hide);
     return () => { window.removeEventListener('beforeunload', warn); document.removeEventListener('visibilitychange', hide); };
   }, [st.pending]);
-  const loadUsers = async () => { const { data, error } = await supabase.from('allowed_users').select('email,role').order('email'); if (error) setErr(error.message); else setUsers(data); };
+  const loadUsers = async () => { const { data, error } = await supabase.from('allowed_users').select('email,role,areas').order('email'); if (error) setErr(error.message); else setUsers(data); };
+  // what a user may see: null = everything; ['gadish', …] = only those screens (enforced by the server)
+  const setAreas = async (em, areas) => { setErr(''); const { error } = await supabase.from('allowed_users').update({ areas: areas && areas.length ? areas : null }).eq('email', em); if (error) setErr(error.message); else loadUsers(); };
+  const [newAreas, setNewAreas] = useState(null);
   const addUser = async (e) => {
     e.preventDefault(); setErr('');
     const em = newEmail.trim().toLowerCase(); if (!/^[^@\s]+@[^@\s]+\.[^@\s]+$/.test(em)) { setErr('כתובת מייל לא תקינה'); return; }
-    const { error } = await supabase.from('allowed_users').insert({ email: em, role: 'member' });
-    if (error) setErr(error.message); else { setNewEmail(''); loadUsers(); }
+    const { error } = await supabase.from('allowed_users').insert({ email: em, role: 'member', areas: newAreas && newAreas.length ? newAreas : null });
+    if (error) setErr(error.message); else { setNewEmail(''); setNewAreas(null); loadUsers(); }
   };
   const removeUser = async (em) => { if (em === email) return; const { error } = await supabase.from('allowed_users').delete().eq('email', em); if (error) setErr(error.message); else loadUsers(); };
   const label = st.state === 'saving' ? 'שומר לשרת…' : st.state === 'error' ? 'שמירה לשרת נכשלה — ינסה שוב' : st.state === 'saved' ? `נשמר בשרת${st.lastSaved ? ' · ' + new Date(st.lastSaved).toLocaleTimeString('he-IL', { hour: '2-digit', minute: '2-digit' }) : ''}` : 'מחובר';
@@ -64,7 +81,7 @@ function CloudBadge({ email, isAdmin, onSignOut }) {
         <div className={`absolute bottom-12 left-0 w-80 max-md:fixed max-md:top-16 max-md:bottom-auto max-md:left-3 max-md:right-3 max-md:w-auto z-50 rounded-xl border shadow-2xl p-4 space-y-3 text-sm ${d ? 'bg-slate-800 border-slate-700 text-slate-200' : 'bg-white border-slate-200 text-slate-700'}`}>
           <div>
             <p className="font-bold">{email}</p>
-            <p className="text-xs opacity-70">הנתונים נשמרים בשרת ומסונכרנים בין המחשבים</p>
+            <p className="text-xs opacity-70">{access.full ? 'הנתונים נשמרים בשרת ומסונכרנים בין המחשבים' : `גישה: ${(access.areas || []).map(a => AREA_LABEL[a] || a).join(', ')}`}</p>
             <p className="md:hidden text-xs mt-1 flex items-center gap-1.5"><span className="w-2 h-2 rounded-full" style={{ background: dot }} />{label}</p>
             {st.state === 'error' && <p className="text-xs mt-1 font-semibold text-red-600">{st.message}</p>}
           </div>
@@ -72,18 +89,23 @@ function CloudBadge({ email, isAdmin, onSignOut }) {
             <div className="space-y-2">
               <p className="font-semibold text-xs">מי יכול להיכנס</p>
               {users.map(u => (
-                <div key={u.email} className="flex items-center gap-2 text-xs">
-                  <span className="flex-1 truncate">{u.email}</span>
-                  <span className="opacity-60">{u.role === 'admin' ? 'מנהל' : 'משתמש'}</span>
-                  {u.email !== email && <button type="button" onClick={() => removeUser(u.email)} className="text-red-600 font-semibold hover:underline">הסר</button>}
+                <div key={u.email} className={`text-xs rounded-lg p-2 border ${d ? 'border-slate-700' : 'border-slate-200'}`}>
+                  <div className="flex items-center gap-2">
+                    <span className="flex-1 truncate font-semibold" dir="ltr">{u.email}</span>
+                    <span className="opacity-60">{u.role === 'admin' ? 'מנהל' : !u.areas ? 'גישה מלאה' : 'גישה חלקית'}</span>
+                    {u.email !== email && <button type="button" onClick={() => removeUser(u.email)} className="text-red-600 font-semibold hover:underline">הסר</button>}
+                  </div>
+                  {u.role !== 'admin' && <AreaPicker value={u.areas} onChange={(a) => setAreas(u.email, a)} d={d} />}
                 </div>
               ))}
+              <p className="text-[11px] opacity-70">משתמש עם גישה חלקית רואה רק את המסכים שסומנו — והשרת לא נותן לו שום נתון אחר (מכירות, מחירים, לקוחות…).</p>
               <form onSubmit={addUser} className="flex gap-2">
                 <label htmlFor="new-user-email" className="sr-only">מייל להוספה</label>
                 <input id="new-user-email" type="email" dir="ltr" value={newEmail} onChange={e => setNewEmail(e.target.value)} placeholder="name@gmail.com"
                   className={`flex-1 px-2 py-1.5 rounded-lg border text-xs ${d ? 'bg-slate-900 border-slate-600' : 'border-slate-300'}`} />
                 <button type="submit" className="px-3 py-1.5 rounded-lg bg-blue-600 text-white text-xs font-semibold">הוסף</button>
               </form>
+              <AreaPicker value={newAreas} onChange={setNewAreas} d={d} label="למשתמש החדש:" />
               {err && <p className="text-xs text-red-600">{err}</p>}
             </div>
           )}
@@ -127,6 +149,7 @@ export default function AuthGate() {
   const [phase, setPhase] = useState('checking'); // checking | login | denied | hydrating | ready | error
   const [email, setEmail] = useState('');
   const [isAdmin, setIsAdmin] = useState(false);
+  const [access, setAccess] = useState({ full: true, areas: [] });
   const [progress, setProgress] = useState('');
   const [error, setError] = useState('');
 
@@ -140,12 +163,14 @@ export default function AuthGate() {
       const em = (session.user?.email || '').toLowerCase();
       setEmail(em);
       try {
-        const { data, error: e } = await supabase.from('allowed_users').select('role').eq('email', em).maybeSingle();
+        const { data, error: e } = await supabase.from('allowed_users').select('role,areas').eq('email', em).maybeSingle();
         if (e) throw e;
         if (!data) { setPhase('denied'); return; }
         setIsAdmin(data.role === 'admin');
+        const limited = data.role !== 'admin' && Array.isArray(data.areas) && data.areas.length > 0;
+        setAccess(limited ? { full: false, areas: data.areas } : { full: true, areas: [] });
         setPhase('hydrating');
-        const res = await hydrate(em, setProgress);
+        const res = await hydrate(em, setProgress, { areas: limited ? data.areas : null });
         if (res.migrated) setProgress('');
         setPhase('ready');
       } catch (err) { setError(err.message || String(err)); setPhase('error'); }
@@ -164,7 +189,7 @@ export default function AuthGate() {
     await flushAll(); stopSync(); await supabase.auth.signOut(); window.location.reload();
   };
 
-  if (phase === 'ready') return (<><App /><CloudBadge email={email} isAdmin={isAdmin} onSignOut={signOut} /><NewDataNotice /></>);
+  if (phase === 'ready') return (<><App access={access} /><CloudBadge email={email} isAdmin={isAdmin} access={access} onSignOut={signOut} />{access.full && <NewDataNotice />}</>);
 
   if (phase === 'checking' || phase === 'hydrating') return (
     <Shell>

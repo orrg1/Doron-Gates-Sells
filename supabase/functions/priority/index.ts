@@ -92,8 +92,10 @@ Deno.serve(async (req) => {
   const { data: u, error: ue } = await admin.auth.getUser(jwt);
   const email = (u?.user?.email || '').toLowerCase();
   if (ue || !email) return json({ error: 'not signed in' }, 401);
-  const { data: allowed } = await admin.from('allowed_users').select('email').eq('email', email).maybeSingle();
+  const { data: allowed } = await admin.from('allowed_users').select('email,role,areas').eq('email', email).maybeSingle();
   if (!allowed) return json({ error: 'user not allowed' }, 403);
+  // users with access to some screens only (areas) never read Priority directly
+  if (allowed.role !== 'admin' && Array.isArray(allowed.areas) && allowed.areas.length) return json({ error: 'no access' }, 403);
 
   if (!PAT) return json({ error: 'PRIORITY_PAT secret is not set on the server' }, 500);
 
